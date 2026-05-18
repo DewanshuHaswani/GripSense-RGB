@@ -1,8 +1,22 @@
-# GRIP ESTIMATION: RGB Only
+# GripSense RGB
 
-Grip Lab is a browser-based prototype for estimating hand-object grip quality from a live RGB webcam. It tracks hand landmarks, infers a nearby object region, estimates visual grip stability, and marks likely grip points on the object.
+![GripSense RGB banner](public/assets/gripsense-rgb-banner.png)
+
+**GripSense RGB** is a browser-based prototype for estimating hand-object grip quality from a live RGB webcam. It tracks hand landmarks, infers a nearby object region, estimates visual grip stability, and marks likely grip points on the object.
 
 Important limitation: this app does not measure physical force. The grip percentage is a computer-vision estimate based on visible geometry and motion. True grip force needs pressure sensors, instrumented objects, a smart glove, or calibrated depth/force hardware.
+
+## License And Attribution
+
+GripSense RGB is open source under **AGPL-3.0-or-later** with additional attribution terms.
+
+If you publish, deploy, demonstrate, redistribute, or modify this project, preserve a reasonable attribution notice with the repository URL:
+
+```text
+Based on GripSense RGB: https://github.com/DewanshuHaswani/GripSense-RGB
+```
+
+See [LICENSE](LICENSE), [ADDITIONAL-TERMS.md](ADDITIONAL-TERMS.md), [NOTICE](NOTICE), and [CITATION.cff](CITATION.cff).
 
 ## How to Run
 
