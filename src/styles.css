@@ -92,6 +92,7 @@ button {
 .permission-panel,
 .analysis-rail,
 .motion-panel,
+.trainer-panel,
 .grip-points {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -552,6 +553,7 @@ h2 {
 }
 
 .motion-panel,
+.trainer-panel,
 .grip-points,
 .diagnostics-panel {
   display: grid;
@@ -568,6 +570,104 @@ h2 {
 
 .motion-panel strong {
   text-transform: capitalize;
+}
+
+.object-name-field {
+  display: grid;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.object-name-field input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  color: #e8edf4;
+  background: rgba(2, 6, 12, 0.36);
+  padding: 0 11px;
+  outline: none;
+}
+
+.object-name-field input:focus {
+  border-color: rgba(103, 232, 249, 0.62);
+  box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.12);
+}
+
+.trainer-actions {
+  display: grid;
+  grid-template-columns: 1fr 0.86fr 0.64fr;
+  gap: 8px;
+}
+
+.trainer-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  color: #dbeafe;
+  background: rgba(148, 163, 184, 0.12);
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.trainer-actions button:hover {
+  color: #071018;
+  background: var(--cyan);
+}
+
+.sample-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.sample-strip img {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(2, 6, 12, 0.36);
+}
+
+.detected-object,
+.profile-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.09);
+}
+
+.detected-object.matched {
+  color: #dcfce7;
+  background: rgba(34, 197, 94, 0.15);
+}
+
+.detected-object span,
+.profile-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detected-object strong,
+.profile-row strong {
+  color: #f8fafc;
+}
+
+.profile-list {
+  display: grid;
+  gap: 8px;
 }
 
 .slip-track span {

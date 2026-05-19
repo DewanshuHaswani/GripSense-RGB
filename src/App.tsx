@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  Box,
   Camera,
   Crosshair,
   Eye,
   FlipHorizontal2,
   Hand,
+  Images,
   Minus,
   Pause,
   Play,
   Plus,
   RotateCcw,
   ShieldCheck,
+  Sparkles,
   Target
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
@@ -39,6 +42,30 @@ const INITIAL_MODEL_STATUS: VisionModelStatus = {
 
 const CALIBRATION_STORAGE_KEY = 'grip-lab-calibration-profiles-v2';
 const ALGORITHM_VERSION_STORAGE_KEY = 'grip-lab-algorithm-version';
+const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v1';
+const DESCRIPTOR_SIZE = 32;
+
+type ObjectTrainingSample = {
+  id: string;
+  imageDataUrl: string;
+  descriptor: number[];
+  createdAt: number;
+};
+
+type ObjectProfile = {
+  id: string;
+  name: string;
+  samples: ObjectTrainingSample[];
+  descriptor: number[];
+  trainedAt: number;
+};
+
+type ObjectDetection = {
+  profileId: string;
+  name: string;
+  score: number;
+  matched: boolean;
+} | null;
 
 const METRIC_INFO = {
   confidence: 'How much the app trusts the object lock and tracking signal in this frame.',
@@ -96,6 +123,8 @@ export default function App() {
   const stabilizerRef = useRef(new TrackingStabilizer());
   const algorithmVersionRef = useRef<AlgorithmVersion>(readInitialAlgorithmVersion());
   const calibrationProfilesRef = useRef<GripCalibrationProfiles>({});
+  const objectProfilesRef = useRef<ObjectProfile[]>([]);
+  const lastObjectMatchRef = useRef(0);
   const calibrationCaptureRef = useRef<{
     active: boolean;
     kind: 'strong' | 'weak';
@@ -113,10 +142,18 @@ export default function App() {
   const [hasCalibration, setHasCalibration] = useState(false);
   const [calibrationKind, setCalibrationKind] = useState<'strong' | 'weak'>('strong');
   const [algorithmVersion, setAlgorithmVersion] = useState<AlgorithmVersion>(() => algorithmVersionRef.current);
+  const [objectName, setObjectName] = useState('');
+  const [trainingSamples, setTrainingSamples] = useState<ObjectTrainingSample[]>([]);
+  const [objectProfiles, setObjectProfiles] = useState<ObjectProfile[]>([]);
+  const [objectDetection, setObjectDetection] = useState<ObjectDetection>(null);
+  const [trainingStatus, setTrainingStatus] = useState('Lock the object, then capture 2 or more masked views.');
 
   useEffect(() => {
     calibrationProfilesRef.current = loadCalibrationProfiles();
     setHasCalibration(hasAnyCalibration(calibrationProfilesRef.current));
+    const profiles = loadObjectProfiles();
+    objectProfilesRef.current = profiles;
+    setObjectProfiles(profiles);
   }, []);
 
   useEffect(() => {
@@ -296,6 +333,10 @@ export default function App() {
         updateCalibrationCapture(frameAnalysis, timestamp);
         previousObjectRef.current = object;
         previousPalmRef.current = frameAnalysis.palmCenter;
+        if (timestamp - lastObjectMatchRef.current > 420) {
+          lastObjectMatchRef.current = timestamp;
+          setObjectDetection(matchObjectProfile(video, object, objectProfilesRef.current));
+        }
         setAnalysis(frameAnalysis);
       }
 
@@ -428,6 +469,62 @@ export default function App() {
     [algorithmVersion]
   );
 
+  const captureObjectTrainingView = useCallback(() => {
+    const video = videoRef.current;
+    const object = previousObjectRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight || !object?.locked) {
+      setTrainingStatus('Lock the object first, then capture the masked crop.');
+      return;
+    }
+
+    const descriptor = describeObjectPatch(video, object);
+    const imageDataUrl = createObjectThumbnail(video, object);
+    if (!descriptor || !imageDataUrl) {
+      setTrainingStatus('Could not capture this view. Keep the object fully visible and try again.');
+      return;
+    }
+
+    const sample: ObjectTrainingSample = {
+      id: crypto.randomUUID(),
+      imageDataUrl,
+      descriptor,
+      createdAt: Date.now()
+    };
+    setTrainingSamples((current) => [...current, sample].slice(-8));
+    setTrainingStatus('Captured masked object view. Add another angle or train the profile.');
+  }, []);
+
+  const trainObjectProfile = useCallback(() => {
+    const name = objectName.trim();
+    if (!name) {
+      setTrainingStatus('Give the object a name before training.');
+      return;
+    }
+    if (trainingSamples.length < 2) {
+      setTrainingStatus('Capture at least 2 masked views from different angles.');
+      return;
+    }
+
+    const profile: ObjectProfile = {
+      id: crypto.randomUUID(),
+      name,
+      samples: trainingSamples,
+      descriptor: averageDescriptor(trainingSamples.map((sample) => sample.descriptor)),
+      trainedAt: Date.now()
+    };
+    const profiles = [profile, ...objectProfiles.filter((current) => current.name.toLowerCase() !== name.toLowerCase())].slice(0, 6);
+    objectProfilesRef.current = profiles;
+    setObjectProfiles(profiles);
+    saveObjectProfiles(profiles);
+    setTrainingSamples([]);
+    setTrainingStatus(`${name} trained successfully. Hold it in frame to confirm detection.`);
+  }, [objectName, objectProfiles, trainingSamples]);
+
+  const clearTrainingSamples = useCallback(() => {
+    setTrainingSamples([]);
+    setTrainingStatus('Training views cleared. Capture new masked views.');
+  }, []);
+
   return (
     <main className="app-shell">
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
@@ -447,7 +544,7 @@ export default function App() {
             <span className="brand-mark">
               <Hand size={18} />
             </span>
-            <span>Grip Lab</span>
+            <span>GripSense RGB</span>
           </div>
           <div className="toolbar" aria-label="Camera controls">
             <div className="version-switch" aria-label="Algorithm version">
@@ -603,6 +700,64 @@ export default function App() {
           <Metric label="Thumb" value={analysis.thumbOpposition} info={METRIC_INFO.thumb} />
           <Metric label="Enclosure" value={analysis.enclosureScore} info={METRIC_INFO.enclosure} />
           <Metric label="Coupling" value={analysis.motionCoupling} info={METRIC_INFO.coupling} />
+        </div>
+
+        <div className="trainer-panel">
+          <div className="motion-header">
+            <Images size={18} />
+            <span>Object trainer</span>
+          </div>
+          <label className="object-name-field">
+            <span>Object name</span>
+            <input
+              value={objectName}
+              onChange={(event) => setObjectName(event.target.value)}
+              placeholder="Phone, mug, remote..."
+              maxLength={36}
+            />
+          </label>
+          <div className="trainer-actions">
+            <button type="button" onClick={captureObjectTrainingView}>
+              <Camera size={16} />
+              Capture view
+            </button>
+            <button type="button" onClick={trainObjectProfile}>
+              <Sparkles size={16} />
+              Train
+            </button>
+            <button type="button" onClick={clearTrainingSamples}>
+              Clear
+            </button>
+          </div>
+          <p className="diagnostic-copy">{trainingStatus}</p>
+          {trainingSamples.length > 0 && (
+            <div className="sample-strip" aria-label="Captured object views">
+              {trainingSamples.map((sample, index) => (
+                <img src={sample.imageDataUrl} alt={`Captured object angle ${index + 1}`} key={sample.id} />
+              ))}
+            </div>
+          )}
+          <div className={objectDetection?.matched ? 'detected-object matched' : 'detected-object'}>
+            <Box size={17} />
+            <span>
+              {objectDetection?.matched
+                ? `Object detected: ${objectDetection.name}`
+                : objectProfiles.length
+                  ? 'No trained object detected'
+                  : 'No trained object yet'}
+            </span>
+            <strong>{objectDetection ? `${Math.round(objectDetection.score * 100)}%` : '--'}</strong>
+          </div>
+          {objectProfiles.length > 0 && (
+            <div className="profile-list">
+              {objectProfiles.map((profile) => (
+                <div className="profile-row" key={profile.id}>
+                  <span>{profile.name}</span>
+                  <strong>{profile.samples.length} views</strong>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="motion-panel">
@@ -799,6 +954,105 @@ function average(values: number[]) {
   return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
 }
 
+function describeObjectPatch(video: HTMLVideoElement, object: ObjectRegion) {
+  const canvas = renderObjectPatch(video, object, DESCRIPTOR_SIZE);
+  if (!canvas) return null;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+  const { data } = context.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE);
+  const bins = new Array(16).fill(0);
+  let edgeTotal = 0;
+  let samples = 0;
+
+  for (let y = 1; y < DESCRIPTOR_SIZE - 1; y += 1) {
+    for (let x = 1; x < DESCRIPTOR_SIZE - 1; x += 1) {
+      const index = (y * DESCRIPTOR_SIZE + x) * 4;
+      const alpha = data[index + 3];
+      if (alpha < 16) continue;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
+      const right = (y * DESCRIPTOR_SIZE + x + 1) * 4;
+      const down = ((y + 1) * DESCRIPTOR_SIZE + x) * 4;
+      const rightLum = data[right] * 0.2126 + data[right + 1] * 0.7152 + data[right + 2] * 0.0722;
+      const downLum = data[down] * 0.2126 + data[down + 1] * 0.7152 + data[down + 2] * 0.0722;
+      bins[Math.min(3, Math.floor(r / 64))] += 1;
+      bins[4 + Math.min(3, Math.floor(g / 64))] += 1;
+      bins[8 + Math.min(3, Math.floor(b / 64))] += 1;
+      bins[12 + Math.min(3, Math.floor(luminance / 64))] += 1;
+      edgeTotal += Math.abs(luminance - rightLum) + Math.abs(luminance - downLum);
+      samples += 1;
+    }
+  }
+
+  if (samples < 80) return null;
+  const normalizedBins = bins.map((value) => value / samples);
+  const aspect = Math.max(object.radiusX, object.radiusY) / Math.max(1, Math.min(object.radiusX, object.radiusY));
+  return [...normalizedBins, Math.min(1, edgeTotal / samples / 110), Math.min(1, aspect / 3)];
+}
+
+function createObjectThumbnail(video: HTMLVideoElement, object: ObjectRegion) {
+  const canvas = renderObjectPatch(video, object, 144);
+  return canvas?.toDataURL('image/jpeg', 0.82) ?? null;
+}
+
+function renderObjectPatch(video: HTMLVideoElement, object: ObjectRegion, size: number) {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+
+  const cropRadius = Math.max(object.radiusX, object.radiusY) * 1.35;
+  const sourceSize = Math.max(16, Math.min(cropRadius * 2, video.videoWidth, video.videoHeight));
+  const sourceX = Math.min(Math.max(0, object.center.x - sourceSize / 2), Math.max(0, video.videoWidth - sourceSize));
+  const sourceY = Math.min(Math.max(0, object.center.y - sourceSize / 2), Math.max(0, video.videoHeight - sourceSize));
+
+  context.clearRect(0, 0, size, size);
+  context.save();
+  context.beginPath();
+  context.ellipse(size / 2, size / 2, size * 0.38, size * 0.38, object.angle, 0, Math.PI * 2);
+  context.clip();
+  context.drawImage(video, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size);
+  context.restore();
+  return canvas;
+}
+
+function averageDescriptor(descriptors: number[][]) {
+  if (!descriptors.length) return [];
+  return descriptors[0].map((_value, index) => average(descriptors.map((descriptor) => descriptor[index] ?? 0)));
+}
+
+function matchObjectProfile(video: HTMLVideoElement, object: ObjectRegion | null, profiles: ObjectProfile[]): ObjectDetection {
+  if (!object?.locked || !profiles.length) return null;
+  const descriptor = describeObjectPatch(video, object);
+  if (!descriptor) return null;
+  const ranked = profiles
+    .map((profile) => {
+      const distance = descriptorDistance(descriptor, profile.descriptor);
+      const score = Math.max(0, 1 - distance * 1.9);
+      return {
+        profileId: profile.id,
+        name: profile.name,
+        score,
+        matched: score > 0.62
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+  return ranked[0] ?? null;
+}
+
+function descriptorDistance(a: number[], b: number[]) {
+  const length = Math.max(a.length, b.length, 1);
+  let total = 0;
+  for (let index = 0; index < length; index += 1) {
+    total += Math.abs((a[index] ?? 0) - (b[index] ?? 0));
+  }
+  return total / length;
+}
+
 function mostCommonMode(samples: GripCalibrationBaseline[]): GripMode {
   const counts = samples.reduce<Record<string, number>>((accumulator, sample) => {
     accumulator[sample.mode] = (accumulator[sample.mode] ?? 0) + 1;
@@ -831,6 +1085,24 @@ function saveAlgorithmVersion(version: AlgorithmVersion) {
     window.history.replaceState(null, '', url);
   } catch (error) {
     console.warn('Failed to save algorithm version', error);
+  }
+}
+
+function loadObjectProfiles(): ObjectProfile[] {
+  try {
+    const raw = window.localStorage.getItem(OBJECT_PROFILES_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as ObjectProfile[]) : [];
+  } catch (error) {
+    console.warn('Failed to load object profiles', error);
+    return [];
+  }
+}
+
+function saveObjectProfiles(profiles: ObjectProfile[]) {
+  try {
+    window.localStorage.setItem(OBJECT_PROFILES_STORAGE_KEY, JSON.stringify(profiles));
+  } catch (error) {
+    console.warn('Failed to save object profiles', error);
   }
 }
 

@@ -34,6 +34,21 @@ You can open either algorithm directly:
 
 The toolbar also has a `V1` / `V2` switch. Changing versions clears the object lock so the two algorithms can be compared cleanly.
 
+## Object Profile Training
+
+GripSense RGB can create a lightweight local object profile from the webcam:
+
+1. Start the camera.
+2. Click or drag over the object so the object lock/crop is centered.
+3. Use grow/shrink until the mask covers the object, not the hand/background.
+4. Enter an object name in **Object trainer**.
+5. Click **Capture view** from at least two angles.
+6. Click **Train**.
+
+The profile is stored in browser `localStorage`. It is not uploaded anywhere and it is not a heavy neural-network training job. The browser stores masked thumbnails plus compact visual descriptors for color, edge, and shape. During live tracking, the app compares the current locked object against saved profiles and shows `Object detected: <name>` with a match percentage when the profile matches.
+
+This improves object identity awareness: the grip model can tell whether the current lock resembles the object the user intended to grip, rather than only relying on generic object shape.
+
 For best results, record both calibration profiles:
 
 - **Strong**: hold the object firmly for about one second.
