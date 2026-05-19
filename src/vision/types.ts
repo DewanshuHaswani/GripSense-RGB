@@ -10,7 +10,7 @@ export type Landmark = Point & {
 
 export type MotionState = 'idle' | 'moving-with-hand' | 'slipping' | 'uncertain';
 
-export type GripGuidance = 'Strong grip' | 'Improve grip' | 'Reposition' | 'Object not locked';
+export type GripGuidance = 'Strong grip' | 'Improve grip' | 'Reposition' | 'Object not locked' | 'Object uncertain';
 
 export type AlgorithmVersion = 'v1' | 'v2';
 
@@ -97,6 +97,13 @@ export type GripDiagnostics = {
   }>;
 };
 
+export type ObjectIdentitySignal = {
+  hasProfiles: boolean;
+  score: number;
+  matched: boolean;
+  name: string | null;
+};
+
 export type GripAnalysis = {
   gripPercentage: number;
   confidence: number;
@@ -113,6 +120,10 @@ export type GripAnalysis = {
   handVelocity: Point;
   recommendedGripPoints: GripPoint[];
   objectLockQuality: number;
+  objectIdentityScore: number;
+  objectIdentityName: string | null;
+  objectIdentityMatched: boolean;
+  hasObjectProfiles: boolean;
   evidence: GripEvidence;
   calibrated: boolean;
   diagnostics: GripDiagnostics;

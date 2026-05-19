@@ -8,6 +8,7 @@ import type {
   GripPoint,
   GripState,
   Landmark,
+  ObjectIdentitySignal,
   ObjectRegion,
   Point
 } from './types';
@@ -40,6 +41,10 @@ const EMPTY_ANALYSIS: GripAnalysis = {
   handVelocity: { x: 0, y: 0 },
   recommendedGripPoints: [],
   objectLockQuality: 0,
+  objectIdentityScore: 0,
+  objectIdentityName: null,
+  objectIdentityMatched: false,
+  hasObjectProfiles: false,
   calibrated: false,
   evidence: {
     fingerCurlScore: 0,
@@ -91,9 +96,11 @@ export function analyzeGrip(
     calibrationBaseline?: GripCalibrationBaseline | null;
     weakCalibrationBaseline?: GripCalibrationBaseline | null;
     algorithmVersion?: AlgorithmVersion;
+    objectIdentity?: ObjectIdentitySignal;
   } = {}
 ): GripAnalysis {
   const algorithmVersion = options.algorithmVersion ?? 'v1';
+  const objectIdentity = options.objectIdentity ?? { hasProfiles: false, score: 0, matched: false, name: null };
   if (!hand || hand.length < 21) {
     return createEmptyAnalysis('No hand detected. Keep your hand inside the camera frame.');
   }
@@ -112,6 +119,10 @@ export function analyzeGrip(
       palmCenter: currentPalm,
       handVelocity,
       guidance: 'Object not locked',
+      objectIdentityScore: objectIdentity.score,
+      objectIdentityName: objectIdentity.name,
+      objectIdentityMatched: objectIdentity.matched,
+      hasObjectProfiles: objectIdentity.hasProfiles,
       diagnostics: {
         ...EMPTY_ANALYSIS.diagnostics,
         state: 'Hand only',
@@ -152,9 +163,13 @@ export function analyzeGrip(
       closureScore,
       palmCenter: currentPalm,
       handVelocity,
-      guidance: 'Object not locked',
-      objectLockQuality: 0,
-      diagnostics: {
+        guidance: 'Object not locked',
+        objectLockQuality: 0,
+        objectIdentityScore: objectIdentity.score,
+        objectIdentityName: objectIdentity.name,
+        objectIdentityMatched: objectIdentity.matched,
+        hasObjectProfiles: objectIdentity.hasProfiles,
+        diagnostics: {
         ...EMPTY_ANALYSIS.diagnostics,
         state: 'Hand only',
         recommendation: 'No object detected in the hand. Click an object to lock it if the camera missed it.',
@@ -189,7 +204,8 @@ export function analyzeGrip(
   const motionCoupling = moving ? clamp(1 - slipRisk) : 0.88;
   const calibration = calibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.calibrationBaseline ?? null);
   const weakCalibration = weakCalibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.weakCalibrationBaseline ?? null);
-  const objectReadiness = algorithmVersion === 'v2' ? v2ObjectReadiness(object, evidence) : 1;
+  const identityFactor = objectIdentityReadiness(objectIdentity, algorithmVersion);
+  const objectReadiness = algorithmVersion === 'v2' ? v2ObjectReadiness(object, evidence) * identityFactor : 1;
 
   const gripPercentage = Math.round(
     100 *
@@ -216,6 +232,7 @@ export function analyzeGrip(
           motionCoupling * 0.1 +
           closureScore * 0.08 +
           Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore) * 0.08 +
+          (objectIdentity.hasProfiles ? (objectIdentity.matched ? objectIdentity.score * 0.08 : -0.08) : 0) +
           (calibration.similarToBaseline ? 0.04 : 0) -
           (weakCalibration.similarToWeak ? 0.06 : 0)
       : evidence.objectLockQuality * 0.42 +
@@ -227,10 +244,12 @@ export function analyzeGrip(
           (weakCalibration.similarToWeak ? 0.05 : 0)
   );
   const motionState = !moving ? 'idle' : slipRisk > 0.45 ? 'slipping' : motionCoupling > 0.58 ? 'moving-with-hand' : 'uncertain';
-  const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState);
+  const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, algorithmVersion);
+  const objectUncertainGuidance =
+    evidence.objectLockQuality < 0.38 || identityBlocksStrongGrip(objectIdentity, algorithmVersion);
   const guidance =
-    state === 'Object uncertain' || evidence.objectLockQuality < 0.38
-      ? 'Reposition'
+    objectUncertainGuidance
+      ? 'Object uncertain'
       : calibratedGripPercentage >= 70 && slipRisk < 0.38
       ? 'Strong grip'
       : calibratedGripPercentage >= 44 || evidence.fingerCurlScore > 0.62 || Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore) > 0.58
@@ -244,7 +263,8 @@ export function analyzeGrip(
     gripPercentage,
     calibration.similarToBaseline,
     weakCalibration.similarToWeak,
-    algorithmVersion
+    algorithmVersion,
+    objectIdentity
   );
 
   return {
@@ -263,6 +283,10 @@ export function analyzeGrip(
     handVelocity,
     recommendedGripPoints: createRecommendedGripPoints(hand, object),
     objectLockQuality: evidence.objectLockQuality,
+    objectIdentityScore: objectIdentity.score,
+    objectIdentityName: objectIdentity.name,
+    objectIdentityMatched: objectIdentity.matched,
+    hasObjectProfiles: objectIdentity.hasProfiles,
     evidence,
     calibrated: calibration.similarToBaseline,
     diagnostics
@@ -513,16 +537,29 @@ function v2ObjectReadiness(object: ObjectRegion, evidence: GripEvidence) {
   );
 }
 
+function objectIdentityReadiness(identity: ObjectIdentitySignal, algorithmVersion: AlgorithmVersion) {
+  if (algorithmVersion !== 'v2' || !identity.hasProfiles) return 1;
+  if (identity.matched) return clamp(0.9 + identity.score * 0.12, 0.9, 1);
+  return 0;
+}
+
+function identityBlocksStrongGrip(identity: ObjectIdentitySignal, algorithmVersion: AlgorithmVersion) {
+  return algorithmVersion === 'v2' && identity.hasProfiles && !identity.matched;
+}
+
 function computeGripState(
   hand: Landmark[] | null,
   object: ObjectRegion | null,
   evidence: GripEvidence,
   gripPercentage: number,
-  motionState: GripAnalysis['motionState']
+  motionState: GripAnalysis['motionState'],
+  identity: ObjectIdentitySignal,
+  algorithmVersion: AlgorithmVersion
 ): GripState {
   if (!hand) return 'No hand';
   if (!object?.locked) return 'Hand only';
   if (evidence.objectLockQuality < 0.38) return 'Object uncertain';
+  if (identityBlocksStrongGrip(identity, algorithmVersion)) return 'Object uncertain';
   if (motionState === 'slipping') return 'Slip risk';
   if (gripPercentage >= 70) return 'Strong hold';
   if (gripPercentage >= 38) return 'Grip detected';
@@ -537,10 +574,13 @@ function createDiagnostics(
   rawGripPercentage: number,
   calibrated: boolean,
   weakMatched: boolean,
-  algorithmVersion: AlgorithmVersion
+  algorithmVersion: AlgorithmVersion,
+  identity: ObjectIdentitySignal
 ): GripDiagnostics {
   const objectIssue =
-    evidence.objectLockQuality < 0.38
+    identityBlocksStrongGrip(identity, algorithmVersion)
+      ? 'Trained object not found. Relock the intended object or train another profile.'
+      : evidence.objectLockQuality < 0.38
       ? 'Object lock is uncertain. Click or resize the object region.'
       : evidence.objectLockQuality < 0.62
         ? 'Object lock is usable but could be tighter.'
@@ -579,6 +619,16 @@ function createDiagnostics(
               label: 'Temporal lock',
               value: evidence.temporalLockScore,
               impact: evidence.temporalLockScore < 0.22 ? 'neutral' : 'positive'
+            } as const,
+            {
+              label: 'Object identity match',
+              value: identity.hasProfiles ? identity.score : 0,
+              impact: identity.hasProfiles ? (identity.matched ? 'positive' : 'negative') : 'neutral'
+            } as const,
+            {
+              label: 'Grip stability',
+              value: calibratedGripPercentage / 100,
+              impact: calibratedGripPercentage >= 44 ? 'positive' : 'negative'
             } as const
           ]
         : []),

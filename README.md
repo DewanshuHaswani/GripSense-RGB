@@ -34,20 +34,40 @@ You can open either algorithm directly:
 
 The toolbar also has a `V1` / `V2` switch. Changing versions clears the object lock so the two algorithms can be compared cleanly.
 
-## Object Profile Training
+## Object Profile V2 Training
 
-GripSense RGB can create a lightweight local object profile from the webcam:
+GripSense RGB can create a lightweight local Object Profile V2 from the webcam. This is the main accuracy upgrade for reducing false positives such as an empty hand being treated as an object.
 
 1. Start the camera.
 2. Click or drag over the object so the object lock/crop is centered.
 3. Use grow/shrink until the mask covers the object, not the hand/background.
-4. Enter an object name in **Object trainer**.
-5. Click **Capture view** from at least two angles.
+4. Enter an object name in **Object trainer V2**.
+5. Click **Capture view** from at least three good angles.
 6. Click **Train**.
 
-The profile is stored in browser `localStorage`. It is not uploaded anywhere and it is not a heavy neural-network training job. The browser stores masked thumbnails plus compact visual descriptors for color, edge, and shape. During live tracking, the app compares the current locked object against saved profiles and shows `Object detected: <name>` with a match percentage when the profile matches.
+The profile is stored in browser `localStorage`. It is not uploaded anywhere and it is not a heavy neural-network training job. The browser stores masked thumbnails plus compact descriptor data for color, edges, shape, mask quality, foreground/background contrast, and small texture cues. During live tracking, the app compares the current locked object against saved profiles and shows `Object detected: <name>` with a match percentage when the profile matches.
 
 This improves object identity awareness: the grip model can tell whether the current lock resembles the object the user intended to grip, rather than only relying on generic object shape.
+
+Object Profile V2 uses a training quality gate:
+
+- **Needs more angles**: fewer than three good masked views are available.
+- **Mask too loose**: the crop includes too much background/hand or too little object.
+- **Good view**: the crop has enough object coverage, edges, contrast, and texture.
+- **Ready to train**: at least three good views are available.
+
+Each profile stores `id`, `name`, captured samples, crop bounds, object-region metadata, descriptor vectors, descriptor variance, minimum training quality, and the recommended view count. The descriptor logic is behind an `ObjectDescriptorProvider` interface, so a later backend, ONNX, or embedding model can replace the handcrafted browser descriptor without rewriting the trainer UI or grip scorer.
+
+When at least one trained profile exists, V2 adds an identity gate:
+
+```text
+current object accepted =
+  object lock is stable
+  AND visual grip evidence is plausible
+  AND trained-object match is above threshold
+```
+
+If the identity match is weak, the app reports `Object uncertain` / `Trained object not found` instead of showing a strong grip. If no profile exists, V2 falls back to its generic object-first logic.
 
 For best results, record both calibration profiles:
 
@@ -121,7 +141,7 @@ grip = segment contact + finger curl + containment + thumb support + phone-side 
 
 The exact weights change by grip mode. Phone-side grips prioritize side-edge support and occlusion resilience. Power grips prioritize palm containment, finger wrap, and segment contact. Pinch grips prioritize thumb-index opposition and small-object stability.
 
-In V2, the score is additionally multiplied by an object-readiness factor. This means a visually strong hand pose cannot become a high-confidence grip unless the object itself is believable.
+In V2, the score is additionally multiplied by an object-readiness factor and, when profiles exist, object identity match. This means a visually strong hand pose cannot become a high-confidence grip unless the object itself is believable and resembles the trained object.
 
 This is inspired by grasp quality work such as force-closure and contact-point planning, but adapted for webcam RGB input. Full Ferrari-Canny or Dex-Net style grasp quality needs reliable 3D object geometry, contact normals, friction assumptions, and often depth data; this prototype only has monocular webcam pixels, so it uses a visible approximation instead.
 
@@ -164,7 +184,7 @@ The One Euro filter is useful here because it reduces jitter during slow movemen
 
 ## UI Metrics
 
-Each metric in the analysis rail has an `i` button:
+Each metric in the analysis rail has an eye button:
 
 - Confidence: trust in object lock and tracking quality.
 - Contacts: number of likely fingertip-object contacts.
@@ -176,6 +196,7 @@ Each metric in the analysis rail has an `i` button:
 - Mode/state: which grip type and tracking state the app believes it is seeing.
 - Grip evidence: the components that raised or lowered the score.
 - Object evidence: shape, lock age, and whether the object lock was manually adjusted.
+- Object trainer V2: workflow steps, capture, train, saved profiles, and object identity match.
 
 The analysis rail scrolls independently on desktop, so the `Suggested points` section remains reachable even when the camera viewport is short.
 
@@ -185,11 +206,13 @@ The analysis rail scrolls independently on desktop, so the `Suggested points` se
 - `src/vision/visionEngine.ts`: MediaPipe model loading and fallback.
 - `src/vision/gripAnalysis.ts`: grip scoring and suggested grip point generation.
 - `src/vision/gripEvidence.ts`: whole-hand evidence model for curl, segment contact, phone-side grip, lock quality, and slip inputs.
+- `src/vision/objectProfile.ts`: Object Profile V2 schema, browser descriptor provider, training quality gate, and profile matching.
 - `src/vision/types.ts`: shared grip mode, diagnostics, calibration, and tracking types.
 - `src/vision/stabilization.ts`: One Euro filtering and guidance hysteresis.
 - `src/vision/objectTracking.ts`: generic object-region inference.
 - `src/vision/drawing.ts`: canvas overlay rendering.
 - `src/vision/gripAnalysis.test.ts`: scoring behavior tests.
+- `src/vision/objectProfile.test.ts`: Object Profile V2 training and matching tests.
 
 ## References
 

@@ -148,6 +148,41 @@ describe('analyzeGrip', () => {
     expect(analysis.gripPercentage).toBeGreaterThanOrEqual(55);
   });
 
+  it('v2 blocks a strong grip when the trained object identity does not match', () => {
+    const object = phoneObjectAt(350, 316, 0.88);
+    const analysis = analyzeGrip(phoneGripHand(), object, { x: 326, y: 346 }, {
+      persistentSlipScore: 0.03,
+      algorithmVersion: 'v2',
+      objectIdentity: {
+        hasProfiles: true,
+        score: 0.24,
+        matched: false,
+        name: null
+      }
+    });
+    expect(analysis.diagnostics.state).toBe('Object uncertain');
+    expect(analysis.guidance).toBe('Object uncertain');
+    expect(analysis.gripPercentage).toBe(0);
+    expect(analysis.diagnostics.objectIssue).toContain('Trained object not found');
+  });
+
+  it('v2 still uses generic object-first scoring when no profile is trained', () => {
+    const object = phoneObjectAt(350, 316, 0.88);
+    const analysis = analyzeGrip(phoneGripHand(), object, { x: 326, y: 346 }, {
+      persistentSlipScore: 0.03,
+      algorithmVersion: 'v2',
+      objectIdentity: {
+        hasProfiles: false,
+        score: 0,
+        matched: false,
+        name: null
+      }
+    });
+    expect(analysis.hasObjectProfiles).toBe(false);
+    expect(analysis.diagnostics.state).not.toBe('Object uncertain');
+    expect(analysis.gripPercentage).toBeGreaterThanOrEqual(55);
+  });
+
   it('v2 reports object uncertain rather than weak grip for loose automatic locks', () => {
     const object = bottleObjectAt(354, 334, 0.52);
     object.source = 'automatic';
