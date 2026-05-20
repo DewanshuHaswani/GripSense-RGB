@@ -36,27 +36,30 @@ The toolbar also has a `V1` / `V2` switch. Changing versions clears the object l
 
 ## Object Profile V2 Training
 
-GripSense RGB can create a lightweight local Object Profile V2 from the webcam. This is the main accuracy upgrade for reducing false positives such as an empty hand being treated as an object.
+GripSense RGB can create a lightweight local Object Profile V2 from webcam captures or uploaded images. This is the main accuracy upgrade for reducing false positives such as an empty hand being treated as an object.
 
 1. Start the camera.
-2. Click or drag over the object so the object lock/crop is centered.
-3. Use grow/shrink until the mask covers the object, not the hand/background.
-4. Enter an object name in **Object trainer V2**.
-5. Click **Capture view** from at least three good angles.
-6. Click **Train**.
+2. Click **Open training portal** in the object profile panel.
+3. Live grip scoring pauses while the portal is open, but the camera feed stays available.
+4. Use **Capture frame**, **Capture lock**, or **Upload images** to add object views.
+5. Review quality suggestions. Weak images are warned, not blocked.
+6. Click **Train profile**. If the object has no name yet, the app asks for one.
+7. Optional: choose **Save folder** so profiles and thumbnails are mirrored into a local folder.
 
-The profile is stored in browser `localStorage`. It is not uploaded anywhere and it is not a heavy neural-network training job. The browser stores masked thumbnails plus compact descriptor data for color, edges, shape, mask quality, foreground/background contrast, and small texture cues. During live tracking, the app compares the current locked object against saved profiles and shows `Object detected: <name>` with a match percentage when the profile matches.
+The profile is stored in browser `localStorage`, so it persists across browser sessions on the same machine. If the browser supports the File System Access API, GripSense can also write `gripsense-object-profiles.json` and sample thumbnails into a user-chosen local folder. It is not uploaded anywhere and it is not a heavy neural-network training job. The browser stores thumbnails plus compact descriptor data for color, edges, shape, mask quality, foreground/background contrast, and small texture cues. During live tracking, the app compares the current locked object against enabled saved profiles and shows `Object detected: <name>` with a match percentage when the profile matches.
 
 This improves object identity awareness: the grip model can tell whether the current lock resembles the object the user intended to grip, rather than only relying on generic object shape.
 
-Object Profile V2 uses a training quality gate:
+Object Profile V2 uses a training quality advisor:
 
 - **Needs more angles**: fewer than three good masked views are available.
 - **Mask too loose**: the crop includes too much background/hand or too little object.
 - **Good view**: the crop has enough object coverage, edges, contrast, and texture.
 - **Ready to train**: at least three good views are available.
 
-Each profile stores `id`, `name`, captured samples, crop bounds, object-region metadata, descriptor vectors, descriptor variance, minimum training quality, and the recommended view count. The descriptor logic is behind an `ObjectDescriptorProvider` interface, so a later backend, ONNX, or embedding model can replace the handcrafted browser descriptor without rewriting the trainer UI or grip scorer.
+These labels are recommendations. Training is allowed with any readable image set, because the whole point of object training is to help when the live tracker is uncertain. More clean angles simply make matching more reliable.
+
+Each profile stores `id`, `name`, `enabled`, captured samples, crop bounds, object-region metadata, descriptor vectors, descriptor variance, minimum training quality, and the recommended view count. New profiles are enabled by default. Disabled profiles remain saved but are ignored during live matching. The descriptor logic is behind an `ObjectDescriptorProvider` interface, so a later backend, ONNX, or embedding model can replace the handcrafted browser descriptor without rewriting the trainer UI or grip scorer.
 
 When at least one trained profile exists, V2 adds an identity gate:
 
@@ -196,7 +199,7 @@ Each metric in the analysis rail has an eye button:
 - Mode/state: which grip type and tracking state the app believes it is seeing.
 - Grip evidence: the components that raised or lowered the score.
 - Object evidence: shape, lock age, and whether the object lock was manually adjusted.
-- Object trainer V2: workflow steps, capture, train, saved profiles, and object identity match.
+- Object profiles: open the training portal, enable/disable profiles, see whether a trained object is enabled, in frame, or actively involved in a grip.
 
 The analysis rail scrolls independently on desktop, so the `Suggested points` section remains reachable even when the camera viewport is short.
 

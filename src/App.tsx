@@ -3,25 +3,31 @@ import {
   Activity,
   Box,
   Camera,
+  CheckCircle,
   Crosshair,
   Eye,
   FlipHorizontal2,
+  FolderOpen,
   Hand,
   Images,
   Minus,
   Pause,
   Play,
+  Power,
   Plus,
   RotateCcw,
   ShieldCheck,
   Sparkles,
-  Target
+  Target,
+  Upload,
+  X
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
 import { palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
 import { inferObjectRegion } from './vision/objectTracking';
 import {
   browserObjectDescriptorProvider,
+  createCanvasObjectTrainingSample,
   matchObjectProfiles,
   trainingReadiness,
   trainObjectProfileV2,
@@ -52,6 +58,23 @@ const INITIAL_MODEL_STATUS: VisionModelStatus = {
 const CALIBRATION_STORAGE_KEY = 'grip-lab-calibration-profiles-v2';
 const ALGORITHM_VERSION_STORAGE_KEY = 'grip-lab-algorithm-version';
 const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
+
+type LocalWritableFile = {
+  write(data: Blob | string): Promise<void>;
+  close(): Promise<void>;
+};
+
+type LocalFileHandle = {
+  createWritable(): Promise<LocalWritableFile>;
+};
+
+type LocalDirectoryHandle = {
+  getFileHandle(name: string, options?: { create?: boolean }): Promise<LocalFileHandle>;
+};
+
+type WindowWithFolderPicker = Window & {
+  showDirectoryPicker?: () => Promise<LocalDirectoryHandle>;
+};
 
 const METRIC_INFO = {
   confidence: 'How much the app trusts the object lock and tracking signal in this frame.',
@@ -87,17 +110,20 @@ const EXPLAIN = {
   thumbSupport: 'How much the thumb appears to support or oppose the fingers.',
   motionStability: 'How stable the object-hand motion is over recent frames.',
   calibration: 'How much saved strong/weak calibration is affecting the current score.',
-  objectTrainer: 'Create a local object profile from masked webcam crops. The profile stays in this browser and helps V2 reject empty-hand false positives.',
-  trainerSteps: 'The guided flow is name the object, lock or mask it, capture several angles, train the local profile, then verify live detection.',
-  captureView: 'Saves the current locked object crop as one training angle. Use different rotations and distances for a stronger profile.',
-  trainProfile: 'Builds a local visual descriptor from at least three good masked views. This is profile matching, not a neural fine-tune.',
+  objectTrainer: 'Open a separate enrollment portal. Live grip scoring pauses there so you can capture or upload object images without needing the app to believe a grip is already happening.',
+  trainerSteps: 'The guided flow is add object images, review quality suggestions, train a local profile, save it, then enable it for live detection.',
+  captureView: 'Captures the current webcam frame as an object training image. Center the object in the frame; the app will warn if the image looks weak but will not block you.',
+  uploadView: 'Adds object images from your computer. Use multiple angles, backgrounds, and distances to make matching more reliable.',
+  trainProfile: 'Asks for an object name, then builds a local visual profile. This is profile matching, not a neural fine-tune.',
   clearViews: 'Removes the temporary captured views before training. Already trained profiles stay saved.',
+  folderSave: 'Mirrors trained profiles and thumbnails into a local folder when the browser supports folder access.',
   objectIdentity: 'How closely the current locked object matches the trained profile. Low match blocks strong grip in V2.',
-  trainedProfiles: 'Saved local object profiles. Each stores thumbnails, descriptor statistics, and training quality for browser-only matching.'
+  trainedProfiles: 'Saved local object profiles. Enabled profiles are used for live matching; disabled profiles stay saved but are ignored.'
 } as const;
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const trainingVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<VisionEngine | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -119,6 +145,9 @@ export default function App() {
   const objectProfilesRef = useRef<ObjectProfileV2[]>([]);
   const objectDetectionRef = useRef<ObjectProfileMatch>(null);
   const lastObjectMatchRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const profileDirectoryRef = useRef<LocalDirectoryHandle | null>(null);
+  const pausedBeforeTrainerRef = useRef(false);
   const calibrationCaptureRef = useRef<{
     active: boolean;
     kind: 'strong' | 'weak';
@@ -140,7 +169,10 @@ export default function App() {
   const [trainingSamples, setTrainingSamples] = useState<ObjectTrainingSampleV2[]>([]);
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
-  const [trainingStatus, setTrainingStatus] = useState('Lock the object, then capture 3 or more masked views.');
+  const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
+  const [trainerOpen, setTrainerOpen] = useState(false);
+  const [namePromptOpen, setNamePromptOpen] = useState(false);
+  const [folderStatus, setFolderStatus] = useState('Folder save not connected.');
 
   useEffect(() => {
     calibrationProfilesRef.current = loadCalibrationProfiles();
@@ -165,6 +197,14 @@ export default function App() {
   useEffect(() => {
     algorithmVersionRef.current = algorithmVersion;
   }, [algorithmVersion]);
+
+  useEffect(() => {
+    const video = trainingVideoRef.current;
+    const stream = streamRef.current;
+    if (!trainerOpen || !video || !stream) return;
+    video.srcObject = stream;
+    void video.play();
+  }, [trainerOpen]);
 
   useEffect(() => {
     return () => {
@@ -313,12 +353,14 @@ export default function App() {
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
           const descriptor = object ? browserObjectDescriptorProvider.describe(video, object) : null;
-          const match = matchObjectProfiles(descriptor, objectProfilesRef.current);
+          const enabledProfiles = objectProfilesRef.current.filter((profile) => profile.enabled !== false);
+          const match = matchObjectProfiles(descriptor, enabledProfiles);
           objectDetectionRef.current = match;
           setObjectDetection(match);
         }
+        const enabledProfileCount = objectProfilesRef.current.filter((profile) => profile.enabled !== false).length;
         const objectIdentity = {
-          hasProfiles: objectProfilesRef.current.length > 0,
+          hasProfiles: enabledProfileCount > 0,
           score: objectDetectionRef.current?.score ?? 0,
           matched: objectDetectionRef.current?.matched ?? false,
           name: objectDetectionRef.current?.name ?? null
@@ -476,33 +518,111 @@ export default function App() {
     [algorithmVersion]
   );
 
-  const captureObjectTrainingView = useCallback(() => {
-    const video = videoRef.current;
-    const object = previousObjectRef.current;
-    if (!video || !video.videoWidth || !video.videoHeight || !object?.locked) {
-      setTrainingStatus('Lock the object first, then capture the masked crop.');
-      return;
-    }
+  const openTrainerPortal = useCallback(() => {
+    pausedBeforeTrainerRef.current = pausedRef.current;
+    setPaused(true);
+    setTrainerOpen(true);
+    setTrainingStatus('Live grip scoring is paused. Capture webcam frames or upload object images.');
+  }, []);
 
-    const sample = browserObjectDescriptorProvider.createSample(video, object);
-    if (!sample) {
-      setTrainingStatus('Could not capture this view. Keep the object fully visible and try again.');
-      return;
-    }
-    if (sample.qualityLabel === 'Rejected' || sample.qualityLabel === 'Mask too loose') {
-      setTrainingStatus(`${sample.qualityLabel}: ${sample.descriptor.reasons.join(', ') || 'tighten the crop and try again'}.`);
-      return;
-    }
-    const nextSamples = [...trainingSamples, sample].slice(-8);
+  const closeTrainerPortal = useCallback(() => {
+    setTrainerOpen(false);
+    setNamePromptOpen(false);
+    setPaused(pausedBeforeTrainerRef.current);
+  }, []);
+
+  const addTrainingSample = useCallback((sample: ObjectTrainingSampleV2) => {
+    const nextSamples = [...trainingSamples, sample].slice(-24);
     setTrainingSamples(nextSamples);
     const nextReadiness = trainingReadiness(nextSamples);
-    setTrainingStatus(`${sample.qualityLabel}. ${nextReadiness.message}`);
+    const qualityNote =
+      sample.qualityLabel === 'Good view'
+        ? 'Good view added.'
+        : `${sample.qualityLabel}: ${sample.descriptor.reasons.join(', ') || 'you can train, but add clearer object-only angles if possible'}.`;
+    setTrainingStatus(`${qualityNote} ${nextReadiness.message}`);
   }, [trainingSamples]);
 
-  const trainObjectProfile = useCallback(() => {
+  const captureObjectTrainingView = useCallback(() => {
+    const video = trainingVideoRef.current ?? videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setTrainingStatus('Start the camera first, then capture a training frame.');
+      return;
+    }
+
+    const frame = videoFrameToCanvas(video);
+    const sample = frame ? createCanvasObjectTrainingSample(frame, 'camera', 'webcam-frame') : null;
+    if (!sample) {
+      setTrainingStatus('Could not capture this frame. Keep the object visible and try again.');
+      return;
+    }
+    addTrainingSample(sample);
+  }, [addTrainingSample]);
+
+  const captureLockedObjectTrainingView = useCallback(() => {
+    const video = trainingVideoRef.current ?? videoRef.current;
+    const object = previousObjectRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight || !object?.locked) {
+      setTrainingStatus('No object lock is available. Use Capture frame, upload an image, or click the object first.');
+      return;
+    }
+    const sample = browserObjectDescriptorProvider.createSample(video, object);
+    if (!sample) {
+      setTrainingStatus('Could not crop the locked object. Capture the full frame or upload an image instead.');
+      return;
+    }
+    addTrainingSample(sample);
+  }, [addTrainingSample]);
+
+  const uploadTrainingImages = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    const samples: ObjectTrainingSampleV2[] = [];
+    for (const file of files) {
+      const canvas = await imageFileToCanvas(file);
+      const sample = canvas ? createCanvasObjectTrainingSample(canvas, 'upload', file.name) : null;
+      if (sample) {
+        samples.push(sample);
+      }
+    }
+    event.target.value = '';
+    const nextSamples = [...trainingSamples, ...samples].slice(-24);
+    setTrainingSamples(nextSamples);
+    const nextReadiness = trainingReadiness(nextSamples);
+    setTrainingStatus(
+      samples.length
+        ? `Added ${samples.length} uploaded image${samples.length === 1 ? '' : 's'}. ${nextReadiness.message}`
+        : 'No uploaded images could be read. Try a JPG or PNG.'
+    );
+  }, [trainingSamples]);
+
+  const chooseProfileFolder = useCallback(async () => {
+    const picker = (window as WindowWithFolderPicker).showDirectoryPicker;
+    if (!picker) {
+      setFolderStatus('This browser does not support folder saving. Profiles still persist in browser storage.');
+      return;
+    }
+    try {
+      profileDirectoryRef.current = await picker();
+      setFolderStatus('Folder save connected.');
+      if (objectProfilesRef.current.length) {
+        await mirrorObjectProfilesToFolder(profileDirectoryRef.current, objectProfilesRef.current);
+        setFolderStatus('Folder save connected and synced.');
+      }
+    } catch (error) {
+      console.warn('Folder selection failed', error);
+      setFolderStatus('Folder save skipped. Profiles still persist in browser storage.');
+    }
+  }, []);
+
+  const finalizeObjectTraining = useCallback(async () => {
     const name = objectName.trim();
     if (!name) {
-      setTrainingStatus('Give the object a name before training.');
+      setNamePromptOpen(true);
+      setTrainingStatus('Name the object to finish training.');
+      return;
+    }
+    if (!trainingSamples.length) {
+      setTrainingStatus('Add at least one webcam capture or uploaded image before training.');
       return;
     }
     const result = trainObjectProfileV2(name, trainingSamples);
@@ -516,8 +636,46 @@ export default function App() {
     setObjectProfiles(profiles);
     saveObjectProfiles(profiles);
     setTrainingSamples([]);
-    setTrainingStatus(result.message + ' Hold it in frame to verify detection.');
+    setNamePromptOpen(false);
+    let folderMessage = '';
+    const picker = (window as WindowWithFolderPicker).showDirectoryPicker;
+    if (!profileDirectoryRef.current && picker) {
+      try {
+        profileDirectoryRef.current = await picker();
+        setFolderStatus('Folder save connected.');
+      } catch {
+        setFolderStatus('Folder save skipped. Profiles still persist in browser storage.');
+      }
+    }
+    if (profileDirectoryRef.current) {
+      try {
+        await mirrorObjectProfilesToFolder(profileDirectoryRef.current, profiles);
+        folderMessage = ' Saved to the selected local folder.';
+        setFolderStatus('Latest profile saved to folder.');
+      } catch (error) {
+        console.warn('Profile folder save failed', error);
+        folderMessage = ' Browser storage saved; folder write failed.';
+        setFolderStatus('Folder write failed.');
+      }
+    }
+    setTrainingStatus(result.message + folderMessage + ' Enable it below, then resume live tracking to verify detection.');
   }, [objectName, objectProfiles, trainingSamples]);
+
+  const trainObjectProfile = useCallback(() => {
+    void finalizeObjectTraining();
+  }, [finalizeObjectTraining]);
+
+  const toggleObjectProfile = useCallback((id: string) => {
+    const profiles = objectProfiles.map((profile) =>
+      profile.id === id ? { ...profile, enabled: profile.enabled === false } : profile
+    );
+    objectProfilesRef.current = profiles;
+    setObjectProfiles(profiles);
+    saveObjectProfiles(profiles);
+    if (profileDirectoryRef.current) {
+      void mirrorObjectProfilesToFolder(profileDirectoryRef.current, profiles);
+    }
+  }, [objectProfiles]);
 
   const deleteTrainingSample = useCallback((id: string) => {
     setTrainingSamples((current) => {
@@ -652,6 +810,126 @@ export default function App() {
         )}
       </section>
 
+      {trainerOpen && (
+        <section className="training-portal" aria-label="Object training portal">
+          <div className="training-portal-shell">
+            <div className="portal-head">
+              <div>
+                <p className="eyebrow">Object enrollment</p>
+                <h2>
+                  Training portal
+                  <InlineExplain label="Explain training portal" text={EXPLAIN.objectTrainer} />
+                </h2>
+              </div>
+              <button className="icon-button" type="button" onClick={closeTrainerPortal} aria-label="Close training portal">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="portal-grid">
+              <div className="portal-camera">
+                <video className={mirrored ? 'portal-video mirrored' : 'portal-video'} ref={trainingVideoRef} playsInline muted />
+                <div className="portal-camera-status">
+                  <Pause size={16} />
+                  Live grip tracking paused
+                </div>
+              </div>
+              <div className="portal-side">
+                <div className="trainer-steps" aria-label="Object profile training steps">
+                  {['Add images', 'Review quality', 'Name object', 'Train', 'Enable live'].map((step, index) => (
+                    <span
+                      className={
+                        (index === 0 && trainingSamples.length > 0) ||
+                        (index === 1 && trainingSamples.length > 0) ||
+                        (index === 2 && objectName.trim()) ||
+                        (index === 3 && objectProfiles.some((profile) => profile.name.toLowerCase() === objectName.trim().toLowerCase())) ||
+                        (index === 4 && objectProfiles.some((profile) => profile.enabled !== false))
+                          ? 'complete'
+                          : ''
+                      }
+                      key={step}
+                    >
+                      {index + 1}. {step}
+                    </span>
+                  ))}
+                  <InlineExplain label="Explain training steps" text={EXPLAIN.trainerSteps} compact />
+                </div>
+                <div className="portal-actions">
+                  <button type="button" onClick={captureObjectTrainingView}>
+                    <Camera size={16} />
+                    Capture frame
+                  </button>
+                  <button type="button" onClick={captureLockedObjectTrainingView}>
+                    <Crosshair size={16} />
+                    Capture lock
+                  </button>
+                  <button type="button" onClick={() => fileInputRef.current?.click()}>
+                    <Upload size={16} />
+                    Upload images
+                  </button>
+                  <button type="button" onClick={chooseProfileFolder}>
+                    <FolderOpen size={16} />
+                    Save folder
+                  </button>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  className="hidden-file-input"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  multiple
+                  onChange={(event) => void uploadTrainingImages(event)}
+                />
+                <p className="diagnostic-copy">{trainingStatus}</p>
+                <p className="diagnostic-copy">{folderStatus}</p>
+                {trainingSamples.length > 0 && (
+                  <div className="sample-strip portal-samples" aria-label="Object training images">
+                    {trainingSamples.map((sample, index) => (
+                      <div className="sample-card" key={sample.id}>
+                        <img src={sample.imageDataUrl} alt={`Training image ${index + 1}`} />
+                        <span className={sample.quality >= 0.56 ? 'sample-quality good' : 'sample-quality'}>
+                          {sample.qualityLabel} {Math.round(sample.quality * 100)}%
+                        </span>
+                        <small>{sample.sourceName ?? sample.source ?? 'training image'}</small>
+                        <button type="button" onClick={() => deleteTrainingSample(sample.id)} aria-label={`Remove training image ${index + 1}`}>
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="portal-train-row">
+                  <button type="button" onClick={trainObjectProfile}>
+                    <Sparkles size={16} />
+                    Train profile
+                  </button>
+                  <button type="button" onClick={clearTrainingSamples}>
+                    Clear images
+                  </button>
+                </div>
+                {namePromptOpen && (
+                  <div className="name-prompt" role="dialog" aria-label="Name object before training">
+                    <label className="object-name-field">
+                      <span>What should I name this object?</span>
+                      <input
+                        value={objectName}
+                        onChange={(event) => setObjectName(event.target.value)}
+                        placeholder="Phone, mug, remote..."
+                        maxLength={36}
+                        autoFocus
+                      />
+                    </label>
+                    <button type="button" onClick={trainObjectProfile}>
+                      <CheckCircle size={16} />
+                      Train with this name
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <aside className="analysis-rail" aria-label="Grip analysis">
         <div className={`score-orb ${analysis.guidance.toLowerCase().replaceAll(' ', '-')}`}>
           <span>{analysis.gripPercentage}</span>
@@ -709,88 +987,29 @@ export default function App() {
           <Metric label="Coupling" value={analysis.motionCoupling} info={METRIC_INFO.coupling} />
         </div>
 
-          <div className="trainer-panel">
-            <div className="motion-header">
-              <Images size={18} />
-              <span>
-                Object trainer V2
-                <InlineExplain label="Explain object trainer V2" text={EXPLAIN.objectTrainer} />
-              </span>
-            </div>
-            <div className="trainer-steps" aria-label="Object profile training steps">
-              {['Name', 'Mask', 'Views', 'Train', 'Verify'].map((step, index) => (
-                <span
-                  className={
-                    (index === 0 && objectName.trim()) ||
-                    (index === 1 && previousObjectRef.current?.locked) ||
-                    (index === 2 && trainingSamples.length > 0) ||
-                    (index === 3 && trainerReadiness.ready) ||
-                    (index === 4 && objectDetection?.matched)
-                      ? 'complete'
-                      : ''
-                  }
-                  key={step}
-                >
-                  {index + 1}. {step}
-                </span>
-              ))}
-              <InlineExplain label="Explain training steps" text={EXPLAIN.trainerSteps} compact />
-            </div>
-            <label className="object-name-field">
-              <span>Object name</span>
-            <input
-              value={objectName}
-              onChange={(event) => setObjectName(event.target.value)}
-              placeholder="Phone, mug, remote..."
-              maxLength={36}
-            />
-          </label>
-            <div className="trainer-actions">
-            <span className="action-with-help">
-              <button type="button" onClick={captureObjectTrainingView}>
-                <Camera size={16} />
-                Capture view
-              </button>
-              <InlineExplain label="Explain capture view" text={EXPLAIN.captureView} compact />
-            </span>
-            <span className="action-with-help">
-              <button type="button" onClick={trainObjectProfile} disabled={!trainerReadiness.ready}>
-                <Sparkles size={16} />
-                Train
-              </button>
-              <InlineExplain label="Explain train profile" text={EXPLAIN.trainProfile} compact />
-            </span>
-            <span className="action-with-help">
-              <button type="button" onClick={clearTrainingSamples}>
-                Clear
-              </button>
-              <InlineExplain label="Explain clear views" text={EXPLAIN.clearViews} compact />
+        <div className="trainer-panel">
+          <div className="motion-header">
+            <Images size={18} />
+            <span>
+              Object profiles
+              <InlineExplain label="Explain object trainer V2" text={EXPLAIN.objectTrainer} />
             </span>
           </div>
+          <button className="portal-button" type="button" onClick={openTrainerPortal}>
+            <Images size={17} />
+            Open training portal
+          </button>
           <p className="diagnostic-copy">{trainingStatus}</p>
-          {trainingSamples.length > 0 && (
-            <div className="sample-strip" aria-label="Captured object views">
-              {trainingSamples.map((sample, index) => (
-                <div className="sample-card" key={sample.id}>
-                  <img src={sample.imageDataUrl} alt={`Captured object angle ${index + 1}`} />
-                  <span className={sample.quality >= 0.56 ? 'sample-quality good' : 'sample-quality'}>
-                    {sample.qualityLabel} {Math.round(sample.quality * 100)}%
-                  </span>
-                  <button type="button" onClick={() => deleteTrainingSample(sample.id)} aria-label={`Delete captured object angle ${index + 1}`}>
-                    Retake
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
           <div className={objectDetection?.matched ? 'detected-object matched' : 'detected-object'}>
             <Box size={17} />
             <span>
               {objectDetection?.matched
                 ? `Object detected: ${objectDetection.name}`
-                : objectProfiles.length
-                  ? 'No trained object detected'
-                  : 'No trained object yet'}
+                : objectProfiles.some((profile) => profile.enabled !== false)
+                  ? 'Enabled object not detected'
+                  : objectProfiles.length
+                    ? 'All profiles disabled'
+                    : 'No trained object yet'}
             </span>
             <strong>{objectDetection ? `${Math.round(objectDetection.score * 100)}%` : '--'}</strong>
           </div>
@@ -809,12 +1028,24 @@ export default function App() {
                   <InlineExplain label="Explain saved profiles" text={EXPLAIN.trainedProfiles} compact />
                 </span>
               </div>
-              {objectProfiles.map((profile) => (
-                <div className="profile-row" key={profile.id}>
-                  <span>{profile.name}</span>
-                  <strong>{profile.samples.length} views · {Math.round(profile.minTrainingQuality * 100)}%</strong>
-                </div>
-              ))}
+              {objectProfiles.map((profile) => {
+                const status = profileLiveStatus(profile, objectDetection, analysis);
+                return (
+                  <div className={`profile-row ${status.kind}`} key={profile.id}>
+                    <button
+                      type="button"
+                      className="profile-toggle"
+                      onClick={() => toggleObjectProfile(profile.id)}
+                      aria-pressed={profile.enabled !== false}
+                      aria-label={`${profile.enabled === false ? 'Enable' : 'Disable'} ${profile.name}`}
+                    >
+                      <Power size={14} />
+                    </button>
+                    <span>{profile.name}</span>
+                    <strong>{status.label}</strong>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -926,6 +1157,45 @@ export default function App() {
       </aside>
     </main>
   );
+}
+
+function videoFrameToCanvas(video: HTMLVideoElement) {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+async function imageFileToCanvas(file: File) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    return canvas;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function profileLiveStatus(profile: ObjectProfileV2, detection: ObjectProfileMatch, analysis: GripAnalysis) {
+  if (profile.enabled === false) return { kind: 'disabled', label: 'disabled' };
+  if (detection?.profileId !== profile.id || !detection.matched) return { kind: 'enabled', label: 'enabled' };
+  if (analysis.gripPercentage > 0 && ['Grip detected', 'Strong hold', 'Slip risk'].includes(analysis.diagnostics.state)) {
+    return { kind: 'gripping', label: 'grip active' };
+  }
+  return { kind: 'visible', label: 'in frame' };
 }
 
 function Metric({ label, value, text, info }: { label: string; value: number; text?: string; info: string }) {
@@ -1051,7 +1321,7 @@ function saveAlgorithmVersion(version: AlgorithmVersion) {
 function loadObjectProfiles(): ObjectProfileV2[] {
   try {
     const raw = window.localStorage.getItem(OBJECT_PROFILES_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as ObjectProfileV2[]) : [];
+    return raw ? normalizeObjectProfiles(JSON.parse(raw) as ObjectProfileV2[]) : [];
   } catch (error) {
     console.warn('Failed to load object profiles', error);
     return [];
@@ -1064,6 +1334,50 @@ function saveObjectProfiles(profiles: ObjectProfileV2[]) {
   } catch (error) {
     console.warn('Failed to save object profiles', error);
   }
+}
+
+function normalizeObjectProfiles(profiles: ObjectProfileV2[]) {
+  return profiles.map((profile) => ({
+    ...profile,
+    enabled: profile.enabled !== false
+  }));
+}
+
+async function mirrorObjectProfilesToFolder(handle: LocalDirectoryHandle, profiles: ObjectProfileV2[]) {
+  await writeLocalFile(
+    handle,
+    'gripsense-object-profiles.json',
+    JSON.stringify(profiles, null, 2),
+    'application/json'
+  );
+  for (const profile of profiles) {
+    for (const [index, sample] of profile.samples.entries()) {
+      await writeLocalFile(
+        handle,
+        `${sanitizeFileName(profile.name)}-${index + 1}.jpg`,
+        dataUrlToBlob(sample.imageDataUrl),
+        'image/jpeg'
+      );
+    }
+  }
+}
+
+async function writeLocalFile(handle: LocalDirectoryHandle, name: string, data: Blob | string, type: string) {
+  const file = await handle.getFileHandle(name, { create: true });
+  const writable = await file.createWritable();
+  await writable.write(typeof data === 'string' ? new Blob([data], { type }) : data);
+  await writable.close();
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header, payload] = dataUrl.split(',');
+  const mime = header.match(/data:(.*?);base64/)?.[1] ?? 'image/jpeg';
+  const bytes = Uint8Array.from(atob(payload ?? ''), (character) => character.charCodeAt(0));
+  return new Blob([bytes], { type: mime });
+}
+
+function sanitizeFileName(name: string) {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'object';
 }
 
 function loadCalibrationProfiles(): GripCalibrationProfiles {

@@ -30,11 +30,14 @@ export type ObjectTrainingSampleV2 = {
   quality: number;
   qualityLabel: TrainingQualityLabel;
   createdAt: number;
+  source?: 'camera' | 'upload' | 'locked-crop';
+  sourceName?: string;
 };
 
 export type ObjectProfileV2 = {
   id: string;
   name: string;
+  enabled: boolean;
   samples: ObjectTrainingSampleV2[];
   descriptor: number[];
   descriptorVariance: number;
@@ -93,7 +96,54 @@ export function createBrowserObjectTrainingSample(
     },
     quality: descriptor.quality,
     qualityLabel: descriptor.qualityLabel,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    source: 'locked-crop'
+  };
+}
+
+export function createCanvasObjectTrainingSample(
+  canvas: HTMLCanvasElement,
+  source: ObjectTrainingSampleV2['source'] = 'camera',
+  sourceName?: string
+): ObjectTrainingSampleV2 | null {
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context || !canvas.width || !canvas.height) return null;
+  const size = Math.min(canvas.width, canvas.height);
+  const square = document.createElement('canvas');
+  square.width = DESCRIPTOR_SIZE;
+  square.height = DESCRIPTOR_SIZE;
+  const squareContext = square.getContext('2d', { willReadFrequently: true });
+  if (!squareContext) return null;
+  const sourceX = Math.max(0, (canvas.width - size) / 2);
+  const sourceY = Math.max(0, (canvas.height - size) / 2);
+  squareContext.drawImage(canvas, sourceX, sourceY, size, size, 0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE);
+  const object = {
+    center: { x: DESCRIPTOR_SIZE / 2, y: DESCRIPTOR_SIZE / 2 },
+    radiusX: DESCRIPTOR_SIZE * 0.36,
+    radiusY: DESCRIPTOR_SIZE * 0.36,
+    angle: 0,
+    shape: 'unknown' as ObjectRegion['shape']
+  };
+  const descriptor = describeImageData(squareContext.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object);
+  if (!descriptor) return null;
+
+  const thumbnail = document.createElement('canvas');
+  thumbnail.width = THUMBNAIL_SIZE;
+  thumbnail.height = THUMBNAIL_SIZE;
+  const thumbnailContext = thumbnail.getContext('2d');
+  if (!thumbnailContext) return null;
+  thumbnailContext.drawImage(canvas, sourceX, sourceY, size, size, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+  return {
+    id: crypto.randomUUID(),
+    imageDataUrl: thumbnail.toDataURL('image/jpeg', 0.84),
+    descriptor,
+    cropBounds: { x: sourceX, y: sourceY, size },
+    objectRegion: object,
+    quality: descriptor.quality,
+    qualityLabel: descriptor.qualityLabel,
+    createdAt: Date.now(),
+    source,
+    sourceName
   };
 }
 
@@ -204,13 +254,13 @@ export function trainingReadiness(samples: ObjectTrainingSampleV2[]) {
     return { ready: false, label: 'Needs more angles' as TrainingQualityLabel, message: 'Capture 3 good masked views.' };
   }
   if (samples.some((sample) => sample.qualityLabel === 'Mask too loose')) {
-    return { ready: false, label: 'Mask too loose' as TrainingQualityLabel, message: 'Tighten the object mask before training.' };
+    return { ready: goodSamples.length >= 1, label: 'Mask too loose' as TrainingQualityLabel, message: 'Some views look loose. You can train, but add tighter object-only images for better matching.' };
   }
   if (goodSamples.length < RECOMMENDED_VIEW_COUNT) {
     return {
-      ready: false,
+      ready: true,
       label: 'Needs more angles' as TrainingQualityLabel,
-      message: `Capture ${RECOMMENDED_VIEW_COUNT - goodSamples.length} more good view${RECOMMENDED_VIEW_COUNT - goodSamples.length === 1 ? '' : 's'}.`
+      message: `You can train now. Add ${RECOMMENDED_VIEW_COUNT - goodSamples.length} more good view${RECOMMENDED_VIEW_COUNT - goodSamples.length === 1 ? '' : 's'} for a stronger profile.`
     };
   }
   return { ready: true, label: 'Ready to train' as TrainingQualityLabel, message: 'Ready to train this object profile.' };
@@ -223,21 +273,23 @@ export function trainObjectProfileV2(
 ): TrainObjectProfileResult {
   const trimmed = name.trim();
   if (!trimmed) return { ok: false, label: 'Rejected', message: 'Give the object a name before training.' };
+  if (!samples.length) return { ok: false, label: 'Needs more angles', message: 'Add at least one image before training.' };
   const readiness = trainingReadiness(samples);
-  if (!readiness.ready) return { ok: false, label: readiness.label, message: readiness.message };
   const goodSamples = samples.filter((sample) => sample.quality >= MIN_SAMPLE_QUALITY);
-  const descriptor = averageDescriptor(goodSamples.map((sample) => sample.descriptor.vector));
+  const trainingSamples = goodSamples.length ? goodSamples : samples;
+  const descriptor = averageDescriptor(trainingSamples.map((sample) => sample.descriptor.vector));
   return {
     ok: true,
-    label: 'Ready to train',
-    message: `${trimmed} trained successfully with ${goodSamples.length} views.`,
+    label: readiness.label,
+    message: `${trimmed} trained successfully with ${samples.length} image${samples.length === 1 ? '' : 's'}. ${readiness.message}`,
     profile: {
       id: existingId ?? crypto.randomUUID(),
       name: trimmed,
-      samples: goodSamples,
+      enabled: true,
+      samples,
       descriptor,
-      descriptorVariance: descriptorVariance(goodSamples.map((sample) => sample.descriptor.vector), descriptor),
-      minTrainingQuality: Math.min(...goodSamples.map((sample) => sample.quality)),
+      descriptorVariance: descriptorVariance(trainingSamples.map((sample) => sample.descriptor.vector), descriptor),
+      minTrainingQuality: Math.min(...samples.map((sample) => sample.quality)),
       recommendedViewCount: RECOMMENDED_VIEW_COUNT,
       createdAt: Date.now(),
       updatedAt: Date.now()

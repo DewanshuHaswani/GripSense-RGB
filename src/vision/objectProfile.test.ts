@@ -23,20 +23,23 @@ describe('object profile v2', () => {
     }
   });
 
-  it('rejects training when not enough good views are present', () => {
+  it('allows training with fewer views but reports that more angles are useful', () => {
     const result = trainObjectProfileV2('Remote', [
       sample('a', descriptor([0.4, 0.2, 0.2, 0.2])),
       sample('b', descriptor([0.42, 0.18, 0.2, 0.2]))
     ]);
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain('more good view');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.message).toContain('more good view');
+      expect(result.profile.enabled).toBe(true);
+    }
   });
 
   it('reports mask quality problems before training', () => {
     const readiness = trainingReadiness([
       sample('a', descriptor([0.4, 0.2, 0.2, 0.2]), 0.7, 'Mask too loose')
     ]);
-    expect(readiness.ready).toBe(false);
+    expect(readiness.ready).toBe(true);
     expect(readiness.label).toBe('Mask too loose');
   });
 
