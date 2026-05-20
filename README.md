@@ -34,6 +34,18 @@ You can open either algorithm directly:
 
 The toolbar also has a `V1` / `V2` switch. Changing versions clears the object lock so the two algorithms can be compared cleanly.
 
+## Offline Video Review
+
+GripSense RGB also supports offline review. Click **Offline video**, choose an MP4/WebM/MOV file, and the same hand/object/grip pipeline runs over the uploaded video. The uploaded file stays local in the browser.
+
+Offline mode adds liquid-glass overlays directly on top of the video:
+
+- Left overlay: grip percentage, guidance, tracking state, grip mode, and matched object.
+- Right overlay: confidence, object lock, closure, contact, thumb support, and slip risk.
+- The video remains visible behind the transparent panels, while the text and bars stay readable.
+
+You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
+
 ## Object Profile V2 Training
 
 GripSense RGB can create a lightweight local Object Profile V2 from webcam captures or uploaded images. This is the main accuracy upgrade for reducing false positives such as an empty hand being treated as an object.
@@ -200,8 +212,26 @@ Each metric in the analysis rail has an eye button:
 - Grip evidence: the components that raised or lowered the score.
 - Object evidence: shape, lock age, and whether the object lock was manually adjusted.
 - Object profiles: open the training portal, enable/disable profiles, see whether a trained object is enabled, in frame, or actively involved in a grip.
+- Offline review: transparent left/right overlays for hand visualization, grip strength, and score parameters over uploaded videos.
 
 The analysis rail scrolls independently on desktop, so the `Suggested points` section remains reachable even when the camera viewport is short.
+
+## shadcn / Tailwind Note
+
+This repository is a Vite + React + TypeScript app with custom CSS, not a Tailwind/shadcn project yet. The requested component files were added under `components/ui/`:
+
+- `components/ui/glass-time-card.tsx`
+- `components/ui/demo.tsx`
+
+To use those files as real shadcn/Tailwind components, initialize Tailwind and shadcn first:
+
+```bash
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+npx shadcn@latest init
+```
+
+Then configure the `@/*` alias and include `components/**/*.{ts,tsx}` in TypeScript/Tailwind content paths. The default shadcn component folder is `components/ui`; keeping that path matters because generated shadcn imports and examples expect components to live there.
 
 ## Key Files
 

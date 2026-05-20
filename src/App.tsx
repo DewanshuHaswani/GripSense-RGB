@@ -125,9 +125,11 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trainingVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offlineVideoInputRef = useRef<HTMLInputElement | null>(null);
   const engineRef = useRef<VisionEngine | null>(null);
   const animationRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const offlineVideoUrlRef = useRef<string | null>(null);
   const previousObjectRef = useRef<ObjectRegion | null>(null);
   const previousPalmRef = useRef<Point | null>(null);
   const manualPointRef = useRef<Point | null>(null);
@@ -156,6 +158,8 @@ export default function App() {
   }>({ active: false, kind: 'strong', start: 0, samples: [] });
 
   const [cameraState, setCameraState] = useState<'idle' | 'requesting' | 'live' | 'blocked'>('idle');
+  const [mediaMode, setMediaMode] = useState<'live' | 'offline'>('live');
+  const [offlineVideoName, setOfflineVideoName] = useState('');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
   const [analysis, setAnalysis] = useState<GripAnalysis>(() => createEmptyAnalysis());
   const [mirrored, setMirrored] = useState(true);
@@ -211,6 +215,7 @@ export default function App() {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
       engineRef.current?.dispose();
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
     };
   }, []);
 
@@ -238,10 +243,27 @@ export default function App() {
     return engineRef.current;
   }, []);
 
+  const resetTrackingRefs = useCallback(() => {
+    manualPointRef.current = null;
+    manualScaleRef.current = 1;
+    draggingObjectRef.current = false;
+    previousObjectRef.current = null;
+    previousPalmRef.current = null;
+    detectorBoxRef.current = null;
+    objectDetectionRef.current = null;
+    stabilizerRef.current.reset();
+    setLocked(false);
+    setObjectDetection(null);
+  }, []);
+
   const startCamera = useCallback(async () => {
-    if (cameraState === 'requesting' || cameraState === 'live') return;
+    if (cameraState === 'requesting' || (cameraState === 'live' && mediaMode === 'live')) return;
     setCameraState('requesting');
     try {
+      if (offlineVideoUrlRef.current) {
+        URL.revokeObjectURL(offlineVideoUrlRef.current);
+        offlineVideoUrlRef.current = null;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'user',
@@ -253,8 +275,12 @@ export default function App() {
       streamRef.current = stream;
       const video = videoRef.current;
       if (!video) return;
+      video.removeAttribute('src');
       video.srcObject = stream;
       await video.play();
+      setMediaMode('live');
+      setOfflineVideoName('');
+      resetTrackingRefs();
       setCameraState('live');
 
       const engine = await loadVisionEngine();
@@ -267,7 +293,46 @@ export default function App() {
       setCameraState('blocked');
       setAnalysis(createEmptyAnalysis('Camera permission is blocked or unavailable.'));
     }
-  }, [cameraState, loadVisionEngine]);
+  }, [cameraState, loadVisionEngine, mediaMode, resetTrackingRefs]);
+
+  const startOfflineVideo = useCallback(async (file: File) => {
+    if (!file.type.startsWith('video/')) {
+      setAnalysis(createEmptyAnalysis('Upload a video file to start offline review.'));
+      return;
+    }
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
+    const url = URL.createObjectURL(file);
+    offlineVideoUrlRef.current = url;
+
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    video.srcObject = null;
+    video.src = url;
+    video.loop = false;
+    video.muted = true;
+    setMediaMode('offline');
+    setOfflineVideoName(file.name);
+    setCameraState('live');
+    setPaused(false);
+    resetTrackingRefs();
+    setAnalysis(createEmptyAnalysis('Offline review loaded. Press play to visualize grip over this video.'));
+
+    await loadVisionEngine();
+    await waitForVideoMetadata(video);
+    await video.play().catch(() => {
+      setAnalysis(createEmptyAnalysis('Offline video loaded. Press play on the video to begin analysis.'));
+    });
+    runLoop();
+  }, [loadVisionEngine, resetTrackingRefs]);
+
+  const handleOfflineVideoUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) void startOfflineVideo(file);
+  }, [startOfflineVideo]);
 
   const updateCalibrationCapture = useCallback((frameAnalysis: GripAnalysis, timestamp: number) => {
     const capture = calibrationCaptureRef.current;
@@ -693,7 +758,13 @@ export default function App() {
   return (
     <main className="app-shell">
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
-        <video ref={videoRef} className={mirrored ? 'camera-feed mirrored' : 'camera-feed'} playsInline muted />
+        <video
+          ref={videoRef}
+          className={mirrored ? 'camera-feed mirrored' : 'camera-feed'}
+          playsInline
+          muted
+          controls={mediaMode === 'offline'}
+        />
         <canvas
           ref={canvasRef}
           className="tracking-canvas"
@@ -740,6 +811,17 @@ export default function App() {
               <Camera size={18} />
               <span>{cameraState === 'live' ? 'Camera live' : cameraState === 'requesting' ? 'Starting' : 'Start'}</span>
             </button>
+            <button className="tool-button" onClick={() => offlineVideoInputRef.current?.click()} aria-label="Upload offline review video">
+              <Upload size={17} />
+              <span>Offline video</span>
+            </button>
+            <input
+              ref={offlineVideoInputRef}
+              className="hidden-file-input"
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,video/*"
+              onChange={handleOfflineVideoUpload}
+            />
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume tracking' : 'Pause tracking'}>
               {paused ? <Play size={18} /> : <Pause size={18} />}
             </button>
@@ -806,6 +888,38 @@ export default function App() {
               <Camera size={20} />
               <span>Start camera</span>
             </button>
+          </div>
+        )}
+
+        {mediaMode === 'offline' && cameraState === 'live' && !trainerOpen && (
+          <div className="offline-review-overlay" aria-label="Offline grip video review">
+            <div className="offline-glass-panel offline-left">
+              <p className="eyebrow">Offline review</p>
+              <h2>{analysis.gripPercentage}%</h2>
+              <strong>{analysis.guidance}</strong>
+              <span>{offlineVideoName || 'Uploaded video'}</span>
+              <div className="offline-mini-row">
+                <span>State</span>
+                <strong>{analysis.diagnostics.state}</strong>
+              </div>
+              <div className="offline-mini-row">
+                <span>Mode</span>
+                <strong>{analysis.diagnostics.mode}</strong>
+              </div>
+              <div className="offline-mini-row">
+                <span>Object</span>
+                <strong>{objectDetection?.matched ? objectDetection.name : 'not matched'}</strong>
+              </div>
+            </div>
+            <div className="offline-glass-panel offline-right">
+              <p className="eyebrow">Parameters</p>
+              <GlassMetric label="Confidence" value={analysis.confidence} />
+              <GlassMetric label="Lock" value={analysis.objectLockQuality} />
+              <GlassMetric label="Closure" value={analysis.closureScore} />
+              <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
+              <GlassMetric label="Thumb" value={analysis.thumbOpposition} />
+              <GlassMetric label="Slip" value={analysis.slipRisk} danger />
+            </div>
           </div>
         )}
       </section>
@@ -1196,6 +1310,32 @@ function profileLiveStatus(profile: ObjectProfileV2, detection: ObjectProfileMat
     return { kind: 'gripping', label: 'grip active' };
   }
   return { kind: 'visible', label: 'in frame' };
+}
+
+function waitForVideoMetadata(video: HTMLVideoElement) {
+  if (video.videoWidth && video.videoHeight) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const handleLoaded = () => {
+      video.removeEventListener('loadedmetadata', handleLoaded);
+      resolve();
+    };
+    video.addEventListener('loadedmetadata', handleLoaded, { once: true });
+  });
+}
+
+function GlassMetric({ label, value, danger = false }: { label: string; value: number; danger?: boolean }) {
+  const percentage = Math.round(value * 100);
+  return (
+    <div className={danger ? 'glass-metric danger' : 'glass-metric'}>
+      <div>
+        <span>{label}</span>
+        <strong>{percentage}%</strong>
+      </div>
+      <div className="glass-track">
+        <span style={{ width: `${percentage}%` }} />
+      </div>
+    </div>
+  );
 }
 
 function Metric({ label, value, text, info }: { label: string; value: number; text?: string; info: string }) {
