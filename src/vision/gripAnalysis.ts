@@ -111,6 +111,7 @@ export function analyzeGrip(
   } = {}
 ): GripAnalysis {
   const algorithmVersion = options.algorithmVersion ?? 'v1';
+  const fallbackAlgorithmVersion: AlgorithmVersion = algorithmVersion === 'v3' ? 'v2' : algorithmVersion;
   const scoringConfig = options.scoringConfig ?? DEFAULT_GRIP_SCORING_CONFIG;
   const objectIdentity = options.objectIdentity ?? { hasProfiles: false, score: 0, matched: false, name: null };
   if (!hand || hand.length < 21) {
@@ -143,7 +144,7 @@ export function analyzeGrip(
     };
   }
 
-  if (algorithmVersion === 'v2') {
+  if (fallbackAlgorithmVersion === 'v2') {
     const gate = evaluateV2ObjectGate(object, closureScore);
     if (!gate.accepted) {
       return {
@@ -193,7 +194,7 @@ export function analyzeGrip(
   const evidence = computeGripEvidence(hand, object, options.persistentSlipScore ?? 0);
   const mode = classifyGripMode(evidence);
   const contactPoints = countContactPoints(evidence);
-  const contactScore = scoreByMode(evidence, mode, algorithmVersion, scoringConfig);
+  const contactScore = scoreByMode(evidence, mode, fallbackAlgorithmVersion, scoringConfig);
   const thumbOpposition = evidence.thumbSupportScore;
 
   const angles = tips
@@ -217,8 +218,8 @@ export function analyzeGrip(
   const motionCoupling = moving ? clamp(1 - slipRisk) : 0.88;
   const calibration = calibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.calibrationBaseline ?? null);
   const weakCalibration = weakCalibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.weakCalibrationBaseline ?? null);
-  const identityFactor = objectIdentityReadiness(objectIdentity, algorithmVersion);
-  const objectReadiness = algorithmVersion === 'v2' ? v2ObjectReadiness(object, evidence) * identityFactor : 1;
+  const identityFactor = objectIdentityReadiness(objectIdentity, fallbackAlgorithmVersion);
+  const objectReadiness = fallbackAlgorithmVersion === 'v2' ? v2ObjectReadiness(object, evidence) * identityFactor : 1;
 
   const gripPercentage = Math.round(
     100 *
@@ -243,14 +244,14 @@ export function analyzeGrip(
     closureScore,
     calibrationMatched: calibration.similarToBaseline,
     weakMatched: weakCalibration.similarToWeak,
-    algorithmVersion,
+    algorithmVersion: fallbackAlgorithmVersion,
     objectIdentity,
     scoringConfig
   });
   const motionState = !moving ? 'idle' : slipRisk > 0.45 ? 'slipping' : motionCoupling > 0.58 ? 'moving-with-hand' : 'uncertain';
-  const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, algorithmVersion);
+  const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, fallbackAlgorithmVersion);
   const objectUncertainGuidance =
-    evidence.objectLockQuality < 0.38 || identityBlocksStrongGrip(objectIdentity, algorithmVersion);
+    evidence.objectLockQuality < 0.38 || identityBlocksStrongGrip(objectIdentity, fallbackAlgorithmVersion);
   const guidance =
     objectUncertainGuidance
       ? 'Object uncertain'
@@ -267,7 +268,7 @@ export function analyzeGrip(
     gripPercentage,
     calibration.similarToBaseline,
     weakCalibration.similarToWeak,
-    algorithmVersion,
+    fallbackAlgorithmVersion,
     objectIdentity
   );
 

@@ -54,6 +54,7 @@ export function inferObjectRegion({
           y: rawCenter.y * 0.38 + graspCenter.y * 0.62
         };
   const previousDrift = previous ? distance(inferredCenter, previous.center) / Math.max(1, size) : 0;
+  const objectFirstAlgorithm = algorithmVersion === 'v2' || algorithmVersion === 'v3';
   const previousStable =
     previous?.locked &&
     (previous.lockAgeFrames ?? 0) > 6 &&
@@ -83,7 +84,7 @@ export function inferObjectRegion({
     (previous.lockAgeFrames ?? 0) > 8;
   if (openHandScore > 0.62 && !strongVisualObject && (!previous || staleAutomaticLock)) return null;
   if (
-    algorithmVersion === 'v2' &&
+    objectFirstAlgorithm &&
     !manualOrDetector &&
     !stablePreviousAuto &&
     (openHandScore > 0.52 || !strongVisualObject)
@@ -114,7 +115,7 @@ export function inferObjectRegion({
       imageEvidence.colorVariance * 0.1
   );
   if (
-    algorithmVersion === 'v2' &&
+    objectFirstAlgorithm &&
     !manualOrDetector &&
     !stablePreviousAuto &&
     (independentEvidenceScore < 0.42 || tightness < 0.36 || !nearHand || relativeDriftScore > 0.72)

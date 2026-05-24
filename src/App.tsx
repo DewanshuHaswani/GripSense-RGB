@@ -23,6 +23,7 @@ import {
   X
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
+import { analyzeGripV3 } from './vision/v3GripAnalysis';
 import { palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
 import { inferObjectRegion } from './vision/objectTracking';
 import {
@@ -38,6 +39,7 @@ import {
 import { drawTrackingOverlay } from './vision/drawing';
 import { createVisionEngine, type VisionEngine, type VisionModelStatus } from './vision/visionEngine';
 import { TrackingStabilizer } from './vision/stabilization';
+import { createV3AnalyzeFrameRequest, DEFAULT_V3_ENDPOINT, requestV3FrameAnalysis } from './vision/v3Inference';
 import type {
   AlgorithmVersion,
   GripAnalysis,
@@ -45,8 +47,10 @@ import type {
   GripCalibrationProfiles,
   GripMode,
   Landmark,
+  ObjectIdentitySignal,
   ObjectRegion,
-  Point
+  Point,
+  V3PerceptionResponse
 } from './vision/types';
 
 const INITIAL_MODEL_STATUS: VisionModelStatus = {
@@ -58,6 +62,9 @@ const INITIAL_MODEL_STATUS: VisionModelStatus = {
 const CALIBRATION_STORAGE_KEY = 'grip-lab-calibration-profiles-v2';
 const ALGORITHM_VERSION_STORAGE_KEY = 'grip-lab-algorithm-version';
 const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
+const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
+const V3_REQUEST_INTERVAL_MS = 420;
 
 type LocalWritableFile = {
   write(data: Blob | string): Promise<void>;
@@ -76,6 +83,16 @@ type WindowWithFolderPicker = Window & {
   showDirectoryPicker?: () => Promise<LocalDirectoryHandle>;
 };
 
+type V3Runtime = {
+  status: 'idle' | 'pending' | 'ready' | 'fallback';
+  message: string;
+  endpoint: string;
+  result: V3PerceptionResponse | null;
+  receivedAt: number | null;
+  lastRequestAt: number;
+  latencyMs: number | null;
+};
+
 const METRIC_INFO = {
   confidence: 'How much the app trusts the object lock and tracking signal in this frame.',
   contacts: 'How many fingertip or finger-segment contacts appear close enough to support the object.',
@@ -91,7 +108,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, or V2 for stricter object-first scoring with lower false positives.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, or V3 for local-server perception fusion with V2 fallback.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -147,6 +164,15 @@ export default function App() {
   const objectProfilesRef = useRef<ObjectProfileV2[]>([]);
   const objectDetectionRef = useRef<ObjectProfileMatch>(null);
   const lastObjectMatchRef = useRef(0);
+  const v3RuntimeRef = useRef<V3Runtime>({
+    status: 'idle',
+    message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
+    endpoint: V3_ENDPOINT,
+    result: null,
+    receivedAt: null,
+    lastRequestAt: 0,
+    latencyMs: null
+  });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const profileDirectoryRef = useRef<LocalDirectoryHandle | null>(null);
   const pausedBeforeTrainerRef = useRef(false);
@@ -173,6 +199,7 @@ export default function App() {
   const [trainingSamples, setTrainingSamples] = useState<ObjectTrainingSampleV2[]>([]);
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
+  const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
   const [namePromptOpen, setNamePromptOpen] = useState(false);
@@ -243,6 +270,23 @@ export default function App() {
     return engineRef.current;
   }, []);
 
+  const updateV3Runtime = useCallback((next: V3Runtime) => {
+    v3RuntimeRef.current = next;
+    setV3Runtime(next);
+  }, []);
+
+  const resetV3Runtime = useCallback((message = 'V3 server idle. Select V3 and start tracking to begin fusion.') => {
+    updateV3Runtime({
+      status: 'idle',
+      message,
+      endpoint: V3_ENDPOINT,
+      result: null,
+      receivedAt: null,
+      lastRequestAt: 0,
+      latencyMs: null
+    });
+  }, [updateV3Runtime]);
+
   const resetTrackingRefs = useCallback(() => {
     manualPointRef.current = null;
     manualScaleRef.current = 1;
@@ -251,10 +295,11 @@ export default function App() {
     previousPalmRef.current = null;
     detectorBoxRef.current = null;
     objectDetectionRef.current = null;
+    resetV3Runtime();
     stabilizerRef.current.reset();
     setLocked(false);
     setObjectDetection(null);
-  }, []);
+  }, [resetV3Runtime]);
 
   const startCamera = useCallback(async () => {
     if (cameraState === 'requesting' || (cameraState === 'live' && mediaMode === 'live')) return;
@@ -372,6 +417,75 @@ export default function App() {
     setHasCalibration(true);
   }, []);
 
+  const scheduleV3Inference = useCallback((
+    video: HTMLVideoElement,
+    hand: Landmark[] | null,
+    object: ObjectRegion | null,
+    v2Analysis: GripAnalysis,
+    objectIdentity: ObjectIdentitySignal,
+    timestamp: number
+  ) => {
+    if (algorithmVersionRef.current !== 'v3') return;
+
+    const current = v3RuntimeRef.current;
+    if (current.status === 'pending' || timestamp - current.lastRequestAt < V3_REQUEST_INTERVAL_MS) return;
+
+    const request = createV3AnalyzeFrameRequest({
+      video,
+      mirrored: mirroredRef.current,
+      timestamp,
+      hand,
+      object,
+      v2Analysis,
+      objectIdentity
+    });
+
+    if (!request) {
+      updateV3Runtime({
+        ...current,
+        status: 'fallback',
+        message: 'V3 frame unavailable; V2 fallback active.',
+        result: null,
+        receivedAt: performance.now(),
+        lastRequestAt: timestamp,
+        latencyMs: null
+      });
+      return;
+    }
+
+    updateV3Runtime({
+      ...current,
+      status: 'pending',
+      message: 'V3 server analyzing frame.',
+      lastRequestAt: timestamp
+    });
+
+    void requestV3FrameAnalysis(request, { endpoint: current.endpoint }).then((result) => {
+      if (algorithmVersionRef.current !== 'v3') return;
+      const latest = v3RuntimeRef.current;
+      if (result.ok) {
+        updateV3Runtime({
+          ...latest,
+          status: 'ready',
+          message: 'V3 server active; fusing mask, mesh, contact, and temporal evidence.',
+          result: result.response,
+          receivedAt: result.receivedAt,
+          latencyMs: result.response.latencyMs
+        });
+        return;
+      }
+
+      updateV3Runtime({
+        ...latest,
+        status: 'fallback',
+        message: `${formatV3ClientStatus(result.status)}; V2 fallback active.`,
+        result: null,
+        receivedAt: result.receivedAt,
+        latencyMs: null
+      });
+    });
+  }, [updateV3Runtime]);
+
   const runLoop = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -404,6 +518,8 @@ export default function App() {
           detectorBoxRef.current = engine.detectObjectBox(video, timestamp);
           lastDetectorRunRef.current = timestamp;
         }
+        const activeAlgorithmVersion = algorithmVersionRef.current;
+        const fallbackAlgorithmVersion: AlgorithmVersion = activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion;
         const rawObject = inferObjectRegion({
           video,
           hand,
@@ -412,7 +528,7 @@ export default function App() {
           manualScale: manualScaleRef.current,
           locked: lockObjectRef.current,
           detectorBox: detectorBoxRef.current,
-          algorithmVersion: algorithmVersionRef.current
+          algorithmVersion: fallbackAlgorithmVersion
         });
         object = stabilizerRef.current.stabilizeObject(rawObject, timestamp);
         if (timestamp - lastObjectMatchRef.current > 420) {
@@ -435,19 +551,33 @@ export default function App() {
         const persistentSlipScore = stabilizerRef.current.updatePersistentSlip(handVelocityForSlip, object);
         const rawFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
-          algorithmVersion: algorithmVersionRef.current,
+          algorithmVersion: fallbackAlgorithmVersion,
           objectIdentity
         });
-        frameAnalysis = stabilizerRef.current.stabilizeAnalysis(
-          analyzeGrip(hand, object, previousPalmRef.current, {
-            persistentSlipScore,
-            calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
-            weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
-            algorithmVersion: algorithmVersionRef.current,
-            objectIdentity
-          }),
-          timestamp
-        );
+        const baseFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
+          persistentSlipScore,
+          calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
+          weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
+          algorithmVersion: fallbackAlgorithmVersion,
+          objectIdentity
+        });
+        if (activeAlgorithmVersion === 'v3') {
+          scheduleV3Inference(video, hand, object, baseFrameAnalysis, objectIdentity, timestamp);
+          frameAnalysis = stabilizerRef.current.stabilizeAnalysis(
+            analyzeGripV3({
+              baseAnalysis: baseFrameAnalysis,
+              hand,
+              object,
+              response: v3RuntimeRef.current.result,
+              receivedAt: v3RuntimeRef.current.receivedAt,
+              now: timestamp,
+              endpoint: v3RuntimeRef.current.endpoint
+            }),
+            timestamp
+          );
+        } else {
+          frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
+        }
         updateCalibrationCapture(frameAnalysis, timestamp);
         previousObjectRef.current = object;
         previousPalmRef.current = frameAnalysis.palmCenter;
@@ -460,7 +590,7 @@ export default function App() {
 
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     animationRef.current = requestAnimationFrame(tick);
-  }, [analysis, updateCalibrationCapture]);
+  }, [analysis, scheduleV3Inference, updateCalibrationCapture]);
 
   const resetObject = useCallback(() => {
     manualPointRef.current = null;
@@ -470,10 +600,11 @@ export default function App() {
     detectorBoxRef.current = null;
     stabilizerRef.current.reset();
     calibrationCaptureRef.current = { active: false, kind: calibrationKind, start: 0, samples: [] };
+    resetV3Runtime();
     setLocked(false);
     setCalibrating(false);
     setAnalysis(createEmptyAnalysis('Object reset. Place it between your thumb and fingers to relock.'));
-  }, [calibrationKind]);
+  }, [calibrationKind, resetV3Runtime]);
 
   const startCalibration = useCallback((kind: 'strong' | 'weak' = 'strong') => {
     calibrationCaptureRef.current = {
@@ -568,19 +699,26 @@ export default function App() {
       previousObjectRef.current = null;
       detectorBoxRef.current = null;
       stabilizerRef.current.reset();
+      resetV3Runtime(
+        version === 'v3'
+          ? 'V3 selected. Start tracking to connect to the local perception server.'
+          : 'V3 server idle. Select V3 and start tracking to begin fusion.'
+      );
       setLocked(false);
       setCalibrating(false);
       setAlgorithmVersion(version);
       saveAlgorithmVersion(version);
       setAnalysis(
         createEmptyAnalysis(
-          version === 'v2'
+          version === 'v3'
+            ? 'V3 selected. It will fuse local-server perception with V2 fallback when the server is unavailable.'
+            : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
         )
       );
     },
-    [algorithmVersion]
+    [algorithmVersion, resetV3Runtime]
   );
 
   const openTrainerPortal = useCallback(() => {
@@ -799,6 +937,14 @@ export default function App() {
                 aria-pressed={algorithmVersion === 'v2'}
               >
                 V2
+              </button>
+              <button
+                type="button"
+                className={algorithmVersion === 'v3' ? 'version-button active' : 'version-button'}
+                onClick={() => selectAlgorithmVersion('v3')}
+                aria-pressed={algorithmVersion === 'v3'}
+              >
+                V3
               </button>
             </div>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -1101,6 +1247,34 @@ export default function App() {
           <Metric label="Coupling" value={analysis.motionCoupling} info={METRIC_INFO.coupling} />
         </div>
 
+        {algorithmVersion === 'v3' && analysis.v3 && (
+          <div className="v3-panel">
+            <div className="motion-header">
+              <Activity size={18} />
+              <span>V3 perception</span>
+            </div>
+            <div className={analysis.v3.status === 'server' ? 'v3-status ready' : 'v3-status fallback'}>
+              <span>{v3Runtime.status === 'pending' ? 'pending' : analysis.v3.status}</span>
+              <strong>{analysis.v3.usedServerResult ? `${Math.round(analysis.v3.modelConfidence * 100)}%` : 'V2'}</strong>
+            </div>
+            <p className={analysis.v3.usedServerResult ? 'diagnostic-copy' : 'diagnostic-copy warn'}>{v3Runtime.message}</p>
+            <div className="v3-score-grid">
+              <V3Score label="Object" value={analysis.v3.subScores.objectEvidence} />
+              <V3Score label="Hand" value={analysis.v3.subScores.handEvidence} />
+              <V3Score label="Contact" value={analysis.v3.subScores.contactEvidence} />
+              <V3Score label="Temporal" value={analysis.v3.subScores.temporalEvidence} />
+            </div>
+            <div className="diagnostic-row neutral">
+              <span>Latency</span>
+              <strong>{analysis.v3.serverLatencyMs === null ? '--' : `${Math.round(analysis.v3.serverLatencyMs)} ms`}</strong>
+            </div>
+            <div className={analysis.v3.reason === 'strong_hold' ? 'diagnostic-row positive' : 'diagnostic-row neutral'}>
+              <span>V3 diagnostic</span>
+              <strong>{formatIssueCategory(analysis.v3.reason ?? 'none')}</strong>
+            </div>
+          </div>
+        )}
+
         <div className="trainer-panel">
           <div className="motion-header">
             <Images size={18} />
@@ -1362,6 +1536,18 @@ function Metric({ label, value, text, info }: { label: string; value: number; te
   );
 }
 
+function V3Score({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="v3-score">
+      <span>{label}</span>
+      <strong>{Math.round(value * 100)}%</strong>
+      <div className="metric-track">
+        <span style={{ width: `${Math.round(value * 100)}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function InlineExplain({ label, text, compact = false }: { label: string; text: string; compact?: boolean }) {
   const [open, setOpen] = useState(false);
 
@@ -1404,7 +1590,21 @@ function formatIssueCategory(category: GripAnalysis['diagnostics']['issueCategor
   if (category === 'pose_problem') return 'pose';
   if (category === 'motion_problem') return 'motion';
   if (category === 'identity_problem') return 'identity';
+  if (category === 'object_uncertain') return 'object uncertain';
+  if (category === 'hand_occluded') return 'hand occluded';
+  if (category === 'contact_uncertain') return 'contact uncertain';
+  if (category === 'slip_risk') return 'slip risk';
+  if (category === 'server_unavailable') return 'server unavailable';
+  if (category === 'strong_hold') return 'strong hold';
   return 'none';
+}
+
+function formatV3ClientStatus(status: 'timeout' | 'network_error' | 'http_error' | 'invalid_response' | 'frame_unavailable') {
+  if (status === 'timeout') return 'V3 server timeout';
+  if (status === 'network_error') return 'V3 server unavailable';
+  if (status === 'http_error') return 'V3 server error';
+  if (status === 'invalid_response') return 'V3 server response invalid';
+  return 'V3 frame unavailable';
 }
 
 function explainSuggestedPoint(label: string) {
@@ -1457,9 +1657,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' ? fromStorage : 'v2';
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' ? fromStorage : 'v2';
 }
 
 function saveAlgorithmVersion(version: AlgorithmVersion) {

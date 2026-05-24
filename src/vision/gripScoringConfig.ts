@@ -1,12 +1,9 @@
-import type { GripMode } from './types';
+import type { AlgorithmVersion, GripMode } from './types';
 
 export type GripScoringConfig = {
   contactRoleWeights: Record<'thumb' | 'index' | 'middle' | 'ring' | 'pinky' | 'palm', number>;
   modeWeights: Record<Exclude<GripMode, 'open hand' | 'uncertain'>, Record<string, number>>;
-  confidenceWeights: {
-    v1: Record<string, number>;
-    v2: Record<string, number>;
-  };
+  confidenceWeights: Record<AlgorithmVersion, Record<string, number>>;
 };
 
 export const DEFAULT_GRIP_SCORING_CONFIG: GripScoringConfig = {
@@ -60,6 +57,19 @@ export const DEFAULT_GRIP_SCORING_CONFIG: GripScoringConfig = {
       weakCalibration: -0.05
     },
     v2: {
+      objectLockQuality: 0.24,
+      independentObjectScore: 0.24,
+      temporalLockScore: 0.1,
+      gripPercentage: 0.12,
+      motionCoupling: 0.1,
+      closureScore: 0.08,
+      bestModeScore: 0.08,
+      identityMatch: 0.08,
+      identityMiss: -0.08,
+      calibration: 0.04,
+      weakCalibration: -0.06
+    },
+    v3: {
       objectLockQuality: 0.24,
       independentObjectScore: 0.24,
       temporalLockScore: 0.1,

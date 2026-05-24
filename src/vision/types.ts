@@ -12,11 +12,27 @@ export type MotionState = 'idle' | 'moving-with-hand' | 'slipping' | 'uncertain'
 
 export type GripGuidance = 'Strong grip' | 'Improve grip' | 'Reposition' | 'Object not locked' | 'Object uncertain';
 
-export type AlgorithmVersion = 'v1' | 'v2';
+export type AlgorithmVersion = 'v1' | 'v2' | 'v3';
 
 export type GripMode = 'phone-side grip' | 'pinch grip' | 'power grip' | 'hook grip' | 'open hand' | 'uncertain';
 
 export type GripState = 'No hand' | 'Hand only' | 'Object uncertain' | 'Grip detected' | 'Strong hold' | 'Slip risk';
+
+export type V3DiagnosticCode =
+  | 'object_uncertain'
+  | 'hand_occluded'
+  | 'contact_uncertain'
+  | 'slip_risk'
+  | 'server_unavailable'
+  | 'strong_hold';
+
+export type GripIssueCategory =
+  | 'none'
+  | 'object_problem'
+  | 'pose_problem'
+  | 'motion_problem'
+  | 'identity_problem'
+  | V3DiagnosticCode;
 
 export type ObjectRegion = {
   center: Point;
@@ -99,12 +115,75 @@ export type GripDiagnostics = {
   recommendation: string;
   objectIssue: string | null;
   gripIssue: string | null;
-  issueCategory: 'none' | 'object_problem' | 'pose_problem' | 'motion_problem' | 'identity_problem';
+  issueCategory: GripIssueCategory;
   scoreBreakdown: Array<{
     label: string;
     value: number;
     impact: 'positive' | 'negative' | 'neutral';
   }>;
+};
+
+export type V3ContactMap = {
+  thumb: number;
+  index: number;
+  middle: number;
+  ring: number;
+  pinky: number;
+  palm: number;
+};
+
+export type V3SubScores = {
+  objectEvidence: number;
+  handEvidence: number;
+  contactEvidence: number;
+  temporalEvidence: number;
+};
+
+export type V3PerceptionResponse = {
+  version: 'v3';
+  frameTimestamp: number;
+  modelTimestamp?: number;
+  latencyMs: number;
+  uncertainty: number;
+  hand: {
+    meshQuality: number;
+    occlusion: number;
+    handednessConfidence: number;
+    fingerArticulation: number;
+    joints?: Landmark[];
+  };
+  object: {
+    present: boolean;
+    maskConfidence: number;
+    maskStability: number;
+    identityConfidence: number;
+    poseConfidence: number;
+    lockConfidence: number;
+  };
+  contact: V3ContactMap & {
+    coverage: number;
+    opposingPairs: number;
+  };
+  temporal: {
+    continuity: number;
+    coupling: number;
+    slipRisk: number;
+    jitter: number;
+  };
+  diagnostics?: V3DiagnosticCode[];
+};
+
+export type V3AnalysisDetails = {
+  status: 'server' | 'fallback';
+  reason: V3DiagnosticCode | null;
+  usedServerResult: boolean;
+  endpoint: string;
+  serverLatencyMs: number | null;
+  serverAgeMs: number | null;
+  modelConfidence: number;
+  uncertainty: number;
+  subScores: V3SubScores;
+  diagnostics: V3DiagnosticCode[];
 };
 
 export type ObjectIdentitySignal = {
@@ -137,6 +216,7 @@ export type GripAnalysis = {
   evidence: GripEvidence;
   calibrated: boolean;
   diagnostics: GripDiagnostics;
+  v3?: V3AnalysisDetails;
 };
 
 export type TrackingFrame = {

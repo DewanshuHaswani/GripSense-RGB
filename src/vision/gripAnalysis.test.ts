@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeGrip } from './gripAnalysis';
-import type { Landmark, ObjectRegion } from './types';
+import { analyzeGripV3 } from './v3GripAnalysis';
+import { parseV3PerceptionResponse } from './v3Inference';
+import type { Landmark, ObjectRegion, V3PerceptionResponse } from './types';
 
 describe('analyzeGrip', () => {
   it('returns no score when a hand is open with no object', () => {
@@ -233,6 +235,103 @@ describe('analyzeGrip', () => {
     expect(identityBlocked.diagnostics.issueCategory).toBe('identity_problem');
     expect(poseBlocked.diagnostics.issueCategory).toBe('pose_problem');
   });
+
+  it('v3 falls back to V2 when the local server is unavailable', () => {
+    const hand = phoneGripHand();
+    const object = phoneObjectAt(350, 316, 0.88);
+    const base = analyzeGrip(hand, object, { x: 326, y: 346 }, { algorithmVersion: 'v2' });
+    const analysis = analyzeGripV3({
+      baseAnalysis: base,
+      hand,
+      object,
+      response: null,
+      receivedAt: null,
+      now: 1200,
+      endpoint: 'http://127.0.0.1:7867/v3/analyze-frame'
+    });
+
+    expect(analysis.gripPercentage).toBe(base.gripPercentage);
+    expect(analysis.v3?.status).toBe('fallback');
+    expect(analysis.v3?.reason).toBe('server_unavailable');
+    expect(analysis.diagnostics.issueCategory).toBe('server_unavailable');
+  });
+
+  it('v3 refuses to report a strong hold when the server sees no object', () => {
+    const hand = phoneGripHand();
+    const object = phoneObjectAt(350, 316, 0.88);
+    const base = analyzeGrip(hand, object, { x: 326, y: 346 }, { algorithmVersion: 'v2' });
+    const analysis = analyzeGripV3({
+      baseAnalysis: base,
+      hand,
+      object,
+      response: v3Response({ object: { present: false } }),
+      receivedAt: 1180,
+      now: 1200,
+      endpoint: 'local'
+    });
+
+    expect(analysis.gripPercentage).toBe(0);
+    expect(analysis.guidance).toBe('Object uncertain');
+    expect(analysis.diagnostics.issueCategory).toBe('object_uncertain');
+  });
+
+  it('v3 reports strong hold only when object, hand, contact, and temporal evidence agree', () => {
+    const hand = phoneGripHand();
+    const object = phoneObjectAt(350, 316, 0.88);
+    const base = analyzeGrip(hand, object, { x: 326, y: 346 }, { algorithmVersion: 'v2' });
+    const analysis = analyzeGripV3({
+      baseAnalysis: base,
+      hand,
+      object,
+      response: v3Response(),
+      receivedAt: 1180,
+      now: 1200,
+      endpoint: 'local'
+    });
+
+    expect(analysis.v3?.usedServerResult).toBe(true);
+    expect(analysis.diagnostics.issueCategory).toBe('strong_hold');
+    expect(analysis.guidance).toBe('Strong grip');
+    expect(analysis.gripPercentage).toBeGreaterThanOrEqual(70);
+  });
+
+  it('v3 falls back when server evidence is stale or hand mesh confidence is too low', () => {
+    const hand = phoneGripHand();
+    const object = phoneObjectAt(350, 316, 0.88);
+    const base = analyzeGrip(hand, object, { x: 326, y: 346 }, { algorithmVersion: 'v2' });
+    const stale = analyzeGripV3({
+      baseAnalysis: base,
+      hand,
+      object,
+      response: v3Response(),
+      receivedAt: 0,
+      now: 2400,
+      endpoint: 'local'
+    });
+    const lowMesh = analyzeGripV3({
+      baseAnalysis: base,
+      hand,
+      object,
+      response: v3Response({ hand: { meshQuality: 0.12 }, diagnostics: ['hand_occluded'] }),
+      receivedAt: 1180,
+      now: 1200,
+      endpoint: 'local'
+    });
+
+    expect(stale.v3?.status).toBe('fallback');
+    expect(stale.v3?.reason).toBe('server_unavailable');
+    expect(lowMesh.v3?.status).toBe('fallback');
+    expect(lowMesh.v3?.reason).toBe('hand_occluded');
+    expect(lowMesh.diagnostics.issueCategory).toBe('hand_occluded');
+    expect(lowMesh.diagnostics.gripIssue).toContain('hand mesh');
+  });
+
+  it('validates the V3 server response contract', () => {
+    expect(parseV3PerceptionResponse(v3Response()).ok).toBe(true);
+    expect(parseV3PerceptionResponse({ ...v3Response(), object: { present: true } }).ok).toBe(false);
+    expect(parseV3PerceptionResponse({ ...v3Response(), uncertainty: 1.4 }).ok).toBe(false);
+    expect(parseV3PerceptionResponse({ ...v3Response(), diagnostics: ['new_server_code'] }).ok).toBe(false);
+  });
 });
 
 function baseHand(): Landmark[] {
@@ -389,5 +488,58 @@ function mirrorObject(object: ObjectRegion, width: number): ObjectRegion {
     angle: -object.angle,
     velocity: { x: -object.velocity.x, y: object.velocity.y },
     contour: object.contour.map((point) => ({ x: width - point.x, y: point.y }))
+  };
+}
+
+function v3Response(overrides: {
+  frameTimestamp?: number;
+  latencyMs?: number;
+  uncertainty?: number;
+  hand?: Partial<V3PerceptionResponse['hand']>;
+  object?: Partial<V3PerceptionResponse['object']>;
+  contact?: Partial<V3PerceptionResponse['contact']>;
+  temporal?: Partial<V3PerceptionResponse['temporal']>;
+  diagnostics?: V3PerceptionResponse['diagnostics'];
+} = {}): V3PerceptionResponse {
+  return {
+    version: 'v3',
+    frameTimestamp: overrides.frameTimestamp ?? 1200,
+    latencyMs: overrides.latencyMs ?? 42,
+    uncertainty: overrides.uncertainty ?? 0.12,
+    hand: {
+      meshQuality: 0.86,
+      occlusion: 0.12,
+      handednessConfidence: 0.92,
+      fingerArticulation: 0.82,
+      ...overrides.hand
+    },
+    object: {
+      present: true,
+      maskConfidence: 0.88,
+      maskStability: 0.84,
+      identityConfidence: 0.8,
+      poseConfidence: 0.82,
+      lockConfidence: 0.86,
+      ...overrides.object
+    },
+    contact: {
+      thumb: 0.82,
+      index: 0.78,
+      middle: 0.74,
+      ring: 0.62,
+      pinky: 0.44,
+      palm: 0.68,
+      coverage: 0.78,
+      opposingPairs: 0.84,
+      ...overrides.contact
+    },
+    temporal: {
+      continuity: 0.86,
+      coupling: 0.84,
+      slipRisk: 0.08,
+      jitter: 0.12,
+      ...overrides.temporal
+    },
+    diagnostics: overrides.diagnostics
   };
 }
