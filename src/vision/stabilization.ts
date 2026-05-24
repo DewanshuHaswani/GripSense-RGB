@@ -92,7 +92,10 @@ export class TrackingStabilizer {
     const objectMotion = object ? vectorMagnitude(object.velocity) : 0;
     const moving = Math.max(handMotion, objectMotion) > 2.8;
     const relativeMotion = object ? vectorMagnitude(subtract(object.velocity, handVelocity)) : 0;
-    const instantSlip = moving ? clamp(relativeMotion / Math.max(10, Math.max(handMotion, objectMotion) * 1.9)) : 0;
+    const drift = object?.relativeDriftScore ?? 0;
+    const instantSlip = moving
+      ? clamp(relativeMotion / Math.max(10, Math.max(handMotion, objectMotion) * 1.9) + drift * 0.28)
+      : clamp(drift * 0.38);
     this.slipHistory.push(instantSlip);
     if (this.slipHistory.length > 10) this.slipHistory.shift();
     const sustained = this.slipHistory.reduce((sum, value) => sum + value, 0) / Math.max(1, this.slipHistory.length);

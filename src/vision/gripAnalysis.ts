@@ -24,6 +24,7 @@ import {
   vectorMagnitude
 } from './geometry';
 import { computeGripEvidence, countContactPoints } from './gripEvidence';
+import { DEFAULT_GRIP_SCORING_CONFIG, type GripScoringConfig } from './gripScoringConfig';
 
 const EMPTY_ANALYSIS: GripAnalysis = {
   gripPercentage: 0,
@@ -49,6 +50,14 @@ const EMPTY_ANALYSIS: GripAnalysis = {
   evidence: {
     fingerCurlScore: 0,
     fingerSegmentContactScore: 0,
+    contactRoles: {
+      thumb: 0,
+      index: 0,
+      middle: 0,
+      ring: 0,
+      pinky: 0,
+      palm: 0
+    },
     palmObjectContainmentScore: 0,
     thumbSupportScore: 0,
     phoneSideGripScore: 0,
@@ -79,6 +88,7 @@ const EMPTY_ANALYSIS: GripAnalysis = {
     recommendation: 'Start camera tracking, then place an object between the thumb and fingers.',
     objectIssue: null,
     gripIssue: null,
+    issueCategory: 'none',
     scoreBreakdown: []
   }
 };
@@ -97,9 +107,11 @@ export function analyzeGrip(
     weakCalibrationBaseline?: GripCalibrationBaseline | null;
     algorithmVersion?: AlgorithmVersion;
     objectIdentity?: ObjectIdentitySignal;
+    scoringConfig?: GripScoringConfig;
   } = {}
 ): GripAnalysis {
   const algorithmVersion = options.algorithmVersion ?? 'v1';
+  const scoringConfig = options.scoringConfig ?? DEFAULT_GRIP_SCORING_CONFIG;
   const objectIdentity = options.objectIdentity ?? { hasProfiles: false, score: 0, matched: false, name: null };
   if (!hand || hand.length < 21) {
     return createEmptyAnalysis('No hand detected. Keep your hand inside the camera frame.');
@@ -181,7 +193,7 @@ export function analyzeGrip(
   const evidence = computeGripEvidence(hand, object, options.persistentSlipScore ?? 0);
   const mode = classifyGripMode(evidence);
   const contactPoints = countContactPoints(evidence);
-  const contactScore = scoreByMode(evidence, mode, algorithmVersion);
+  const contactScore = scoreByMode(evidence, mode, algorithmVersion, scoringConfig);
   const thumbOpposition = evidence.thumbSupportScore;
 
   const angles = tips
@@ -200,7 +212,8 @@ export function analyzeGrip(
   const handMotion = vectorMagnitude(handVelocity);
   const objectMotion = vectorMagnitude(object.velocity);
   const moving = Math.max(handMotion, objectMotion) > 2.8;
-  const slipRisk = moving ? evidence.persistentSlipScore : clamp((1 - evidence.objectLockQuality) * 0.08);
+  const driftSlip = object.relativeDriftScore ?? 0;
+  const slipRisk = moving ? clamp(evidence.persistentSlipScore * 0.72 + driftSlip * 0.28) : clamp((1 - evidence.objectLockQuality) * 0.08 + driftSlip * 0.18);
   const motionCoupling = moving ? clamp(1 - slipRisk) : 0.88;
   const calibration = calibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.calibrationBaseline ?? null);
   const weakCalibration = weakCalibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.weakCalibrationBaseline ?? null);
@@ -223,26 +236,17 @@ export function analyzeGrip(
     calibration.similarToBaseline && options.calibrationBaseline
       ? Math.max(gripPercentage, Math.round(options.calibrationBaseline.gripPercentage * 0.88))
       : gripPercentage;
-  const confidence = clamp(
-    algorithmVersion === 'v2'
-      ? evidence.objectLockQuality * 0.24 +
-          evidence.independentObjectScore * 0.24 +
-          evidence.temporalLockScore * 0.1 +
-          gripPercentage / 100 * 0.12 +
-          motionCoupling * 0.1 +
-          closureScore * 0.08 +
-          Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore) * 0.08 +
-          (objectIdentity.hasProfiles ? (objectIdentity.matched ? objectIdentity.score * 0.08 : -0.08) : 0) +
-          (calibration.similarToBaseline ? 0.04 : 0) -
-          (weakCalibration.similarToWeak ? 0.06 : 0)
-      : evidence.objectLockQuality * 0.42 +
-          gripPercentage / 100 * 0.16 +
-          motionCoupling * 0.12 +
-          closureScore * 0.12 +
-          Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore) * 0.1 +
-          (calibration.similarToBaseline ? 0.08 : 0) -
-          (weakCalibration.similarToWeak ? 0.05 : 0)
-  );
+  const confidence = computeConfidence({
+    evidence,
+    gripPercentage,
+    motionCoupling,
+    closureScore,
+    calibrationMatched: calibration.similarToBaseline,
+    weakMatched: weakCalibration.similarToWeak,
+    algorithmVersion,
+    objectIdentity,
+    scoringConfig
+  });
   const motionState = !moving ? 'idle' : slipRisk > 0.45 ? 'slipping' : motionCoupling > 0.58 ? 'moving-with-hand' : 'uncertain';
   const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, algorithmVersion);
   const objectUncertainGuidance =
@@ -382,47 +386,20 @@ function classifyGripMode(evidence: GripEvidence): GripMode {
   return mode;
 }
 
-function scoreByMode(evidence: GripEvidence, mode: GripMode, algorithmVersion: AlgorithmVersion) {
+function weightedScore(evidence: GripEvidence, weights: Record<string, number>) {
+  return Object.entries(weights).reduce((sum, [key, weight]) => {
+    const value = evidence[key as keyof GripEvidence];
+    return sum + (typeof value === 'number' ? value * weight : 0);
+  }, 0);
+}
+
+function scoreByMode(evidence: GripEvidence, mode: GripMode, algorithmVersion: AlgorithmVersion, scoringConfig: GripScoringConfig) {
   const v2ObjectFactor =
     algorithmVersion === 'v2'
       ? clamp(evidence.independentObjectScore * 0.54 + evidence.objectLockQuality * 0.28 + evidence.temporalLockScore * 0.18, 0.58, 1)
       : 1;
-  if (mode === 'phone-side grip') {
-    return (
-      evidence.phoneSideGripScore * 0.28 +
-      evidence.fingerCurlScore * 0.18 +
-      evidence.fingerSegmentContactScore * 0.16 +
-      evidence.thumbSupportScore * 0.12 +
-      evidence.occlusionResilienceScore * 0.14 +
-      evidence.motionStabilityScore * 0.12
-    ) * v2ObjectFactor;
-  }
-  if (mode === 'pinch grip') {
-    return (
-      evidence.pinchScore * 0.34 +
-      evidence.thumbSupportScore * 0.2 +
-      evidence.visibleContactScore * 0.14 +
-      evidence.fingerSegmentContactScore * 0.12 +
-      evidence.motionStabilityScore * 0.2
-    ) * v2ObjectFactor;
-  }
-  if (mode === 'power grip') {
-    return (
-      evidence.powerGripScore * 0.3 +
-      evidence.palmObjectContainmentScore * 0.2 +
-      evidence.fingerCurlScore * 0.18 +
-      evidence.fingerSegmentContactScore * 0.16 +
-      evidence.motionStabilityScore * 0.16
-    ) * v2ObjectFactor;
-  }
-  if (mode === 'hook grip') {
-    return (
-      evidence.hookGripScore * 0.34 +
-      evidence.fingerCurlScore * 0.22 +
-      evidence.fingerSegmentContactScore * 0.2 +
-      evidence.motionStabilityScore * 0.14 +
-      evidence.palmObjectContainmentScore * 0.1
-    ) * v2ObjectFactor;
+  if (mode === 'phone-side grip' || mode === 'pinch grip' || mode === 'power grip' || mode === 'hook grip') {
+    return weightedScore(evidence, scoringConfig.modeWeights[mode]) * v2ObjectFactor;
   }
   if (mode === 'open hand') return Math.max(0, evidence.visibleContactScore * 0.2 - 0.1);
   return (
@@ -432,6 +409,43 @@ function scoreByMode(evidence: GripEvidence, mode: GripMode, algorithmVersion: A
     evidence.thumbSupportScore * 0.14 +
     evidence.motionStabilityScore * 0.12
   ) * v2ObjectFactor;
+}
+
+function computeConfidence({
+  evidence,
+  gripPercentage,
+  motionCoupling,
+  closureScore,
+  calibrationMatched,
+  weakMatched,
+  algorithmVersion,
+  objectIdentity,
+  scoringConfig
+}: {
+  evidence: GripEvidence;
+  gripPercentage: number;
+  motionCoupling: number;
+  closureScore: number;
+  calibrationMatched: boolean;
+  weakMatched: boolean;
+  algorithmVersion: AlgorithmVersion;
+  objectIdentity: ObjectIdentitySignal;
+  scoringConfig: GripScoringConfig;
+}) {
+  const weights = scoringConfig.confidenceWeights[algorithmVersion];
+  const bestModeScore = Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore);
+  return clamp(
+    evidence.objectLockQuality * weights.objectLockQuality +
+      (weights.independentObjectScore ?? 0) * evidence.independentObjectScore +
+      (weights.temporalLockScore ?? 0) * evidence.temporalLockScore +
+      gripPercentage / 100 * weights.gripPercentage +
+      motionCoupling * weights.motionCoupling +
+      closureScore * weights.closureScore +
+      bestModeScore * weights.bestModeScore +
+      (objectIdentity.hasProfiles ? (objectIdentity.matched ? objectIdentity.score * (weights.identityMatch ?? 0) : weights.identityMiss ?? 0) : 0) +
+      (calibrationMatched ? weights.calibration : 0) +
+      (weakMatched ? weights.weakCalibration : 0)
+  );
 }
 
 function evaluateV2ObjectGate(object: ObjectRegion | null, closureScore: number): {
@@ -594,6 +608,16 @@ function createDiagnostics(
           ? 'Finger wrap is weak.'
           : null;
   const recommendation = recommend(mode, state, objectIssue, gripIssue, evidence, calibrated);
+  const issueCategory =
+    identityBlocksStrongGrip(identity, algorithmVersion)
+      ? 'identity_problem'
+      : state === 'Slip risk'
+        ? 'motion_problem'
+        : objectIssue
+          ? 'object_problem'
+          : gripIssue
+            ? 'pose_problem'
+            : 'none';
 
   return {
     mode,
@@ -601,10 +625,12 @@ function createDiagnostics(
     recommendation,
     objectIssue,
     gripIssue,
+    issueCategory,
     scoreBreakdown: [
       { label: 'Mode fit', value: mode === 'uncertain' ? 0 : evidence.modeScores[mode], impact: 'positive' },
       { label: 'Object lock', value: evidence.objectLockQuality, impact: objectIssue ? 'negative' : 'positive' },
       { label: 'Contact', value: evidence.fingerSegmentContactScore, impact: 'positive' },
+      { label: 'Contact roles', value: roleCoverage(evidence.contactRoles), impact: 'positive' },
       { label: 'Finger wrap', value: evidence.fingerCurlScore, impact: 'positive' },
       { label: 'Thumb support', value: evidence.thumbSupportScore, impact: evidence.thumbSupportScore < 0.3 ? 'negative' : 'positive' },
       { label: 'Motion stability', value: evidence.motionStabilityScore, impact: state === 'Slip risk' ? 'negative' : 'positive' },
@@ -639,6 +665,10 @@ function createDiagnostics(
       }
     ]
   };
+}
+
+function roleCoverage(roles: GripEvidence['contactRoles']) {
+  return clamp(roles.thumb * 0.24 + roles.index * 0.2 + roles.middle * 0.18 + roles.ring * 0.14 + roles.pinky * 0.1 + roles.palm * 0.14);
 }
 
 function recommend(

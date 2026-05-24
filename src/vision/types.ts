@@ -36,6 +36,7 @@ export type ObjectRegion = {
   visualEdgeScore?: number;
   visualTextureScore?: number;
   independentEvidenceScore?: number;
+  relativeDriftScore?: number;
 };
 
 export type GripPoint = Point & {
@@ -46,6 +47,14 @@ export type GripPoint = Point & {
 export type GripEvidence = {
   fingerCurlScore: number;
   fingerSegmentContactScore: number;
+  contactRoles: {
+    thumb: number;
+    index: number;
+    middle: number;
+    ring: number;
+    pinky: number;
+    palm: number;
+  };
   palmObjectContainmentScore: number;
   thumbSupportScore: number;
   phoneSideGripScore: number;
@@ -90,6 +99,7 @@ export type GripDiagnostics = {
   recommendation: string;
   objectIssue: string | null;
   gripIssue: string | null;
+  issueCategory: 'none' | 'object_problem' | 'pose_problem' | 'motion_problem' | 'identity_problem';
   scoreBreakdown: Array<{
     label: string;
     value: number;

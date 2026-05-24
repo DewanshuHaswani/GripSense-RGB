@@ -10,8 +10,10 @@ import {
   handSize,
   normalize,
   palmCenter,
-  subtract
+  subtract,
+  toHandLocal
 } from './geometry';
+import { DEFAULT_GRIP_SCORING_CONFIG } from './gripScoringConfig';
 
 const FINGER_SEGMENTS = [
   [5, 6],
@@ -35,6 +37,7 @@ export function computeGripEvidence(
 ): GripEvidence {
   const size = handSize(hand);
   const palm = palmCenter(hand);
+  const objectLocalToPalm = toHandLocal(object.center, hand, palm);
   const tips = FINGERTIP_INDICES.map((index) => hand[index]);
   const mcpCenter = averagePoint(FINGER_MCP_INDICES.map((index) => hand[index]));
   const curlScores = [8, 12, 16, 20].map((tipIndex, fingerIndex) => {
@@ -64,10 +67,12 @@ export function computeGripEvidence(
   const visibleContactScore = clamp(contactPoints / 5);
 
   const objectDistanceFromPalm = distance(palm, object.center);
+  const centeredInHandCorridor = clamp(1 - Math.abs(objectLocalToPalm.x) / Math.max(size * 0.52, 1));
   const palmObjectContainmentScore = clamp(
     1 -
       Math.abs(distance(palm, object.center) - distance(mcpCenter, object.center)) / Math.max(size * 0.72, 1) +
-      (objectDistanceFromPalm < size * 0.9 ? 0.18 : -0.18)
+      (objectDistanceFromPalm < size * 0.9 ? 0.18 : -0.18) +
+      centeredInHandCorridor * 0.12
   );
 
   const thumb = hand[4];
@@ -80,9 +85,11 @@ export function computeGripEvidence(
   const thumbSupportScore = clamp(Math.max(oppositionAngle * 0.55 + thumbNearObject * 0.45, thumbHiddenFallback * 0.82));
 
   const phoneSideGripScore = computePhoneSideGripScore(hand, object, size, segmentScores);
+  const contactRoles = computeContactRoles(hand, object, size, segmentScores, palmObjectContainmentScore, thumbNearObject);
   const pinchScore = computePinchScore(hand, object, size);
-  const powerGripScore = clamp(fingerCurlScore * 0.32 + fingerSegmentContactScore * 0.26 + palmObjectContainmentScore * 0.24 + thumbSupportScore * 0.18);
-  const hookGripScore = clamp(fingerCurlScore * 0.44 + fingerSegmentContactScore * 0.34 + palmObjectContainmentScore * 0.12 + (1 - thumbSupportScore) * 0.1);
+  const roleCoverage = scoreContactRoles(contactRoles);
+  const powerGripScore = clamp(fingerCurlScore * 0.28 + fingerSegmentContactScore * 0.22 + palmObjectContainmentScore * 0.22 + thumbSupportScore * 0.16 + roleCoverage * 0.12);
+  const hookGripScore = clamp(fingerCurlScore * 0.4 + fingerSegmentContactScore * 0.3 + palmObjectContainmentScore * 0.1 + (1 - thumbSupportScore) * 0.1 + roleCoverage * 0.1);
   const occlusionResilienceScore = clamp(Math.max(fingerSegmentContactScore, phoneSideGripScore, powerGripScore) - visibleContactScore * 0.18);
   const motionStabilityScore = clamp(1 - persistentSlipScore);
   const temporalLockScore = clamp((object.lockAgeFrames ?? 0) / 28);
@@ -129,6 +136,7 @@ export function computeGripEvidence(
   return {
     fingerCurlScore,
     fingerSegmentContactScore,
+    contactRoles,
     palmObjectContainmentScore,
     thumbSupportScore,
     phoneSideGripScore,
@@ -185,6 +193,47 @@ function computePinchScore(hand: Landmark[], object: ObjectRegion, size: number)
   const indexNearObject = clamp(1 - distanceToEllipseBoundary(index, object) / Math.max(18, size * 0.14));
   const opposition = clamp(1 - thumbIndexDistance / Math.max(1, size * 0.72));
   return clamp(opposition * 0.38 + thumbNearObject * 0.24 + indexNearObject * 0.24 + smallObjectBias * 0.14);
+}
+
+function computeContactRoles(
+  hand: Landmark[],
+  object: ObjectRegion,
+  size: number,
+  segmentScores: number[],
+  palmObjectContainmentScore: number,
+  thumbNearObject: number
+): GripEvidence['contactRoles'] {
+  const roleTolerance = Math.max(18, size * 0.17);
+  const roleScore = (indices: number[]) =>
+    Math.max(
+      ...indices.map((index) => {
+        const boundaryScore = clamp(1 - distanceToEllipseBoundary(hand[index], object) / roleTolerance);
+        const local = toHandLocal(hand[index], hand);
+        const sideSupport = clamp(1 - Math.abs(local.x) / Math.max(size * 0.72, 1)) * 0.18;
+        return clamp(boundaryScore + sideSupport);
+      })
+    );
+
+  return {
+    thumb: thumbNearObject,
+    index: Math.max(roleScore([5, 6, 7, 8]), averageTop(segmentScores.slice(0, 3), 2)),
+    middle: Math.max(roleScore([9, 10, 11, 12]), averageTop(segmentScores.slice(3, 6), 2)),
+    ring: Math.max(roleScore([13, 14, 15, 16]), averageTop(segmentScores.slice(6, 9), 2)),
+    pinky: Math.max(roleScore([17, 18, 19, 20]), averageTop(segmentScores.slice(9, 12), 2)),
+    palm: palmObjectContainmentScore
+  };
+}
+
+function scoreContactRoles(roles: GripEvidence['contactRoles']) {
+  const weights = DEFAULT_GRIP_SCORING_CONFIG.contactRoleWeights;
+  return clamp(
+    roles.thumb * weights.thumb +
+      roles.index * weights.index +
+      roles.middle * weights.middle +
+      roles.ring * weights.ring +
+      roles.pinky * weights.pinky +
+      roles.palm * weights.palm
+  );
 }
 
 function hasOpposingSides(points: Point[], object: ObjectRegion, size: number) {

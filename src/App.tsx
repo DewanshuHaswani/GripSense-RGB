@@ -1242,6 +1242,13 @@ export default function App() {
             </span>
             <strong>{previousObjectRef.current?.manuallyAdjusted ? 'yes' : 'no'}</strong>
           </div>
+          <div className={analysis.diagnostics.issueCategory === 'none' ? 'diagnostic-row positive' : 'diagnostic-row negative'}>
+            <span>
+              Issue type
+              <InlineExplain label="Explain issue type" text="Classifies the current blocker as object tracking, hand pose, motion/slip, trained-object identity, or none." />
+            </span>
+            <strong>{formatIssueCategory(analysis.diagnostics.issueCategory)}</strong>
+          </div>
           {analysis.diagnostics.objectIssue && <p className="diagnostic-copy warn">{analysis.diagnostics.objectIssue}</p>}
           {analysis.diagnostics.gripIssue && <p className="diagnostic-copy warn">{analysis.diagnostics.gripIssue}</p>}
         </div>
@@ -1390,6 +1397,14 @@ function explainBreakdown(label: string) {
   if (normalized.includes('motion')) return EXPLAIN.motionStability;
   if (normalized.includes('calibration')) return EXPLAIN.calibration;
   return 'This diagnostic contributes to the current visual grip stability score.';
+}
+
+function formatIssueCategory(category: GripAnalysis['diagnostics']['issueCategory']) {
+  if (category === 'object_problem') return 'object';
+  if (category === 'pose_problem') return 'pose';
+  if (category === 'motion_problem') return 'motion';
+  if (category === 'identity_problem') return 'identity';
+  return 'none';
 }
 
 function explainSuggestedPoint(label: string) {

@@ -38,6 +38,10 @@ export function dot(a: Point, b: Point) {
   return a.x * b.x + a.y * b.y;
 }
 
+export function cross(a: Point, b: Point) {
+  return a.x * b.y - a.y * b.x;
+}
+
 export function handSize(hand: Landmark[]) {
   if (hand.length < 21) return 1;
   const palmWidth = distance(hand[5], hand[17]);
@@ -51,6 +55,33 @@ export function palmCenter(hand: Landmark[]) {
 
 export function fingertipPoints(hand: Landmark[]) {
   return FINGERTIP_INDICES.map((index) => hand[index]).filter(Boolean);
+}
+
+export function handOrientation(hand: Landmark[]) {
+  if (hand.length < 21) return { angle: 0, handednessSign: 1 };
+  const wrist = hand[0];
+  const indexMcp = hand[5];
+  const pinkyMcp = hand[17];
+  const middleMcp = hand[9];
+  const palmAxis = normalize(subtract(middleMcp, wrist));
+  const knuckleAxis = normalize(subtract(pinkyMcp, indexMcp));
+  const handednessSign = cross(palmAxis, knuckleAxis) >= 0 ? 1 : -1;
+  return {
+    angle: Math.atan2(palmAxis.y, palmAxis.x),
+    handednessSign
+  };
+}
+
+export function toHandLocal(point: Point, hand: Landmark[], origin = palmCenter(hand)): Point {
+  const { angle, handednessSign } = handOrientation(hand);
+  const cos = Math.cos(-angle);
+  const sin = Math.sin(-angle);
+  const dx = point.x - origin.x;
+  const dy = point.y - origin.y;
+  return {
+    x: (dx * cos - dy * sin) * handednessSign,
+    y: dx * sin + dy * cos
+  };
 }
 
 export function ellipsePoint(region: ObjectRegion, theta: number): Point {

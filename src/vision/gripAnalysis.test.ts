@@ -193,6 +193,46 @@ describe('analyzeGrip', () => {
     expect(analysis.diagnostics.state).toBe('Object uncertain');
     expect(analysis.diagnostics.objectIssue).toContain('loose');
   });
+
+  it('reports contact-role evidence for a power grip', () => {
+    const analysis = analyzeGrip(closedGripHand(), bottleObjectAt(354, 334, 0.86), null, { persistentSlipScore: 0.02 });
+    expect(analysis.evidence.contactRoles.thumb).toBeGreaterThan(0.2);
+    expect(analysis.evidence.contactRoles.index).toBeGreaterThan(0.2);
+    expect(analysis.diagnostics.scoreBreakdown.some((item) => item.label === 'Contact roles')).toBe(true);
+  });
+
+  it('keeps mirrored phone grip scoring in the same range', () => {
+    const normal = analyzeGrip(phoneGripHand(), phoneObjectAt(350, 316, 0.88), { x: 326, y: 346 }, { persistentSlipScore: 0.03 });
+    const mirrored = analyzeGrip(mirrorHand(phoneGripHand(), 700), mirrorObject(phoneObjectAt(350, 316, 0.88), 700), { x: 374, y: 346 }, { persistentSlipScore: 0.03 });
+    expect(Math.abs(normal.gripPercentage - mirrored.gripPercentage)).toBeLessThanOrEqual(12);
+    expect(mirrored.guidance).not.toBe('Object not locked');
+  });
+
+  it('uses relative object drift as slip evidence even when frame motion is modest', () => {
+    const object = phoneObjectAt(350, 316, 0.88, { x: 1, y: 0 });
+    object.relativeDriftScore = 0.8;
+    const analysis = analyzeGrip(phoneGripHand(), object, { x: 317, y: 382 }, {
+      persistentSlipScore: 0.1,
+      algorithmVersion: 'v2'
+    });
+    expect(analysis.slipRisk).toBeGreaterThan(0.14);
+    expect(analysis.diagnostics.scoreBreakdown.some((item) => item.label === 'Motion stability')).toBe(true);
+  });
+
+  it('categorizes identity and pose problems separately', () => {
+    const identityBlocked = analyzeGrip(phoneGripHand(), phoneObjectAt(350, 316, 0.88), { x: 326, y: 346 }, {
+      algorithmVersion: 'v2',
+      objectIdentity: {
+        hasProfiles: true,
+        score: 0.1,
+        matched: false,
+        name: null
+      }
+    });
+    const poseBlocked = analyzeGrip(openHand(), objectAt(520, 300, 0.82), null);
+    expect(identityBlocked.diagnostics.issueCategory).toBe('identity_problem');
+    expect(poseBlocked.diagnostics.issueCategory).toBe('pose_problem');
+  });
 });
 
 function baseHand(): Landmark[] {
@@ -335,5 +375,19 @@ function smallObjectAt(x: number, y: number, confidence: number, velocity = { x:
     tightness: 0.78,
     lockAgeFrames: 12,
     manuallyAdjusted: true
+  };
+}
+
+function mirrorHand(hand: Landmark[], width: number): Landmark[] {
+  return hand.map((point) => ({ ...point, x: width - point.x }));
+}
+
+function mirrorObject(object: ObjectRegion, width: number): ObjectRegion {
+  return {
+    ...object,
+    center: { x: width - object.center.x, y: object.center.y },
+    angle: -object.angle,
+    velocity: { x: -object.velocity.x, y: object.velocity.y },
+    contour: object.contour.map((point) => ({ x: width - point.x, y: point.y }))
   };
 }

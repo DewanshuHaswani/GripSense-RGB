@@ -34,6 +34,7 @@ export function inferObjectRegion({
   const tipCenter = averagePoint([hand[4], hand[8], hand[12], hand[16]]);
   const graspCenter = averagePoint([palm, tipCenter, hand[8], hand[12], hand[16]]);
   const detectorCandidate = sanitizeDetectorBox(detectorBox, palm, tips, size);
+  const manualOrDetector = Boolean(manualPoint || detectorCandidate);
   const openHandScore = computeOpenHandScore(hand, size, palm);
   const autoCenter = manualPoint ?? previous?.center ?? graspCenter;
   const radiusSeed = clamp(distance(palm, tipCenter) / Math.max(1, size), 0.18, 0.48);
@@ -45,16 +46,29 @@ export function inferObjectRegion({
     ? { x: detectorCandidate.x + detectorCandidate.width / 2, y: detectorCandidate.y + detectorCandidate.height / 2 }
     : null;
   const rawCenter = detectorCenter ?? autoCenter;
-  const center =
+  const inferredCenter =
     manualPoint || distance(rawCenter, graspCenter) < size * 0.72
       ? rawCenter
       : {
           x: rawCenter.x * 0.38 + graspCenter.x * 0.62,
           y: rawCenter.y * 0.38 + graspCenter.y * 0.62
         };
+  const previousDrift = previous ? distance(inferredCenter, previous.center) / Math.max(1, size) : 0;
+  const previousStable =
+    previous?.locked &&
+    (previous.lockAgeFrames ?? 0) > 6 &&
+    (previous.independentEvidenceScore ?? 0) > 0.42 &&
+    (previous.tightness ?? 0) > 0.38;
+  const center =
+    previousStable && !manualOrDetector && previousDrift > 0.42
+      ? {
+          x: previous!.center.x * 0.7 + inferredCenter.x * 0.3,
+          y: previous!.center.y * 0.7 + inferredCenter.y * 0.3
+        }
+      : inferredCenter;
+  const relativeDriftScore = clamp(previous ? distance(center, previous.center) / Math.max(1, size * 0.62) : 0);
   const imageEvidence = sampleRegionEvidence(video, center, Math.max(radiusX, radiusY));
   const strongVisualObject = imageEvidence.edgeEnergy > 0.42 || imageEvidence.colorVariance > 0.46;
-  const manualOrDetector = Boolean(manualPoint || detectorCandidate);
   const previousIndependentEvidence = previous?.independentEvidenceScore ?? 0;
   const stablePreviousAuto =
     previous?.source === 'automatic' &&
@@ -103,7 +117,7 @@ export function inferObjectRegion({
     algorithmVersion === 'v2' &&
     !manualOrDetector &&
     !stablePreviousAuto &&
-    (independentEvidenceScore < 0.42 || tightness < 0.36 || !nearHand)
+    (independentEvidenceScore < 0.42 || tightness < 0.36 || !nearHand || relativeDriftScore > 0.72)
   ) {
     return null;
   }
@@ -131,7 +145,8 @@ export function inferObjectRegion({
       manuallyAdjusted: Boolean(manualPoint),
       visualEdgeScore: imageEvidence.edgeEnergy,
       visualTextureScore: imageEvidence.colorVariance,
-      independentEvidenceScore
+      independentEvidenceScore,
+      relativeDriftScore
     },
     (index / 28) * Math.PI * 2
   ));
@@ -153,7 +168,8 @@ export function inferObjectRegion({
     manuallyAdjusted: Boolean(manualPoint),
     visualEdgeScore: imageEvidence.edgeEnergy,
     visualTextureScore: imageEvidence.colorVariance,
-    independentEvidenceScore
+    independentEvidenceScore,
+    relativeDriftScore
   };
 }
 
