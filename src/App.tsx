@@ -28,8 +28,8 @@ import { palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
 import { inferObjectRegion } from './vision/objectTracking';
 import {
   browserObjectDescriptorProvider,
-  createCanvasObjectTrainingSample,
   createMaskedCanvasObjectTrainingSample,
+  cropBoundsFor,
   matchObjectProfiles,
   trainingReadiness,
   trainObjectProfileV2,
@@ -106,6 +106,7 @@ type PendingUploadReview = {
   cropSize: number;
   maskScale: number;
   maskShape: CanvasObjectMaskOptions['maskShape'];
+  source: ObjectTrainingSampleV2['source'];
 };
 
 const METRIC_INFO = {
@@ -284,7 +285,7 @@ export default function App() {
       },
       maskScale: pendingUpload.maskScale,
       maskShape: pendingUpload.maskShape,
-      source: 'upload',
+      source: pendingUpload.source,
       sourceName: pendingUpload.name
     });
   }, [pendingUpload]);
@@ -785,13 +786,13 @@ export default function App() {
     }
 
     const frame = videoFrameToCanvas(video);
-    const sample = frame ? createCanvasObjectTrainingSample(frame, 'camera', 'webcam-frame') : null;
-    if (!sample) {
+    if (!frame) {
       setTrainingStatus('Could not capture this frame. Keep the object visible and try again.');
       return;
     }
-    addTrainingSample(sample);
-  }, [addTrainingSample]);
+    setPendingUploads((current) => [createPendingUploadReview(frame, `camera-frame-${current.length + 1}`, 'camera'), ...current]);
+    setTrainingStatus('Captured frame. Crop and mask the object before adding it to training.');
+  }, []);
 
   const captureLockedObjectTrainingView = useCallback(() => {
     const video = trainingVideoRef.current ?? videoRef.current;
@@ -800,13 +801,18 @@ export default function App() {
       setTrainingStatus('No object lock is available. Use Capture frame, upload an image, or click the object first.');
       return;
     }
-    const sample = browserObjectDescriptorProvider.createSample(video, object);
-    if (!sample) {
+    const frame = videoFrameToCanvas(video);
+    const cropBounds = frame ? cropBoundsFor(video, object) : null;
+    if (!frame || !cropBounds) {
       setTrainingStatus('Could not crop the locked object. Capture the full frame or upload an image instead.');
       return;
     }
-    addTrainingSample(sample);
-  }, [addTrainingSample]);
+    setPendingUploads((current) => [
+      createPendingUploadReview(frame, `locked-object-${current.length + 1}`, 'locked-crop', cropBounds),
+      ...current
+    ]);
+    setTrainingStatus('Locked object captured. Adjust crop/mask if needed before adding it to training.');
+  }, []);
 
   const updatePendingUpload = useCallback((patch: Partial<PendingUploadReview>) => {
     setPendingUploads((current) => {
@@ -843,7 +849,7 @@ export default function App() {
     for (const file of files) {
       const canvas = await imageFileToCanvas(file);
       if (canvas) {
-        uploads.push(createPendingUploadReview(canvas, file.name));
+        uploads.push(createPendingUploadReview(canvas, file.name, 'upload'));
       }
     }
     event.target.value = '';
@@ -1215,6 +1221,7 @@ export default function App() {
                     <div className="upload-review-grid">
                       <div className="upload-source-preview">
                         <img src={pendingUpload.imageDataUrl} alt="Uploaded training source" />
+                        <span className="crop-box" style={cropOverlayStyle(pendingUpload)} />
                       </div>
                       <div className="upload-mask-preview">
                         {pendingUploadPreview ? (
@@ -1272,7 +1279,7 @@ export default function App() {
                     </div>
                     {pendingUploadPreview && (
                       <p className={pendingUploadPreview.quality >= 0.56 ? 'diagnostic-copy' : 'diagnostic-copy warn'}>
-                        {pendingUploadPreview.qualityLabel} {Math.round(pendingUploadPreview.quality * 100)}%: {pendingUploadPreview.descriptor.reasons.join(', ') || 'view is usable'}.
+                        Image quality {Math.round(pendingUploadPreview.quality * 100)}% - {pendingUploadPreview.qualityLabel}: {pendingUploadPreview.descriptor.reasons.join(', ') || 'view is usable'}.
                       </p>
                     )}
                     <div className="portal-train-row">
@@ -1640,18 +1647,33 @@ async function imageFileToCanvas(file: File) {
   }
 }
 
-function createPendingUploadReview(canvas: HTMLCanvasElement, name: string): PendingUploadReview {
-  const cropSize = Math.min(canvas.width, canvas.height);
+function createPendingUploadReview(
+  canvas: HTMLCanvasElement,
+  name: string,
+  source: ObjectTrainingSampleV2['source'],
+  initialCrop?: { x: number; y: number; size: number }
+): PendingUploadReview {
+  const cropSize = initialCrop?.size ?? Math.min(canvas.width, canvas.height);
   return {
     id: crypto.randomUUID(),
     name,
     canvas,
     imageDataUrl: canvas.toDataURL('image/jpeg', 0.82),
-    cropX: Math.max(0, (canvas.width - cropSize) / 2),
-    cropY: Math.max(0, (canvas.height - cropSize) / 2),
+    cropX: initialCrop?.x ?? Math.max(0, (canvas.width - cropSize) / 2),
+    cropY: initialCrop?.y ?? Math.max(0, (canvas.height - cropSize) / 2),
     cropSize,
     maskScale: 0.86,
-    maskShape: inferMaskShape(canvas)
+    maskShape: inferMaskShape(canvas),
+    source
+  };
+}
+
+function cropOverlayStyle(review: PendingUploadReview): React.CSSProperties {
+  return {
+    left: `${(review.cropX / Math.max(1, review.canvas.width)) * 100}%`,
+    top: `${(review.cropY / Math.max(1, review.canvas.height)) * 100}%`,
+    width: `${(review.cropSize / Math.max(1, review.canvas.width)) * 100}%`,
+    height: `${(review.cropSize / Math.max(1, review.canvas.height)) * 100}%`
   };
 }
 
