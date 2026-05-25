@@ -1,4 +1,4 @@
-import type { AlgorithmVersion, Landmark, ObjectRegion, Point } from './types';
+import type { AlgorithmVersion, DetectedObjectBox, Landmark, ObjectRegion, Point } from './types';
 import { averagePoint, clamp, distance, ellipsePoint, fingertipPoints, handSize, palmCenter, subtract } from './geometry';
 
 type TrackerOptions = {
@@ -8,7 +8,7 @@ type TrackerOptions = {
   manualPoint: Point | null;
   manualScale?: number;
   locked: boolean;
-  detectorBox?: DOMRectReadOnly | null;
+  detectorBox?: DetectedObjectBox | null;
   algorithmVersion?: AlgorithmVersion;
 };
 
@@ -38,12 +38,12 @@ export function inferObjectRegion({
   const openHandScore = computeOpenHandScore(hand, size, palm);
   const autoCenter = manualPoint ?? previous?.center ?? graspCenter;
   const radiusSeed = clamp(distance(palm, tipCenter) / Math.max(1, size), 0.18, 0.48);
-  const detectorRadiusX = detectorCandidate ? clamp(detectorCandidate.width * 0.5, size * 0.22, size * 0.78) : null;
-  const detectorRadiusY = detectorCandidate ? clamp(detectorCandidate.height * 0.5, size * 0.18, size * 0.92) : null;
+  const detectorRadiusX = detectorCandidate ? clamp(detectorCandidate.box.width * 0.5, size * 0.22, size * 0.78) : null;
+  const detectorRadiusY = detectorCandidate ? clamp(detectorCandidate.box.height * 0.5, size * 0.18, size * 0.92) : null;
   const radiusX = (detectorRadiusX ?? Math.max(30, size * (manualPoint ? 0.3 : radiusSeed * 0.9))) * (manualPoint ? manualScale : 1);
   const radiusY = (detectorRadiusY ?? Math.max(24, size * (manualPoint ? 0.5 : radiusSeed * 1.18))) * (manualPoint ? manualScale : 1);
   const detectorCenter = detectorCandidate
-    ? { x: detectorCandidate.x + detectorCandidate.width / 2, y: detectorCandidate.y + detectorCandidate.height / 2 }
+    ? { x: detectorCandidate.box.x + detectorCandidate.box.width / 2, y: detectorCandidate.box.y + detectorCandidate.box.height / 2 }
     : null;
   const rawCenter = detectorCenter ?? autoCenter;
   const inferredCenter =
@@ -147,7 +147,9 @@ export function inferObjectRegion({
       visualEdgeScore: imageEvidence.edgeEnergy,
       visualTextureScore: imageEvidence.colorVariance,
       independentEvidenceScore,
-      relativeDriftScore
+      relativeDriftScore,
+      detectorLabel: detectorCandidate?.label,
+      detectorScore: detectorCandidate?.score
     },
     (index / 28) * Math.PI * 2
   ));
@@ -170,18 +172,21 @@ export function inferObjectRegion({
     visualEdgeScore: imageEvidence.edgeEnergy,
     visualTextureScore: imageEvidence.colorVariance,
     independentEvidenceScore,
-    relativeDriftScore
+    relativeDriftScore,
+    detectorLabel: detectorCandidate?.label,
+    detectorScore: detectorCandidate?.score
   };
 }
 
-function sanitizeDetectorBox(box: DOMRectReadOnly | null | undefined, palm: Point, tips: Point[], size: number) {
-  if (!box) return null;
+function sanitizeDetectorBox(detection: DetectedObjectBox | null | undefined, palm: Point, tips: Point[], size: number) {
+  if (!detection) return null;
+  const box = detection.box;
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const closeToHand = tips.some((tip) => distance(tip, center) < size * 1.05) || distance(center, palm) < size * 0.95;
   const tooHuge = box.width * box.height > size * size * 4.4 || Math.max(box.width, box.height) > size * 2.35;
   const tooTiny = box.width < size * 0.14 || box.height < size * 0.14;
   if (!closeToHand || tooHuge || tooTiny) return null;
-  return box;
+  return detection;
 }
 
 function computeOpenHandScore(hand: Landmark[], size: number, palm: Point) {

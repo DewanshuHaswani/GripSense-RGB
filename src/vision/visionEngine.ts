@@ -4,7 +4,7 @@ import {
   InteractiveSegmenter,
   ObjectDetector
 } from '@mediapipe/tasks-vision';
-import type { Landmark, Point } from './types';
+import type { DetectedObjectBox, Landmark, Point } from './types';
 
 const VISION_WASM_URL = '/mediapipe/wasm';
 const HAND_MODEL_URL = '/mediapipe/models/hand_landmarker.task';
@@ -22,7 +22,7 @@ export type VisionModelStatus = {
 export type VisionEngine = {
   status: VisionModelStatus;
   detectHands(video: HTMLVideoElement, timestamp: number): Landmark[][];
-  detectObjectBox(video: HTMLVideoElement, timestamp: number): DOMRectReadOnly | null;
+  detectObjectBox(video: HTMLVideoElement, timestamp: number): DetectedObjectBox | null;
   segmentAt(video: HTMLVideoElement, point: Point): Promise<boolean>;
   dispose(): void;
 };
@@ -106,9 +106,24 @@ export async function createVisionEngine(onStatus: (status: VisionModelStatus) =
     detectObjectBox(video, timestamp) {
       if (!objectDetector || status.detector !== 'ready') return null;
       const detections = objectDetector.detectForVideo(video, timestamp).detections ?? [];
-      const firstBox = detections[0]?.boundingBox;
-      if (!firstBox) return null;
-      return new DOMRectReadOnly(firstBox.originX, firstBox.originY, firstBox.width, firstBox.height);
+      const ranked = detections
+        .map((detection) => {
+          const box = detection.boundingBox;
+          const category = detection.categories?.[0];
+          const label = category?.categoryName || category?.displayName || 'unknown';
+          const score = category?.score ?? 0;
+          return box
+            ? {
+                box: new DOMRectReadOnly(box.originX, box.originY, box.width, box.height),
+                label,
+                score,
+                rank: score + (isPhoneLabel(label) ? 1.2 : 0)
+              }
+            : null;
+        })
+        .filter((candidate): candidate is DetectedObjectBox & { rank: number } => Boolean(candidate))
+        .sort((a, b) => b.rank - a.rank);
+      return ranked[0] ?? null;
     },
     async segmentAt(video, point) {
       if (!segmenter || status.segmenter !== 'ready') return false;
@@ -128,6 +143,11 @@ export async function createVisionEngine(onStatus: (status: VisionModelStatus) =
       segmenter?.close();
     }
   };
+}
+
+function isPhoneLabel(label: string) {
+  const normalized = label.toLowerCase();
+  return normalized.includes('phone') || normalized.includes('cell') || normalized.includes('mobile');
 }
 
 async function createWithDelegateFallback<T>(create: (delegate: 'GPU' | 'CPU') => Promise<T>) {

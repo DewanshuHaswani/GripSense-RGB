@@ -49,6 +49,7 @@ import type {
   GripCalibrationProfiles,
   GripMode,
   Landmark,
+  DetectedObjectBox,
   ObjectIdentitySignal,
   ObjectRegion,
   Point,
@@ -131,6 +132,7 @@ const EXPLAIN = {
   slip: 'Slip risk rises only when the object and hand move differently across several frames.',
   gripEvidence: 'These rows show what raised or lowered the grip score.',
   objectEvidence: 'These rows describe the object tracker: shape, how long it has been locked, and whether you manually adjusted it.',
+  detectorLabel: 'The class label from the generic object detector. For phones this should usually say cell phone or phone. If it says unknown, the tracker is using geometry/profile evidence instead.',
   shape: 'The object shape guessed by the tracker: phone-like, ellipse, unknown, or detector/manual fallback.',
   lockAge: 'How many video frames the current object lock has survived. A higher value usually means a more stable lock.',
   manualLock: 'Yes means you clicked or dragged the object lock yourself. Manual locks are trusted more than automatic guesses.',
@@ -170,7 +172,7 @@ export default function App() {
   const pausedRef = useRef(false);
   const mirroredRef = useRef(true);
   const lastDetectorRunRef = useRef(0);
-  const detectorBoxRef = useRef<DOMRectReadOnly | null>(null);
+  const detectorBoxRef = useRef<DetectedObjectBox | null>(null);
   const autoRetryRef = useRef(false);
   const stabilizerRef = useRef(new TrackingStabilizer());
   const algorithmVersionRef = useRef<AlgorithmVersion>(readInitialAlgorithmVersion());
@@ -1537,6 +1539,17 @@ export default function App() {
               Object evidence
               <InlineExplain label="Explain object evidence" text={EXPLAIN.objectEvidence} />
             </span>
+          </div>
+          <div className="diagnostic-row neutral">
+            <span>
+              Detector
+              <InlineExplain label="Explain detector label" text={EXPLAIN.detectorLabel} />
+            </span>
+            <strong>
+              {previousObjectRef.current?.detectorLabel
+                ? `${previousObjectRef.current.detectorLabel} ${Math.round((previousObjectRef.current.detectorScore ?? 0) * 100)}%`
+                : 'none'}
+            </strong>
           </div>
           <div className="diagnostic-row neutral">
             <span>

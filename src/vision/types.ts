@@ -53,6 +53,14 @@ export type ObjectRegion = {
   visualTextureScore?: number;
   independentEvidenceScore?: number;
   relativeDriftScore?: number;
+  detectorLabel?: string;
+  detectorScore?: number;
+};
+
+export type DetectedObjectBox = {
+  box: DOMRectReadOnly;
+  label: string;
+  score: number;
 };
 
 export type GripPoint = Point & {
