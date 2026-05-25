@@ -1053,6 +1053,7 @@ h2 {
 
 .detected-object,
 .profile-row,
+.candidate-row,
 .identity-meter {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1072,9 +1073,11 @@ h2 {
 
 .detected-object span,
 .profile-row span,
+.candidate-row span,
 .identity-meter span {
   display: inline-flex;
   align-items: center;
+  gap: 7px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1083,6 +1086,7 @@ h2 {
 
 .detected-object strong,
 .profile-row strong,
+.candidate-row strong,
 .identity-meter strong {
   color: #f8fafc;
 }
@@ -1110,8 +1114,35 @@ h2 {
   background: rgba(34, 211, 238, 0.16);
 }
 
+.profile-row.candidate,
+.candidate-row.matched {
+  color: #fef9c3;
+  background: rgba(234, 179, 8, 0.14);
+}
+
 .profile-row.disabled {
   opacity: 0.58;
+}
+
+.profile-row small {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #071018;
+  background: #67e8f9;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.candidate-row {
+  min-height: 34px;
+  color: #cbd5e1;
 }
 
 .profile-toggle {

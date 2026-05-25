@@ -31,8 +31,9 @@ You can open either algorithm directly:
 
 - `http://127.0.0.1:5173/?version=v1`
 - `http://127.0.0.1:5173/?version=v2`
+- `http://127.0.0.1:5173/?version=v3`
 
-The toolbar also has a `V1` / `V2` switch. Changing versions clears the object lock so the two algorithms can be compared cleanly.
+The toolbar also has a `V1` / `V2` / `V3` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ## Offline Video Review
 
@@ -72,6 +73,18 @@ Object Profile V2 uses a training quality advisor:
 These labels are recommendations. Training is allowed with any readable image set, because the whole point of object training is to help when the live tracker is uncertain. More clean angles simply make matching more reliable.
 
 Each profile stores `id`, `name`, `enabled`, captured samples, crop bounds, object-region metadata, descriptor vectors, descriptor variance, minimum training quality, and the recommended view count. New profiles are enabled by default. Disabled profiles remain saved but are ignored during live matching. The descriptor logic is behind an `ObjectDescriptorProvider` interface, so a later backend, ONNX, or embedding model can replace the handcrafted browser descriptor without rewriting the trainer UI or grip scorer.
+
+## Version 3: Trained Object Focus
+
+V3 is intentionally narrower than the generic tracker. It focuses on the objects you trained and enabled:
+
+- The **Object profiles** panel is the list of objects GripSense currently knows how to detect.
+- Each profile has a power button. Enabled profiles are searched live; disabled profiles stay saved but are completely ignored by V3 tracking.
+- The **V3 detectable now** list shows the enabled trained objects that currently look visible in the camera frame, with a match percentage.
+- When a trained object candidate is strong enough, V3 uses that candidate as the object lock instead of relying on a generic hand-corridor guess.
+- If an enabled trained object is not visible, V3 should show an object/identity issue rather than pretending that an empty hand is gripping something.
+
+This makes the app more predictable: train `Phone`, `Remote`, and `Bottle`, then turn on only the thing you want to evaluate. The grip score is then conditioned on that object being present, instead of trying to infer every possible object from the background.
 
 When at least one trained profile exists, V2 adds an identity gate:
 

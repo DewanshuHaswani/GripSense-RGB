@@ -30,10 +30,13 @@ import {
   browserObjectDescriptorProvider,
   createMaskedCanvasObjectTrainingSample,
   cropBoundsFor,
+  findObjectProfileCandidates,
   matchObjectProfiles,
+  objectRegionFromProfileCandidate,
   trainingReadiness,
   trainObjectProfileV2,
   type ObjectProfileMatch,
+  type ObjectProfileCandidate,
   type ObjectProfileV2,
   type ObjectTrainingSampleV2,
   type CanvasObjectMaskOptions
@@ -68,6 +71,7 @@ const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
 const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
+const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
 
 type LocalWritableFile = {
   write(data: Blob | string): Promise<void>;
@@ -181,6 +185,8 @@ export default function App() {
   const objectProfilesRef = useRef<ObjectProfileV2[]>([]);
   const objectDetectionRef = useRef<ObjectProfileMatch>(null);
   const lastObjectMatchRef = useRef(0);
+  const v3ProfileCandidatesRef = useRef<ObjectProfileCandidate[]>([]);
+  const lastProfileSearchRef = useRef(0);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -217,6 +223,7 @@ export default function App() {
   const [pendingUploads, setPendingUploads] = useState<PendingUploadReview[]>([]);
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
+  const [v3ProfileCandidates, setV3ProfileCandidates] = useState<ObjectProfileCandidate[]>([]);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
@@ -328,10 +335,13 @@ export default function App() {
     previousPalmRef.current = null;
     detectorBoxRef.current = null;
     objectDetectionRef.current = null;
+    v3ProfileCandidatesRef.current = [];
+    lastProfileSearchRef.current = 0;
     resetV3Runtime();
     stabilizerRef.current.reset();
     setLocked(false);
     setObjectDetection(null);
+    setV3ProfileCandidates([]);
   }, [resetV3Runtime]);
 
   const startCamera = useCallback(async () => {
@@ -553,7 +563,26 @@ export default function App() {
         }
         const activeAlgorithmVersion = algorithmVersionRef.current;
         const fallbackAlgorithmVersion: AlgorithmVersion = activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion;
-        const rawObject = inferObjectRegion({
+        const enabledProfiles = objectProfilesRef.current.filter((profile) => profile.enabled !== false);
+        if (
+          activeAlgorithmVersion === 'v3' &&
+          enabledProfiles.length &&
+          timestamp - lastProfileSearchRef.current > V3_PROFILE_SEARCH_INTERVAL_MS
+        ) {
+          lastProfileSearchRef.current = timestamp;
+          const candidates = findObjectProfileCandidates(video, enabledProfiles, hand, 8);
+          v3ProfileCandidatesRef.current = candidates;
+          setV3ProfileCandidates(candidates);
+        } else if (activeAlgorithmVersion !== 'v3' || !enabledProfiles.length) {
+          v3ProfileCandidatesRef.current = [];
+          setV3ProfileCandidates([]);
+        }
+
+        const bestProfileCandidate =
+          activeAlgorithmVersion === 'v3'
+            ? (v3ProfileCandidatesRef.current.find((candidate) => candidate.matched) ?? null)
+            : null;
+        const heuristicObject = inferObjectRegion({
           video,
           hand,
           previous: previousObjectRef.current,
@@ -563,18 +592,27 @@ export default function App() {
           detectorBox: detectorBoxRef.current,
           algorithmVersion: fallbackAlgorithmVersion
         });
+        const rawObject =
+          bestProfileCandidate && !manualPointRef.current
+            ? objectRegionFromProfileCandidate(bestProfileCandidate, previousObjectRef.current)
+            : heuristicObject;
         object = stabilizerRef.current.stabilizeObject(rawObject, timestamp);
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
-          const descriptor = object ? browserObjectDescriptorProvider.describe(video, object) : null;
-          const enabledProfiles = objectProfilesRef.current.filter((profile) => profile.enabled !== false);
-          const match = matchObjectProfiles(descriptor, enabledProfiles);
+          const descriptor = object && !bestProfileCandidate ? browserObjectDescriptorProvider.describe(video, object) : null;
+          const match = bestProfileCandidate
+            ? {
+                profileId: bestProfileCandidate.profileId,
+                name: bestProfileCandidate.name,
+                score: bestProfileCandidate.score,
+                matched: bestProfileCandidate.matched
+              }
+            : matchObjectProfiles(descriptor, enabledProfiles);
           objectDetectionRef.current = match;
           setObjectDetection(match);
         }
-        const enabledProfileCount = objectProfilesRef.current.filter((profile) => profile.enabled !== false).length;
         const objectIdentity = {
-          hasProfiles: enabledProfileCount > 0,
+          hasProfiles: enabledProfiles.length > 0,
           score: objectDetectionRef.current?.score ?? 0,
           matched: objectDetectionRef.current?.matched ?? false,
           name: objectDetectionRef.current?.name ?? null
@@ -631,11 +669,14 @@ export default function App() {
     draggingObjectRef.current = false;
     previousObjectRef.current = null;
     detectorBoxRef.current = null;
+    v3ProfileCandidatesRef.current = [];
+    lastProfileSearchRef.current = 0;
     stabilizerRef.current.reset();
     calibrationCaptureRef.current = { active: false, kind: calibrationKind, start: 0, samples: [] };
     resetV3Runtime();
     setLocked(false);
     setCalibrating(false);
+    setV3ProfileCandidates([]);
     setAnalysis(createEmptyAnalysis('Object reset. Place it between your thumb and fingers to relock.'));
   }, [calibrationKind, resetV3Runtime]);
 
@@ -942,6 +983,11 @@ export default function App() {
     objectProfilesRef.current = profiles;
     setObjectProfiles(profiles);
     saveObjectProfiles(profiles);
+    v3ProfileCandidatesRef.current = [];
+    lastProfileSearchRef.current = 0;
+    setV3ProfileCandidates([]);
+    objectDetectionRef.current = null;
+    setObjectDetection(null);
     if (profileDirectoryRef.current) {
       void mirrorObjectProfilesToFolder(profileDirectoryRef.current, profiles);
     }
@@ -1469,7 +1515,8 @@ export default function App() {
                 </span>
               </div>
               {objectProfiles.map((profile) => {
-                const status = profileLiveStatus(profile, objectDetection, analysis);
+                const candidate = v3ProfileCandidates.find((item) => item.profileId === profile.id);
+                const status = profileLiveStatus(profile, objectDetection, analysis, candidate);
                 return (
                   <div className={`profile-row ${status.kind}`} key={profile.id}>
                     <button
@@ -1481,11 +1528,41 @@ export default function App() {
                     >
                       <Power size={14} />
                     </button>
-                    <span>{profile.name}</span>
+                    <span>
+                      {profile.name}
+                      {algorithmVersion === 'v3' && candidate && (
+                        <small>{Math.round(candidate.score * 100)}%</small>
+                      )}
+                    </span>
                     <strong>{status.label}</strong>
                   </div>
                 );
               })}
+              {algorithmVersion === 'v3' && (
+                <div className="candidate-list">
+                  <div className="motion-header compact-heading">
+                    <span>
+                      V3 detectable now
+                      <InlineExplain
+                        label="Explain V3 detectable profiles"
+                        text="V3 scans only enabled trained profiles. Disable a profile to completely remove it from live object search."
+                        compact
+                      />
+                    </span>
+                  </div>
+                  {v3ProfileCandidates.length ? (
+                    v3ProfileCandidates.slice(0, 5).map((candidate) => (
+                      <div className={candidate.matched ? 'candidate-row matched' : 'candidate-row'} key={candidate.profileId}>
+                        <Target size={14} />
+                        <span>{candidate.name}</span>
+                        <strong>{Math.round(candidate.score * 100)}%</strong>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="diagnostic-copy">No enabled trained object is confidently visible yet.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1686,13 +1763,21 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function profileLiveStatus(profile: ObjectProfileV2, detection: ObjectProfileMatch, analysis: GripAnalysis) {
+function profileLiveStatus(
+  profile: ObjectProfileV2,
+  detection: ObjectProfileMatch,
+  analysis: GripAnalysis,
+  candidate?: ObjectProfileCandidate
+) {
   if (profile.enabled === false) return { kind: 'disabled', label: 'disabled' };
-  if (detection?.profileId !== profile.id || !detection.matched) return { kind: 'enabled', label: 'enabled' };
-  if (analysis.gripPercentage > 0 && ['Grip detected', 'Strong hold', 'Slip risk'].includes(analysis.diagnostics.state)) {
+  const isDetected = detection?.profileId === profile.id && detection.matched;
+  if (isDetected && analysis.gripPercentage > 0 && ['Grip detected', 'Strong hold', 'Slip risk'].includes(analysis.diagnostics.state)) {
     return { kind: 'gripping', label: 'grip active' };
   }
-  return { kind: 'visible', label: 'in frame' };
+  if (isDetected) return { kind: 'visible', label: 'in frame' };
+  if (candidate?.matched) return { kind: 'candidate', label: 'candidate' };
+  if (candidate) return { kind: 'enabled', label: `${Math.round(candidate.score * 100)}%` };
+  return { kind: 'enabled', label: 'enabled' };
 }
 
 function waitForVideoMetadata(video: HTMLVideoElement) {

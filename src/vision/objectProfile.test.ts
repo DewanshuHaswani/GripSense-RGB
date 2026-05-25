@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   matchObjectProfiles,
+  objectRegionFromProfileCandidate,
   trainingReadiness,
   trainObjectProfileV2,
   type TrainingQualityLabel,
@@ -66,6 +67,29 @@ describe('object profile v2', () => {
     if (!result.ok) return;
     const match = matchObjectProfiles(descriptor([0.08, 0.1, 0.72, 0.1]), [result.profile]);
     expect(match?.matched).toBe(false);
+  });
+
+  it('turns a trained-object candidate into a tracked object region', () => {
+    const object = objectRegionFromProfileCandidate(
+      {
+        profileId: 'phone-profile',
+        name: 'Phone',
+        score: 0.84,
+        matched: true,
+        center: { x: 120, y: 140 },
+        radiusX: 30,
+        radiusY: 58,
+        aspectRatio: 1.93,
+        descriptorQuality: 0.72
+      },
+      null
+    );
+
+    expect(object.detectorLabel).toBe('profile:Phone');
+    expect(object.shape).toBe('phone-like');
+    expect(object.locked).toBe(true);
+    expect(object.contour).toHaveLength(28);
+    expect(object.confidence).toBeGreaterThan(0.8);
   });
 });
 

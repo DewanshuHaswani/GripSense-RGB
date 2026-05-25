@@ -1,5 +1,5 @@
-import type { ObjectRegion, Point } from './types';
-import { clamp } from './geometry';
+import type { Landmark, ObjectRegion, Point } from './types';
+import { averagePoint, clamp, distance, ellipsePoint, fingertipPoints, handSize, palmCenter } from './geometry';
 
 export type TrainingQualityLabel = 'Rejected' | 'Needs more angles' | 'Mask too loose' | 'Good view' | 'Ready to train';
 
@@ -62,6 +62,18 @@ export type ObjectProfileMatch = {
   matched: boolean;
 } | null;
 
+export type ObjectProfileCandidate = {
+  profileId: string;
+  name: string;
+  score: number;
+  matched: boolean;
+  center: Point;
+  radiusX: number;
+  radiusY: number;
+  aspectRatio: number;
+  descriptorQuality: number;
+};
+
 export type TrainObjectProfileResult =
   | { ok: true; profile: ObjectProfileV2; label: TrainingQualityLabel; message: string }
   | { ok: false; label: TrainingQualityLabel; message: string };
@@ -76,6 +88,7 @@ export const THUMBNAIL_SIZE = 144;
 export const MIN_SAMPLE_QUALITY = 0.56;
 export const RECOMMENDED_VIEW_COUNT = 3;
 export const OBJECT_MATCH_THRESHOLD = 0.62;
+export const OBJECT_SEARCH_THRESHOLD = 0.58;
 
 export const browserObjectDescriptorProvider: ObjectDescriptorProvider = {
   describe: describeObjectPatch,
@@ -383,6 +396,134 @@ export function matchObjectProfiles(
     })
     .sort((a, b) => b.score - a.score);
   return ranked[0] ?? null;
+}
+
+export function findObjectProfileCandidates(
+  video: HTMLVideoElement,
+  profiles: ObjectProfileV2[],
+  hand: Landmark[] | null,
+  limit = 6
+): ObjectProfileCandidate[] {
+  if (!profiles.length || !video.videoWidth || !video.videoHeight) return [];
+  const centers = candidateCenters(video, hand);
+  const sizes = candidateSizes(video, hand);
+  const candidatesByProfile = new Map<string, ObjectProfileCandidate>();
+
+  for (const center of centers) {
+    for (const size of sizes) {
+      const descriptor = describeVideoSquare(video, center, size);
+      if (!descriptor || descriptor.quality < 0.28) continue;
+      const match = matchObjectProfiles(descriptor, profiles);
+      if (!match) continue;
+      const profile = profiles.find((item) => item.id === match.profileId);
+      if (!profile) continue;
+      const aspectRatio = averageProfileAspectRatio(profile);
+      const candidate = {
+        profileId: match.profileId,
+        name: match.name,
+        score: match.score,
+        matched: match.score >= OBJECT_SEARCH_THRESHOLD,
+        center,
+        radiusX: size * 0.26,
+        radiusY: size * 0.26 * Math.min(2.6, Math.max(1, aspectRatio)),
+        aspectRatio,
+        descriptorQuality: descriptor.quality
+      };
+      const existing = candidatesByProfile.get(match.profileId);
+      if (!existing || candidate.score > existing.score) {
+        candidatesByProfile.set(match.profileId, candidate);
+      }
+    }
+  }
+
+  return Array.from(candidatesByProfile.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+export function objectRegionFromProfileCandidate(candidate: ObjectProfileCandidate, previous: ObjectRegion | null): ObjectRegion {
+  const radiusX = Math.max(18, candidate.radiusX);
+  const radiusY = Math.max(18, candidate.radiusY);
+  const confidence = clamp(candidate.score * 0.88 + candidate.descriptorQuality * 0.12);
+  const region: ObjectRegion = {
+    center: candidate.center,
+    radiusX,
+    radiusY,
+    angle: previous?.angle ?? 0,
+    confidence,
+    locked: candidate.matched,
+    source: 'automatic',
+    velocity: previous ? { x: candidate.center.x - previous.center.x, y: candidate.center.y - previous.center.y } : { x: 0, y: 0 },
+    contour: [],
+    shape: candidate.aspectRatio > 1.35 ? 'phone-like' : candidate.aspectRatio > 1.12 ? 'ellipse' : 'unknown',
+    aspectRatio: candidate.aspectRatio,
+    tightness: 0.72,
+    lockAgeFrames: candidate.matched ? (previous?.lockAgeFrames ?? 0) + 1 : 0,
+    manuallyAdjusted: false,
+    visualEdgeScore: candidate.descriptorQuality,
+    visualTextureScore: candidate.descriptorQuality,
+    independentEvidenceScore: confidence,
+    relativeDriftScore: previous ? clamp(distance(candidate.center, previous.center) / Math.max(1, Math.max(radiusX, radiusY) * 1.8)) : 0,
+    detectorLabel: `profile:${candidate.name}`,
+    detectorScore: candidate.score
+  };
+  region.contour = Array.from({ length: 28 }, (_item, index) => ellipsePoint(region, (index / 28) * Math.PI * 2));
+  return region;
+}
+
+function describeVideoSquare(video: HTMLVideoElement, center: Point, size: number): ObjectDescriptor | null {
+  const cropSize = clamp(size, 24, Math.min(video.videoWidth, video.videoHeight));
+  const sourceX = clamp(center.x - cropSize / 2, 0, Math.max(0, video.videoWidth - cropSize));
+  const sourceY = clamp(center.y - cropSize / 2, 0, Math.max(0, video.videoHeight - cropSize));
+  const canvas = document.createElement('canvas');
+  canvas.width = DESCRIPTOR_SIZE;
+  canvas.height = DESCRIPTOR_SIZE;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(video, sourceX, sourceY, cropSize, cropSize, 0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE);
+  const object = {
+    radiusX: DESCRIPTOR_SIZE * 0.38,
+    radiusY: DESCRIPTOR_SIZE * 0.38
+  };
+  return describeImageData(context.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object);
+}
+
+function candidateCenters(video: HTMLVideoElement, hand: Landmark[] | null) {
+  if (!hand?.length) {
+    return [
+      { x: video.videoWidth * 0.5, y: video.videoHeight * 0.5 },
+      { x: video.videoWidth * 0.38, y: video.videoHeight * 0.5 },
+      { x: video.videoWidth * 0.62, y: video.videoHeight * 0.5 }
+    ];
+  }
+  const palm = palmCenter(hand);
+  const tips = fingertipPoints(hand);
+  const tipCenter = averagePoint(tips);
+  const size = handSize(hand);
+  const base = averagePoint([palm, tipCenter, hand[8], hand[12], hand[16]]);
+  const offsets = [
+    { x: 0, y: 0 },
+    { x: size * 0.18, y: 0 },
+    { x: -size * 0.18, y: 0 },
+    { x: 0, y: size * 0.18 },
+    { x: 0, y: -size * 0.18 },
+    { x: size * 0.3, y: -size * 0.1 },
+    { x: -size * 0.3, y: -size * 0.1 }
+  ];
+  return offsets.map((offset) => ({
+    x: clamp(base.x + offset.x, 0, video.videoWidth),
+    y: clamp(base.y + offset.y, 0, video.videoHeight)
+  }));
+}
+
+function candidateSizes(video: HTMLVideoElement, hand: Landmark[] | null) {
+  const base = hand ? handSize(hand) : Math.min(video.videoWidth, video.videoHeight) * 0.26;
+  return [base * 0.55, base * 0.78, base * 1.02].map((size) => clamp(size, 42, Math.min(video.videoWidth, video.videoHeight) * 0.72));
+}
+
+function averageProfileAspectRatio(profile: ObjectProfileV2) {
+  const values = profile.samples.map((sample) => sample.descriptor.aspectRatio).filter((value) => Number.isFinite(value) && value > 0);
+  return values.length ? average(values) : 1;
 }
 
 export function createObjectThumbnail(video: HTMLVideoElement, object: ObjectRegion) {
