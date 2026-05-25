@@ -13,12 +13,16 @@ const SMOOTHED_FIELDS = [
   'slipRisk'
 ] as const;
 
+const HAND_OCCLUSION_GRACE_MS = 520;
+
 export class TrackingStabilizer {
   private landmarkFilters: FilterMap = new Map();
   private objectFilters: FilterMap = new Map();
   private analysisFilters: FilterMap = new Map();
   private previousGuidance: GripGuidance = 'Object not locked';
   private previousTimestamp: number | null = null;
+  private previousHand: Landmark[] | null = null;
+  private previousHandTimestamp: number | null = null;
   private previousObjectCenter: Point | null = null;
   private slipHistory: number[] = [];
 
@@ -28,18 +32,35 @@ export class TrackingStabilizer {
     this.analysisFilters.clear();
     this.previousGuidance = 'Object not locked';
     this.previousTimestamp = null;
+    this.previousHand = null;
+    this.previousHandTimestamp = null;
     this.previousObjectCenter = null;
     this.slipHistory = [];
   }
 
   stabilizeHand(hand: Landmark[] | null, timestamp: number): Landmark[] | null {
-    if (!hand) return null;
+    if (!hand) {
+      if (
+        this.previousHand &&
+        this.previousHandTimestamp !== null &&
+        timestamp - this.previousHandTimestamp <= HAND_OCCLUSION_GRACE_MS
+      ) {
+        return this.previousHand.map((landmark) => ({
+          ...landmark,
+          visibility: Math.min(landmark.visibility ?? 1, 0.25)
+        }));
+      }
+      return null;
+    }
     const time = timestamp / 1000;
-    return hand.map((landmark, index) => ({
+    const stabilized = hand.map((landmark, index) => ({
       ...landmark,
       x: this.filter(this.landmarkFilters, `hand-${index}-x`, landmark.x, time, 0.8, 0.015),
       y: this.filter(this.landmarkFilters, `hand-${index}-y`, landmark.y, time, 0.8, 0.015)
     }));
+    this.previousHand = stabilized;
+    this.previousHandTimestamp = timestamp;
+    return stabilized;
   }
 
   stabilizeObject(object: ObjectRegion | null, timestamp: number): ObjectRegion | null {

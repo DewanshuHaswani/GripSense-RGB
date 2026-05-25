@@ -34,6 +34,14 @@ export type ObjectTrainingSampleV2 = {
   sourceName?: string;
 };
 
+export type CanvasObjectMaskOptions = {
+  cropBounds: { x: number; y: number; size: number };
+  maskScale: number;
+  maskShape: 'ellipse' | 'rect';
+  source?: ObjectTrainingSampleV2['source'];
+  sourceName?: string;
+};
+
 export type ObjectProfileV2 = {
   id: string;
   name: string;
@@ -106,23 +114,43 @@ export function createCanvasObjectTrainingSample(
   source: ObjectTrainingSampleV2['source'] = 'camera',
   sourceName?: string
 ): ObjectTrainingSampleV2 | null {
+  const size = Math.min(canvas.width, canvas.height);
+  return createMaskedCanvasObjectTrainingSample(canvas, {
+    cropBounds: {
+      x: Math.max(0, (canvas.width - size) / 2),
+      y: Math.max(0, (canvas.height - size) / 2),
+      size
+    },
+    maskScale: 0.86,
+    maskShape: 'ellipse',
+    source,
+    sourceName
+  });
+}
+
+export function createMaskedCanvasObjectTrainingSample(
+  canvas: HTMLCanvasElement,
+  options: CanvasObjectMaskOptions
+): ObjectTrainingSampleV2 | null {
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context || !canvas.width || !canvas.height) return null;
-  const size = Math.min(canvas.width, canvas.height);
+  const size = clampCropSize(options.cropBounds.size, canvas);
+  const sourceX = clamp(options.cropBounds.x, 0, Math.max(0, canvas.width - size));
+  const sourceY = clamp(options.cropBounds.y, 0, Math.max(0, canvas.height - size));
+  const maskScale = clamp(options.maskScale, 0.35, 1);
   const square = document.createElement('canvas');
   square.width = DESCRIPTOR_SIZE;
   square.height = DESCRIPTOR_SIZE;
   const squareContext = square.getContext('2d', { willReadFrequently: true });
   if (!squareContext) return null;
-  const sourceX = Math.max(0, (canvas.width - size) / 2);
-  const sourceY = Math.max(0, (canvas.height - size) / 2);
   squareContext.drawImage(canvas, sourceX, sourceY, size, size, 0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE);
+  applyObjectMask(squareContext, DESCRIPTOR_SIZE, maskScale, options.maskShape);
   const object = {
     center: { x: DESCRIPTOR_SIZE / 2, y: DESCRIPTOR_SIZE / 2 },
-    radiusX: DESCRIPTOR_SIZE * 0.36,
-    radiusY: DESCRIPTOR_SIZE * 0.36,
+    radiusX: DESCRIPTOR_SIZE * 0.43 * maskScale,
+    radiusY: DESCRIPTOR_SIZE * 0.43 * maskScale,
     angle: 0,
-    shape: 'unknown' as ObjectRegion['shape']
+    shape: (options.maskShape === 'ellipse' ? 'ellipse' : 'unknown') as ObjectRegion['shape']
   };
   const descriptor = describeImageData(squareContext.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object);
   if (!descriptor) return null;
@@ -133,18 +161,56 @@ export function createCanvasObjectTrainingSample(
   const thumbnailContext = thumbnail.getContext('2d');
   if (!thumbnailContext) return null;
   thumbnailContext.drawImage(canvas, sourceX, sourceY, size, size, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+  applyObjectMask(thumbnailContext, THUMBNAIL_SIZE, maskScale, options.maskShape);
   return {
     id: crypto.randomUUID(),
-    imageDataUrl: thumbnail.toDataURL('image/jpeg', 0.84),
+    imageDataUrl: thumbnail.toDataURL('image/png'),
     descriptor,
     cropBounds: { x: sourceX, y: sourceY, size },
     objectRegion: object,
     quality: descriptor.quality,
     qualityLabel: descriptor.qualityLabel,
     createdAt: Date.now(),
-    source,
-    sourceName
+    source: options.source,
+    sourceName: options.sourceName
   };
+}
+
+function applyObjectMask(
+  context: CanvasRenderingContext2D,
+  size: number,
+  maskScale: number,
+  maskShape: CanvasObjectMaskOptions['maskShape']
+) {
+  context.save();
+  context.globalCompositeOperation = 'destination-in';
+  context.beginPath();
+  const inset = (size * (1 - maskScale)) / 2;
+  if (maskShape === 'rect') {
+    const radius = Math.max(4, size * 0.08);
+    roundedRect(context, inset, inset, size - inset * 2, size - inset * 2, radius);
+  } else {
+    context.ellipse(size / 2, size / 2, (size * maskScale) / 2, (size * maskScale) / 2, 0, 0, Math.PI * 2);
+  }
+  context.fill();
+  context.restore();
+}
+
+function roundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function clampCropSize(size: number, canvas: HTMLCanvasElement) {
+  return clamp(size, Math.min(32, canvas.width, canvas.height), Math.min(canvas.width, canvas.height));
 }
 
 export function describeObjectPatch(video: HTMLVideoElement, object: ObjectRegion): ObjectDescriptor | null {

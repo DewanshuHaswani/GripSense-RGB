@@ -29,12 +29,14 @@ import { inferObjectRegion } from './vision/objectTracking';
 import {
   browserObjectDescriptorProvider,
   createCanvasObjectTrainingSample,
+  createMaskedCanvasObjectTrainingSample,
   matchObjectProfiles,
   trainingReadiness,
   trainObjectProfileV2,
   type ObjectProfileMatch,
   type ObjectProfileV2,
-  type ObjectTrainingSampleV2
+  type ObjectTrainingSampleV2,
+  type CanvasObjectMaskOptions
 } from './vision/objectProfile';
 import { drawTrackingOverlay } from './vision/drawing';
 import { createVisionEngine, type VisionEngine, type VisionModelStatus } from './vision/visionEngine';
@@ -91,6 +93,18 @@ type V3Runtime = {
   receivedAt: number | null;
   lastRequestAt: number;
   latencyMs: number | null;
+};
+
+type PendingUploadReview = {
+  id: string;
+  name: string;
+  canvas: HTMLCanvasElement;
+  imageDataUrl: string;
+  cropX: number;
+  cropY: number;
+  cropSize: number;
+  maskScale: number;
+  maskShape: CanvasObjectMaskOptions['maskShape'];
 };
 
 const METRIC_INFO = {
@@ -197,6 +211,7 @@ export default function App() {
   const [algorithmVersion, setAlgorithmVersion] = useState<AlgorithmVersion>(() => algorithmVersionRef.current);
   const [objectName, setObjectName] = useState('');
   const [trainingSamples, setTrainingSamples] = useState<ObjectTrainingSampleV2[]>([]);
+  const [pendingUploads, setPendingUploads] = useState<PendingUploadReview[]>([]);
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
@@ -256,6 +271,21 @@ export default function App() {
   }, [modelStatus]);
 
   const trainerReadiness = useMemo(() => trainingReadiness(trainingSamples), [trainingSamples]);
+  const pendingUpload = pendingUploads[0] ?? null;
+  const pendingUploadPreview = useMemo(() => {
+    if (!pendingUpload) return null;
+    return createMaskedCanvasObjectTrainingSample(pendingUpload.canvas, {
+      cropBounds: {
+        x: pendingUpload.cropX,
+        y: pendingUpload.cropY,
+        size: pendingUpload.cropSize
+      },
+      maskScale: pendingUpload.maskScale,
+      maskShape: pendingUpload.maskShape,
+      source: 'upload',
+      sourceName: pendingUpload.name
+    });
+  }, [pendingUpload]);
 
   const loadVisionEngine = useCallback(async (force = false) => {
     if (force || engineRef.current?.status.hands === 'failed') {
@@ -776,27 +806,52 @@ export default function App() {
     addTrainingSample(sample);
   }, [addTrainingSample]);
 
+  const updatePendingUpload = useCallback((patch: Partial<PendingUploadReview>) => {
+    setPendingUploads((current) => {
+      const [first, ...rest] = current;
+      if (!first) return current;
+      const next = { ...first, ...patch };
+      const maxSize = Math.min(next.canvas.width, next.canvas.height);
+      next.cropSize = clampNumber(next.cropSize, Math.min(80, maxSize), maxSize);
+      next.cropX = clampNumber(next.cropX, 0, Math.max(0, next.canvas.width - next.cropSize));
+      next.cropY = clampNumber(next.cropY, 0, Math.max(0, next.canvas.height - next.cropSize));
+      next.maskScale = clampNumber(next.maskScale, 0.35, 1);
+      return [next, ...rest];
+    });
+  }, []);
+
+  const acceptPendingUpload = useCallback(() => {
+    if (!pendingUploadPreview) {
+      setTrainingStatus('Could not read that crop. Tighten the crop around the object and try again.');
+      return;
+    }
+    addTrainingSample(pendingUploadPreview);
+    setPendingUploads((current) => current.slice(1));
+  }, [addTrainingSample, pendingUploadPreview]);
+
+  const skipPendingUpload = useCallback(() => {
+    setPendingUploads((current) => current.slice(1));
+    setTrainingStatus('Upload skipped. Review the next image or upload another object view.');
+  }, []);
+
   const uploadTrainingImages = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (!files.length) return;
-    const samples: ObjectTrainingSampleV2[] = [];
+    const uploads: PendingUploadReview[] = [];
     for (const file of files) {
       const canvas = await imageFileToCanvas(file);
-      const sample = canvas ? createCanvasObjectTrainingSample(canvas, 'upload', file.name) : null;
-      if (sample) {
-        samples.push(sample);
+      if (canvas) {
+        uploads.push(createPendingUploadReview(canvas, file.name));
       }
     }
     event.target.value = '';
-    const nextSamples = [...trainingSamples, ...samples].slice(-24);
-    setTrainingSamples(nextSamples);
-    const nextReadiness = trainingReadiness(nextSamples);
-    setTrainingStatus(
-      samples.length
-        ? `Added ${samples.length} uploaded image${samples.length === 1 ? '' : 's'}. ${nextReadiness.message}`
-        : 'No uploaded images could be read. Try a JPG or PNG.'
-    );
-  }, [trainingSamples]);
+    if (!uploads.length) {
+      setTrainingStatus('No uploaded images could be read. Try a JPG, PNG, or WebP.');
+      return;
+    }
+    setPendingUploads((current) => [...current, ...uploads]);
+    setTrainingStatus(`Review crop and mask for ${uploads.length} uploaded image${uploads.length === 1 ? '' : 's'} before adding to training.`);
+  }, []);
 
   const chooseProfileFolder = useCallback(async () => {
     const picker = (window as WindowWithFolderPicker).showDirectoryPicker;
@@ -818,6 +873,10 @@ export default function App() {
   }, []);
 
   const finalizeObjectTraining = useCallback(async () => {
+    if (pendingUploads.length) {
+      setTrainingStatus('Finish the upload crop and mask review before training this profile.');
+      return;
+    }
     const name = objectName.trim();
     if (!name) {
       setNamePromptOpen(true);
@@ -862,7 +921,7 @@ export default function App() {
       }
     }
     setTrainingStatus(result.message + folderMessage + ' Enable it below, then resume live tracking to verify detection.');
-  }, [objectName, objectProfiles, trainingSamples]);
+  }, [objectName, objectProfiles, pendingUploads.length, trainingSamples]);
 
   const trainObjectProfile = useCallback(() => {
     void finalizeObjectTraining();
@@ -890,6 +949,7 @@ export default function App() {
 
   const clearTrainingSamples = useCallback(() => {
     setTrainingSamples([]);
+    setPendingUploads([]);
     setTrainingStatus('Training views cleared. Capture new masked views.');
   }, []);
 
@@ -1095,7 +1155,7 @@ export default function App() {
               </div>
               <div className="portal-side">
                 <div className="trainer-steps" aria-label="Object profile training steps">
-                  {['Add images', 'Review quality', 'Name object', 'Train', 'Enable live'].map((step, index) => (
+                  {['Add images', 'Crop/mask', 'Name object', 'Train', 'Enable live'].map((step, index) => (
                     <span
                       className={
                         (index === 0 && trainingSamples.length > 0) ||
@@ -1141,6 +1201,89 @@ export default function App() {
                 />
                 <p className="diagnostic-copy">{trainingStatus}</p>
                 <p className="diagnostic-copy">{folderStatus}</p>
+                {pendingUpload && (
+                  <div className="upload-review" aria-label="Uploaded image crop and mask review">
+                    <div className="upload-review-head">
+                      <div>
+                        <p className="eyebrow">Crop and mask</p>
+                        <strong>{pendingUpload.name}</strong>
+                      </div>
+                      <span>{pendingUploads.length} pending</span>
+                    </div>
+                    <div className="upload-review-grid">
+                      <div className="upload-source-preview">
+                        <img src={pendingUpload.imageDataUrl} alt="Uploaded training source" />
+                      </div>
+                      <div className="upload-mask-preview">
+                        {pendingUploadPreview ? (
+                          <img src={pendingUploadPreview.imageDataUrl} alt="Masked object preview" />
+                        ) : (
+                          <span>Adjust crop</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="upload-control-grid">
+                      <SliderControl
+                        label="Crop size"
+                        min={Math.min(80, pendingUpload.canvas.width, pendingUpload.canvas.height)}
+                        max={Math.min(pendingUpload.canvas.width, pendingUpload.canvas.height)}
+                        value={pendingUpload.cropSize}
+                        onChange={(value) => updatePendingUpload({ cropSize: value })}
+                      />
+                      <SliderControl
+                        label="Crop X"
+                        min={0}
+                        max={Math.max(0, pendingUpload.canvas.width - pendingUpload.cropSize)}
+                        value={pendingUpload.cropX}
+                        onChange={(value) => updatePendingUpload({ cropX: value })}
+                      />
+                      <SliderControl
+                        label="Crop Y"
+                        min={0}
+                        max={Math.max(0, pendingUpload.canvas.height - pendingUpload.cropSize)}
+                        value={pendingUpload.cropY}
+                        onChange={(value) => updatePendingUpload({ cropY: value })}
+                      />
+                      <SliderControl
+                        label="Mask"
+                        min={35}
+                        max={100}
+                        value={Math.round(pendingUpload.maskScale * 100)}
+                        onChange={(value) => updatePendingUpload({ maskScale: value / 100 })}
+                      />
+                    </div>
+                    <div className="mask-toggle" aria-label="Mask shape">
+                      <button
+                        type="button"
+                        className={pendingUpload.maskShape === 'ellipse' ? 'active' : ''}
+                        onClick={() => updatePendingUpload({ maskShape: 'ellipse' })}
+                      >
+                        Ellipse
+                      </button>
+                      <button
+                        type="button"
+                        className={pendingUpload.maskShape === 'rect' ? 'active' : ''}
+                        onClick={() => updatePendingUpload({ maskShape: 'rect' })}
+                      >
+                        Rectangle
+                      </button>
+                    </div>
+                    {pendingUploadPreview && (
+                      <p className={pendingUploadPreview.quality >= 0.56 ? 'diagnostic-copy' : 'diagnostic-copy warn'}>
+                        {pendingUploadPreview.qualityLabel} {Math.round(pendingUploadPreview.quality * 100)}%: {pendingUploadPreview.descriptor.reasons.join(', ') || 'view is usable'}.
+                      </p>
+                    )}
+                    <div className="portal-train-row">
+                      <button type="button" onClick={acceptPendingUpload}>
+                        <CheckCircle size={16} />
+                        Add masked image
+                      </button>
+                      <button type="button" onClick={skipPendingUpload}>
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {trainingSamples.length > 0 && (
                   <div className="sample-strip portal-samples" aria-label="Object training images">
                     {trainingSamples.map((sample, index) => (
@@ -1484,6 +1627,30 @@ async function imageFileToCanvas(file: File) {
   }
 }
 
+function createPendingUploadReview(canvas: HTMLCanvasElement, name: string): PendingUploadReview {
+  const cropSize = Math.min(canvas.width, canvas.height);
+  return {
+    id: crypto.randomUUID(),
+    name,
+    canvas,
+    imageDataUrl: canvas.toDataURL('image/jpeg', 0.82),
+    cropX: Math.max(0, (canvas.width - cropSize) / 2),
+    cropY: Math.max(0, (canvas.height - cropSize) / 2),
+    cropSize,
+    maskScale: 0.86,
+    maskShape: inferMaskShape(canvas)
+  };
+}
+
+function inferMaskShape(canvas: HTMLCanvasElement): CanvasObjectMaskOptions['maskShape'] {
+  const aspectRatio = Math.max(canvas.width, canvas.height) / Math.max(1, Math.min(canvas.width, canvas.height));
+  return aspectRatio > 1.45 ? 'rect' : 'ellipse';
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function profileLiveStatus(profile: ObjectProfileV2, detection: ObjectProfileMatch, analysis: GripAnalysis) {
   if (profile.enabled === false) return { kind: 'disabled', label: 'disabled' };
   if (detection?.profileId !== profile.id || !detection.matched) return { kind: 'enabled', label: 'enabled' };
@@ -1545,6 +1712,38 @@ function V3Score({ label, value }: { label: string; value: number }) {
         <span style={{ width: `${Math.round(value * 100)}%` }} />
       </div>
     </div>
+  );
+}
+
+function SliderControl({
+  label,
+  min,
+  max,
+  value,
+  onChange
+}: {
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const safeMax = Math.max(min, max);
+  const safeValue = clampNumber(value, min, safeMax);
+  return (
+    <label className="slider-control">
+      <span>
+        {label}
+        <strong>{Math.round(safeValue)}</strong>
+      </span>
+      <input
+        type="range"
+        min={Math.round(min)}
+        max={Math.round(safeMax)}
+        value={Math.round(safeValue)}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
   );
 }
 
