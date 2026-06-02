@@ -89,6 +89,7 @@ export const MIN_SAMPLE_QUALITY = 0.56;
 export const RECOMMENDED_VIEW_COUNT = 3;
 export const OBJECT_MATCH_THRESHOLD = 0.62;
 export const OBJECT_SEARCH_THRESHOLD = 0.58;
+export const OBJECT_MATCH_MARGIN = 0.07;
 
 export const browserObjectDescriptorProvider: ObjectDescriptorProvider = {
   describe: describeObjectPatch,
@@ -395,7 +396,17 @@ export function matchObjectProfiles(
       };
     })
     .sort((a, b) => b.score - a.score);
-  return ranked[0] ?? null;
+  const best = ranked[0];
+  if (!best) return null;
+  const runnerUp = ranked[1];
+  const ambiguous =
+    Boolean(runnerUp) &&
+    best.score - (runnerUp?.score ?? 0) < OBJECT_MATCH_MARGIN &&
+    (runnerUp?.score ?? 0) > OBJECT_MATCH_THRESHOLD * 0.82;
+  return {
+    ...best,
+    matched: best.matched && !ambiguous
+  };
 }
 
 export function findObjectProfileCandidates(
@@ -445,26 +456,28 @@ export function objectRegionFromProfileCandidate(candidate: ObjectProfileCandida
   const radiusX = Math.max(18, candidate.radiusX);
   const radiusY = Math.max(18, candidate.radiusY);
   const confidence = clamp(candidate.score * 0.88 + candidate.descriptorQuality * 0.12);
+  const detectorLabel = `profile:${candidate.name}`;
+  const sameProfileAsPrevious = previous?.detectorLabel === detectorLabel;
   const region: ObjectRegion = {
     center: candidate.center,
     radiusX,
     radiusY,
-    angle: previous?.angle ?? 0,
+    angle: sameProfileAsPrevious ? previous?.angle ?? 0 : 0,
     confidence,
     locked: candidate.matched,
     source: 'automatic',
-    velocity: previous ? { x: candidate.center.x - previous.center.x, y: candidate.center.y - previous.center.y } : { x: 0, y: 0 },
+    velocity: sameProfileAsPrevious && previous ? { x: candidate.center.x - previous.center.x, y: candidate.center.y - previous.center.y } : { x: 0, y: 0 },
     contour: [],
     shape: candidate.aspectRatio > 1.35 ? 'phone-like' : candidate.aspectRatio > 1.12 ? 'ellipse' : 'unknown',
     aspectRatio: candidate.aspectRatio,
     tightness: 0.72,
-    lockAgeFrames: candidate.matched ? (previous?.lockAgeFrames ?? 0) + 1 : 0,
+    lockAgeFrames: candidate.matched ? (sameProfileAsPrevious ? previous?.lockAgeFrames ?? 0 : 0) + 1 : 0,
     manuallyAdjusted: false,
     visualEdgeScore: candidate.descriptorQuality,
     visualTextureScore: candidate.descriptorQuality,
     independentEvidenceScore: confidence,
-    relativeDriftScore: previous ? clamp(distance(candidate.center, previous.center) / Math.max(1, Math.max(radiusX, radiusY) * 1.8)) : 0,
-    detectorLabel: `profile:${candidate.name}`,
+    relativeDriftScore: sameProfileAsPrevious && previous ? clamp(distance(candidate.center, previous.center) / Math.max(1, Math.max(radiusX, radiusY) * 1.8)) : 0,
+    detectorLabel,
     detectorScore: candidate.score
   };
   region.contour = Array.from({ length: 28 }, (_item, index) => ellipsePoint(region, (index / 28) * Math.PI * 2));

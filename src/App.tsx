@@ -582,6 +582,8 @@ export default function App() {
           activeAlgorithmVersion === 'v3'
             ? (v3ProfileCandidatesRef.current.find((candidate) => candidate.matched) ?? null)
             : null;
+        const requiresEnabledProfileMatch =
+          activeAlgorithmVersion === 'v3' && enabledProfiles.length > 0 && !manualPointRef.current;
         const heuristicObject = inferObjectRegion({
           video,
           hand,
@@ -592,11 +594,17 @@ export default function App() {
           detectorBox: detectorBoxRef.current,
           algorithmVersion: fallbackAlgorithmVersion
         });
-        const rawObject =
-          bestProfileCandidate && !manualPointRef.current
-            ? objectRegionFromProfileCandidate(bestProfileCandidate, previousObjectRef.current)
-            : heuristicObject;
+        let rawObject: ObjectRegion | null = heuristicObject;
+        if (bestProfileCandidate && !manualPointRef.current) {
+          rawObject = objectRegionFromProfileCandidate(bestProfileCandidate, previousObjectRef.current);
+        } else if (requiresEnabledProfileMatch) {
+          rawObject = null;
+        }
         object = stabilizerRef.current.stabilizeObject(rawObject, timestamp);
+        if (requiresEnabledProfileMatch && !bestProfileCandidate && objectDetectionRef.current) {
+          objectDetectionRef.current = null;
+          setObjectDetection(null);
+        }
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
           const descriptor = object && !bestProfileCandidate ? browserObjectDescriptorProvider.describe(video, object) : null;

@@ -69,6 +69,27 @@ describe('object profile v2', () => {
     expect(match?.matched).toBe(false);
   });
 
+  it('marks profile matching as uncertain when two enabled profiles are too similar', () => {
+    const phone = trainObjectProfileV2('Phone', [
+      sample('phone-a', descriptor([0.6, 0.18, 0.1, 0.12])),
+      sample('phone-b', descriptor([0.58, 0.2, 0.1, 0.12])),
+      sample('phone-c', descriptor([0.62, 0.16, 0.1, 0.12]))
+    ]);
+    const remote = trainObjectProfileV2('Remote', [
+      sample('remote-a', descriptor([0.59, 0.19, 0.1, 0.12])),
+      sample('remote-b', descriptor([0.57, 0.21, 0.1, 0.12])),
+      sample('remote-c', descriptor([0.61, 0.17, 0.1, 0.12]))
+    ]);
+
+    expect(phone.ok).toBe(true);
+    expect(remote.ok).toBe(true);
+    if (!phone.ok || !remote.ok) return;
+
+    const match = matchObjectProfiles(descriptor([0.6, 0.18, 0.1, 0.12]), [phone.profile, remote.profile]);
+    expect(match?.score).toBeGreaterThan(0.62);
+    expect(match?.matched).toBe(false);
+  });
+
   it('turns a trained-object candidate into a tracked object region', () => {
     const object = objectRegionFromProfileCandidate(
       {
@@ -90,6 +111,46 @@ describe('object profile v2', () => {
     expect(object.locked).toBe(true);
     expect(object.contour).toHaveLength(28);
     expect(object.confidence).toBeGreaterThan(0.8);
+  });
+
+  it('does not inherit lock history from a different trained profile', () => {
+    const previous = objectRegionFromProfileCandidate(
+      {
+        profileId: 'remote-profile',
+        name: 'Remote',
+        score: 0.9,
+        matched: true,
+        center: { x: 80, y: 90 },
+        radiusX: 22,
+        radiusY: 44,
+        aspectRatio: 2,
+        descriptorQuality: 0.8
+      },
+      null
+    );
+    previous.lockAgeFrames = 14;
+    previous.angle = 0.7;
+
+    const next = objectRegionFromProfileCandidate(
+      {
+        profileId: 'phone-profile',
+        name: 'Phone',
+        score: 0.88,
+        matched: true,
+        center: { x: 130, y: 150 },
+        radiusX: 30,
+        radiusY: 58,
+        aspectRatio: 1.93,
+        descriptorQuality: 0.78
+      },
+      previous
+    );
+
+    expect(next.detectorLabel).toBe('profile:Phone');
+    expect(next.lockAgeFrames).toBe(1);
+    expect(next.angle).toBe(0);
+    expect(next.velocity).toEqual({ x: 0, y: 0 });
+    expect(next.relativeDriftScore).toBe(0);
   });
 });
 
