@@ -69,7 +69,7 @@ export function inferObjectRegion({
         }
       : inferredCenter;
   const relativeDriftScore = clamp(previous ? distance(center, previous.center) / Math.max(1, size * 0.62) : 0);
-  const imageEvidence = sampleRegionEvidence(video, center, Math.max(radiusX, radiusY));
+  const imageEvidence = sampleRegionEvidence(video, center, Math.max(radiusX, radiusY), palm, size);
   const strongVisualObject = imageEvidence.edgeEnergy > 0.42 || imageEvidence.colorVariance > 0.46;
   const previousIndependentEvidence = previous?.independentEvidenceScore ?? 0;
   const stablePreviousAuto =
@@ -92,6 +92,18 @@ export function inferObjectRegion({
   ) {
     return null;
   }
+
+  const handOnlyManualLock = shouldRejectSkinOnlyManualLock({
+    objectFirstAlgorithm,
+    hasManualPoint: Boolean(manualPoint),
+    hasDetectorCandidate: Boolean(detectorCandidate),
+    skinSimilarity: imageEvidence.skinSimilarity,
+    edgeEnergy: imageEvidence.edgeEnergy,
+    colorVariance: imageEvidence.colorVariance,
+    centerDistanceFromPalm: distance(center, palm),
+    handSizeValue: size
+  });
+  if (handOnlyManualLock) return null;
 
   const nearHand = tips.some((tip) => distance(tip, center) < size * 0.78) && distance(center, palm) < size * 0.84;
   const lockConfidence = manualPoint ? 0.92 : locked && previous ? 0.72 : 0;
@@ -210,14 +222,35 @@ export function isManualLockAnchorStale(
   );
 }
 
-function sampleRegionEvidence(video: HTMLVideoElement, center: Point, radius: number) {
+export function shouldRejectSkinOnlyManualLock(options: {
+  objectFirstAlgorithm: boolean;
+  hasManualPoint: boolean;
+  hasDetectorCandidate: boolean;
+  skinSimilarity: number;
+  edgeEnergy: number;
+  colorVariance: number;
+  centerDistanceFromPalm: number;
+  handSizeValue: number;
+}) {
+  return (
+    options.objectFirstAlgorithm &&
+    options.hasManualPoint &&
+    !options.hasDetectorCandidate &&
+    options.skinSimilarity > 0.72 &&
+    options.edgeEnergy < 0.34 &&
+    options.colorVariance < 0.32 &&
+    options.centerDistanceFromPalm < options.handSizeValue * 0.68
+  );
+}
+
+function sampleRegionEvidence(video: HTMLVideoElement, center: Point, radius: number, palm?: Point, handSizeValue = 1) {
   if (!sampleCanvas) {
     sampleCanvas = document.createElement('canvas');
     sampleCanvas.width = SAMPLE_SIZE;
     sampleCanvas.height = SAMPLE_SIZE;
     sampleContext = sampleCanvas.getContext('2d', { willReadFrequently: true });
   }
-  if (!sampleContext) return { edgeEnergy: 0, colorVariance: 0 };
+  if (!sampleContext) return { edgeEnergy: 0, colorVariance: 0, skinSimilarity: 0 };
 
   const sourceSize = Math.max(24, radius * 2.4);
   const sx = clamp(center.x - sourceSize / 2, 0, Math.max(0, video.videoWidth - sourceSize));
@@ -227,6 +260,9 @@ function sampleRegionEvidence(video: HTMLVideoElement, center: Point, radius: nu
   let gradientTotal = 0;
   let colorTotal = 0;
   let colorSquaredTotal = 0;
+  let redTotal = 0;
+  let greenTotal = 0;
+  let blueTotal = 0;
   let samples = 0;
 
   for (let y = 1; y < SAMPLE_SIZE - 1; y += 3) {
@@ -241,14 +277,54 @@ function sampleRegionEvidence(video: HTMLVideoElement, center: Point, radius: nu
       gradientTotal += Math.abs(luminance - luminanceRight) + Math.abs(luminance - luminanceDown);
       colorTotal += chroma;
       colorSquaredTotal += chroma * chroma;
+      redTotal += data[index];
+      greenTotal += data[index + 1];
+      blueTotal += data[index + 2];
       samples += 1;
     }
   }
 
   const meanColor = colorTotal / Math.max(1, samples);
   const variance = colorSquaredTotal / Math.max(1, samples) - meanColor * meanColor;
+  const regionColor = {
+    r: redTotal / Math.max(1, samples),
+    g: greenTotal / Math.max(1, samples),
+    b: blueTotal / Math.max(1, samples)
+  };
+  const palmColor = palm ? sampleAverageColor(video, palm, Math.max(18, handSizeValue * 0.14)) : null;
+  const colorDistance = palmColor
+    ? Math.hypot(regionColor.r - palmColor.r, regionColor.g - palmColor.g, regionColor.b - palmColor.b)
+    : 255;
   return {
     edgeEnergy: clamp(gradientTotal / Math.max(1, samples) / 62),
-    colorVariance: clamp(Math.sqrt(Math.max(0, variance)) / 55)
+    colorVariance: clamp(Math.sqrt(Math.max(0, variance)) / 55),
+    skinSimilarity: palmColor ? clamp(1 - colorDistance / 92) : 0
+  };
+}
+
+function sampleAverageColor(video: HTMLVideoElement, center: Point, radius: number) {
+  if (!sampleCanvas || !sampleContext) return null;
+  const sourceSize = Math.max(12, radius * 2);
+  const sx = clamp(center.x - sourceSize / 2, 0, Math.max(0, video.videoWidth - sourceSize));
+  const sy = clamp(center.y - sourceSize / 2, 0, Math.max(0, video.videoHeight - sourceSize));
+  sampleContext.drawImage(video, sx, sy, sourceSize, sourceSize, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+  const { data } = sampleContext.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let count = 0;
+  for (let y = 8; y < SAMPLE_SIZE - 8; y += 4) {
+    for (let x = 8; x < SAMPLE_SIZE - 8; x += 4) {
+      const index = (y * SAMPLE_SIZE + x) * 4;
+      r += data[index];
+      g += data[index + 1];
+      b += data[index + 2];
+      count += 1;
+    }
+  }
+  return {
+    r: r / Math.max(1, count),
+    g: g / Math.max(1, count),
+    b: b / Math.max(1, count)
   };
 }

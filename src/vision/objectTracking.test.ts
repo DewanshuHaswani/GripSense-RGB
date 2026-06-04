@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isManualLockAnchorStale } from './objectTracking';
+import { isManualLockAnchorStale, shouldRejectSkinOnlyManualLock } from './objectTracking';
 
 describe('object tracking', () => {
   it('keeps a fresh manual lock anchor near the current grasp', () => {
@@ -36,5 +36,35 @@ describe('object tracking', () => {
     );
 
     expect(stale).toBe(false);
+  });
+
+  it('rejects a manual lock that looks like skin-only palm area', () => {
+    expect(
+      shouldRejectSkinOnlyManualLock({
+        objectFirstAlgorithm: true,
+        hasManualPoint: true,
+        hasDetectorCandidate: false,
+        skinSimilarity: 0.86,
+        edgeEnergy: 0.18,
+        colorVariance: 0.14,
+        centerDistanceFromPalm: 32,
+        handSizeValue: 90
+      })
+    ).toBe(true);
+  });
+
+  it('keeps a manual lock when the region has independent object evidence', () => {
+    expect(
+      shouldRejectSkinOnlyManualLock({
+        objectFirstAlgorithm: true,
+        hasManualPoint: true,
+        hasDetectorCandidate: false,
+        skinSimilarity: 0.4,
+        edgeEnergy: 0.48,
+        colorVariance: 0.36,
+        centerDistanceFromPalm: 32,
+        handSizeValue: 90
+      })
+    ).toBe(false);
   });
 });
