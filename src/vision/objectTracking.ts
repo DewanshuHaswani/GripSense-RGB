@@ -34,9 +34,10 @@ export function inferObjectRegion({
   const tipCenter = averagePoint([hand[4], hand[8], hand[12], hand[16]]);
   const graspCenter = averagePoint([palm, tipCenter, hand[8], hand[12], hand[16]]);
   const detectorCandidate = sanitizeDetectorBox(detectorBox, palm, tips, size);
+  const manualPointIsStale = isManualLockAnchorStale(manualPoint, graspCenter, previous, locked, size);
   const manualOrDetector = Boolean(manualPoint || detectorCandidate);
   const openHandScore = computeOpenHandScore(hand, size, palm);
-  const autoCenter = manualPoint ?? previous?.center ?? graspCenter;
+  const autoCenter = manualPoint && !manualPointIsStale ? manualPoint : previous?.center ?? graspCenter;
   const radiusSeed = clamp(distance(palm, tipCenter) / Math.max(1, size), 0.18, 0.48);
   const detectorRadiusX = detectorCandidate ? clamp(detectorCandidate.box.width * 0.5, size * 0.22, size * 0.78) : null;
   const detectorRadiusY = detectorCandidate ? clamp(detectorCandidate.box.height * 0.5, size * 0.18, size * 0.92) : null;
@@ -47,11 +48,11 @@ export function inferObjectRegion({
     : null;
   const rawCenter = detectorCenter ?? autoCenter;
   const inferredCenter =
-    manualPoint || distance(rawCenter, graspCenter) < size * 0.72
+    (manualPoint && !manualPointIsStale) || distance(rawCenter, graspCenter) < size * 0.72
       ? rawCenter
       : {
-          x: rawCenter.x * 0.38 + graspCenter.x * 0.62,
-          y: rawCenter.y * 0.38 + graspCenter.y * 0.62
+          x: rawCenter.x * 0.28 + graspCenter.x * 0.72,
+          y: rawCenter.y * 0.28 + graspCenter.y * 0.72
         };
   const previousDrift = previous ? distance(inferredCenter, previous.center) / Math.max(1, size) : 0;
   const objectFirstAlgorithm = algorithmVersion === 'v2' || algorithmVersion === 'v3';
@@ -194,6 +195,19 @@ function computeOpenHandScore(hand: Landmark[], size: number, palm: Point) {
   const thumbExtended = clamp((distance(hand[4], palm) - size * 0.22) / Math.max(1, size * 0.38));
   const spread = clamp(distance(hand[8], hand[20]) / Math.max(1, size * 0.86));
   return clamp((extendedTips.reduce((sum, value) => sum + value, 0) / extendedTips.length) * 0.62 + thumbExtended * 0.18 + spread * 0.2);
+}
+
+export function isManualLockAnchorStale(
+  manualPoint: Point | null,
+  graspCenter: Point,
+  previous: Pick<ObjectRegion, 'source'> | null,
+  locked: boolean,
+  handSizeValue: number
+) {
+  return (
+    Boolean(manualPoint && previous?.source === 'manual' && locked) &&
+    distance(manualPoint!, graspCenter) > handSizeValue * 0.82
+  );
 }
 
 function sampleRegionEvidence(video: HTMLVideoElement, center: Point, radius: number) {
