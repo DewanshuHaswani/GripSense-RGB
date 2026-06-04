@@ -35,16 +35,20 @@ import {
   objectRegionFromProfileCandidate,
   trainingReadiness,
   trainObjectProfileV2,
+  trainingCoverage,
+  profileStrength,
   type ObjectProfileMatch,
   type ObjectProfileCandidate,
   type ObjectProfileV2,
   type ObjectTrainingSampleV2,
-  type CanvasObjectMaskOptions
+  type CanvasObjectMaskOptions,
+  type TrainingViewRole
 } from './vision/objectProfile';
 import { drawTrackingOverlay } from './vision/drawing';
 import { createVisionEngine, type VisionEngine, type VisionModelStatus } from './vision/visionEngine';
 import { TrackingStabilizer } from './vision/stabilization';
 import { createV3AnalyzeFrameRequest, DEFAULT_V3_ENDPOINT, requestV3FrameAnalysis } from './vision/v3Inference';
+import { EMPTY_TEMPORAL_IDENTITY, temporalIdentityToMatch, updateTemporalIdentity, type TemporalIdentityState } from './vision/temporalIdentity';
 import type {
   AlgorithmVersion,
   GripAnalysis,
@@ -72,6 +76,8 @@ const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | un
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
+const OFFLINE_TIMELINE_INTERVAL_MS = 380;
+const TRAINING_VIEW_ROLES: TrainingViewRole[] = ['front', 'side', 'rotated', 'in-hand', 'alone', 'negative'];
 
 type LocalWritableFile = {
   write(data: Blob | string): Promise<void>;
@@ -111,6 +117,17 @@ type PendingUploadReview = {
   maskScale: number;
   maskShape: CanvasObjectMaskOptions['maskShape'];
   source: ObjectTrainingSampleV2['source'];
+  viewRole: TrainingViewRole;
+};
+
+type OfflineTimelinePoint = {
+  time: number;
+  grip: number;
+  objectMatch: number;
+  slip: number;
+  weak: boolean;
+  guidance: string;
+  object: string;
 };
 
 const METRIC_INFO = {
@@ -128,7 +145,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, or V3 for local-server perception fusion with V2 fallback.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, or V4 for trained-object-first matching with temporal identity.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -156,7 +173,9 @@ const EXPLAIN = {
   clearViews: 'Removes the temporary captured views before training. Already trained profiles stay saved.',
   folderSave: 'Mirrors trained profiles and thumbnails into a local folder when the browser supports folder access.',
   objectIdentity: 'How closely the current locked object matches the trained profile. Low match blocks strong grip in V2.',
-  trainedProfiles: 'Saved local object profiles. Enabled profiles are used for live matching; disabled profiles stay saved but are ignored.'
+  trainedProfiles: 'Saved local object profiles. Enabled profiles are used for live matching; disabled profiles stay saved but are ignored.',
+  v4Temporal: 'V4 requires the same enabled trained object to match across several frames before it turns green. This reduces flicker and wrong detections.',
+  profileStrength: 'Profile strength estimates training coverage across front, side, rotated, in-hand, alone, and negative examples.'
 } as const;
 
 export default function App() {
@@ -187,6 +206,9 @@ export default function App() {
   const lastObjectMatchRef = useRef(0);
   const v3ProfileCandidatesRef = useRef<ObjectProfileCandidate[]>([]);
   const lastProfileSearchRef = useRef(0);
+  const temporalIdentityRef = useRef<TemporalIdentityState>(EMPTY_TEMPORAL_IDENTITY);
+  const offlineTimelineRef = useRef<OfflineTimelinePoint[]>([]);
+  const lastOfflineTimelineRef = useRef(0);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -224,6 +246,8 @@ export default function App() {
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
   const [v3ProfileCandidates, setV3ProfileCandidates] = useState<ObjectProfileCandidate[]>([]);
+  const [temporalIdentity, setTemporalIdentity] = useState<TemporalIdentityState>(EMPTY_TEMPORAL_IDENTITY);
+  const [offlineTimeline, setOfflineTimeline] = useState<OfflineTimelinePoint[]>([]);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
@@ -281,6 +305,8 @@ export default function App() {
   }, [modelStatus]);
 
   const trainerReadiness = useMemo(() => trainingReadiness(trainingSamples), [trainingSamples]);
+  const trainerCoverage = useMemo(() => trainingCoverage(trainingSamples), [trainingSamples]);
+  const trainerStrength = useMemo(() => profileStrength(trainingSamples), [trainingSamples]);
   const pendingUpload = pendingUploads[0] ?? null;
   const pendingUploadPreview = useMemo(() => {
     if (!pendingUpload) return null;
@@ -293,7 +319,8 @@ export default function App() {
       maskScale: pendingUpload.maskScale,
       maskShape: pendingUpload.maskShape,
       source: pendingUpload.source,
-      sourceName: pendingUpload.name
+      sourceName: pendingUpload.name,
+      viewRole: pendingUpload.viewRole
     });
   }, [pendingUpload]);
 
@@ -336,12 +363,14 @@ export default function App() {
     detectorBoxRef.current = null;
     objectDetectionRef.current = null;
     v3ProfileCandidatesRef.current = [];
+    temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
     lastProfileSearchRef.current = 0;
     resetV3Runtime();
     stabilizerRef.current.reset();
     setLocked(false);
     setObjectDetection(null);
     setV3ProfileCandidates([]);
+    setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
   }, [resetV3Runtime]);
 
   const startCamera = useCallback(async () => {
@@ -367,8 +396,10 @@ export default function App() {
       video.srcObject = stream;
       await video.play();
       setMediaMode('live');
-      setOfflineVideoName('');
-      resetTrackingRefs();
+    setOfflineVideoName('');
+    offlineTimelineRef.current = [];
+    setOfflineTimeline([]);
+    resetTrackingRefs();
       setCameraState('live');
 
       const engine = await loadVisionEngine();
@@ -403,6 +434,9 @@ export default function App() {
     video.muted = true;
     setMediaMode('offline');
     setOfflineVideoName(file.name);
+    offlineTimelineRef.current = [];
+    lastOfflineTimelineRef.current = 0;
+    setOfflineTimeline([]);
     setCameraState('live');
     setPaused(false);
     resetTrackingRefs();
@@ -562,10 +596,11 @@ export default function App() {
           lastDetectorRunRef.current = timestamp;
         }
         const activeAlgorithmVersion = algorithmVersionRef.current;
-        const fallbackAlgorithmVersion: AlgorithmVersion = activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion;
+        const profileFirstAlgorithm = activeAlgorithmVersion === 'v3' || activeAlgorithmVersion === 'v4';
+        const fallbackAlgorithmVersion: AlgorithmVersion = profileFirstAlgorithm ? 'v2' : activeAlgorithmVersion;
         const enabledProfiles = objectProfilesRef.current.filter((profile) => profile.enabled !== false);
         if (
-          activeAlgorithmVersion === 'v3' &&
+          profileFirstAlgorithm &&
           enabledProfiles.length &&
           timestamp - lastProfileSearchRef.current > V3_PROFILE_SEARCH_INTERVAL_MS
         ) {
@@ -573,17 +608,19 @@ export default function App() {
           const candidates = findObjectProfileCandidates(video, enabledProfiles, hand, 8);
           v3ProfileCandidatesRef.current = candidates;
           setV3ProfileCandidates(candidates);
-        } else if (activeAlgorithmVersion !== 'v3' || !enabledProfiles.length) {
+        } else if (!profileFirstAlgorithm || !enabledProfiles.length) {
           v3ProfileCandidatesRef.current = [];
           setV3ProfileCandidates([]);
+          temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+          setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
         }
 
         const bestProfileCandidate =
-          activeAlgorithmVersion === 'v3'
+          profileFirstAlgorithm
             ? (v3ProfileCandidatesRef.current.find((candidate) => candidate.matched) ?? null)
             : null;
         const requiresEnabledProfileMatch =
-          activeAlgorithmVersion === 'v3' && enabledProfiles.length > 0 && !manualPointRef.current;
+          profileFirstAlgorithm && enabledProfiles.length > 0 && !manualPointRef.current;
         const heuristicObject = inferObjectRegion({
           video,
           hand,
@@ -608,7 +645,7 @@ export default function App() {
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
           const descriptor = object && !bestProfileCandidate ? browserObjectDescriptorProvider.describe(video, object) : null;
-          const match = bestProfileCandidate
+          const instantMatch = bestProfileCandidate
             ? {
                 profileId: bestProfileCandidate.profileId,
                 name: bestProfileCandidate.name,
@@ -616,6 +653,13 @@ export default function App() {
                 matched: bestProfileCandidate.matched
               }
             : matchObjectProfiles(descriptor, enabledProfiles);
+          let match = instantMatch;
+          if (activeAlgorithmVersion === 'v4') {
+            const nextTemporal = updateTemporalIdentity(temporalIdentityRef.current, bestProfileCandidate);
+            temporalIdentityRef.current = nextTemporal;
+            setTemporalIdentity(nextTemporal);
+            match = temporalIdentityToMatch(nextTemporal);
+          }
           objectDetectionRef.current = match;
           setObjectDetection(match);
         }
@@ -657,6 +701,20 @@ export default function App() {
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
+        if (mediaMode === 'offline' && timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS) {
+          lastOfflineTimelineRef.current = timestamp;
+          const point = {
+            time: video.currentTime,
+            grip: frameAnalysis.gripPercentage,
+            objectMatch: objectIdentity.score,
+            slip: frameAnalysis.slipRisk,
+            weak: frameAnalysis.gripPercentage < 44 || frameAnalysis.guidance === 'Reposition' || frameAnalysis.guidance === 'Object uncertain',
+            guidance: frameAnalysis.guidance,
+            object: objectIdentity.name ?? ''
+          };
+          offlineTimelineRef.current = [...offlineTimelineRef.current.slice(-239), point];
+          setOfflineTimeline(offlineTimelineRef.current);
+        }
         updateCalibrationCapture(frameAnalysis, timestamp);
         previousObjectRef.current = object;
         previousPalmRef.current = frameAnalysis.palmCenter;
@@ -669,7 +727,7 @@ export default function App() {
 
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     animationRef.current = requestAnimationFrame(tick);
-  }, [analysis, scheduleV3Inference, updateCalibrationCapture]);
+  }, [analysis, mediaMode, scheduleV3Inference, updateCalibrationCapture]);
 
   const resetObject = useCallback(() => {
     manualPointRef.current = null;
@@ -678,6 +736,7 @@ export default function App() {
     previousObjectRef.current = null;
     detectorBoxRef.current = null;
     v3ProfileCandidatesRef.current = [];
+    temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
     lastProfileSearchRef.current = 0;
     stabilizerRef.current.reset();
     calibrationCaptureRef.current = { active: false, kind: calibrationKind, start: 0, samples: [] };
@@ -685,6 +744,7 @@ export default function App() {
     setLocked(false);
     setCalibrating(false);
     setV3ProfileCandidates([]);
+    setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
     setAnalysis(createEmptyAnalysis('Object reset. Place it between your thumb and fingers to relock.'));
   }, [calibrationKind, resetV3Runtime]);
 
@@ -784,6 +844,8 @@ export default function App() {
       resetV3Runtime(
         version === 'v3'
           ? 'V3 selected. Start tracking to connect to the local perception server.'
+          : version === 'v4'
+          ? 'V4 selected. Enabled trained objects must match across multiple frames before detection turns green.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       setLocked(false);
@@ -794,6 +856,8 @@ export default function App() {
         createEmptyAnalysis(
           version === 'v3'
             ? 'V3 selected. It will fuse local-server perception with V2 fallback when the server is unavailable.'
+            : version === 'v4'
+            ? 'V4 selected. Train an object, enable it, then V4 will require stable identity before scoring grip.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -1015,6 +1079,29 @@ export default function App() {
     setTrainingStatus('Training views cleared. Capture new masked views.');
   }, []);
 
+  const exportOfflineTimeline = useCallback((format: 'csv' | 'json') => {
+    if (!offlineTimelineRef.current.length) return;
+    const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const payload =
+      format === 'json'
+        ? JSON.stringify(offlineTimelineRef.current, null, 2)
+        : [
+            'time,grip,objectMatch,slip,weak,guidance,object',
+            ...offlineTimelineRef.current.map((point) =>
+              [
+                point.time.toFixed(2),
+                point.grip,
+                Math.round(point.objectMatch * 100),
+                Math.round(point.slip * 100),
+                point.weak ? 'yes' : 'no',
+                csvEscape(point.guidance),
+                csvEscape(point.object)
+              ].join(',')
+            )
+          ].join('\n');
+    downloadTextFile(`${fileBase}.${format}`, payload, format === 'json' ? 'application/json' : 'text/csv');
+  }, [offlineVideoName]);
+
   return (
     <main className="app-shell">
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
@@ -1067,6 +1154,14 @@ export default function App() {
                 aria-pressed={algorithmVersion === 'v3'}
               >
                 V3
+              </button>
+              <button
+                type="button"
+                className={algorithmVersion === 'v4' ? 'version-button active' : 'version-button'}
+                onClick={() => selectAlgorithmVersion('v4')}
+                aria-pressed={algorithmVersion === 'v4'}
+              >
+                V4
               </button>
             </div>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -1178,6 +1273,10 @@ export default function App() {
                 <span>Object</span>
                 <strong>{objectDetection?.matched ? objectDetection.name : 'not matched'}</strong>
               </div>
+              <div className="offline-mini-row">
+                <span>Timeline</span>
+                <strong>{offlineTimeline.length} pts</strong>
+              </div>
             </div>
             <div className="offline-glass-panel offline-right">
               <p className="eyebrow">Parameters</p>
@@ -1187,6 +1286,24 @@ export default function App() {
               <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
               <GlassMetric label="Thumb" value={analysis.thumbOpposition} />
               <GlassMetric label="Slip" value={analysis.slipRisk} danger />
+              <div className="offline-timeline" aria-label="Offline analysis timeline">
+                {offlineTimeline.slice(-60).map((point, index) => (
+                  <span
+                    className={point.slip > 0.45 ? 'slip' : point.weak ? 'weak' : 'ok'}
+                    style={{ height: `${Math.max(12, point.grip)}%` }}
+                    title={`${point.time.toFixed(1)}s ${point.grip}% ${point.guidance}`}
+                    key={`${point.time}-${index}`}
+                  />
+                ))}
+              </div>
+              <div className="offline-export-row">
+                <button type="button" onClick={() => exportOfflineTimeline('csv')} disabled={!offlineTimeline.length}>
+                  CSV
+                </button>
+                <button type="button" onClick={() => exportOfflineTimeline('json')} disabled={!offlineTimeline.length}>
+                  JSON
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1234,6 +1351,26 @@ export default function App() {
                     </span>
                   ))}
                   <InlineExplain label="Explain training steps" text={EXPLAIN.trainerSteps} compact />
+                </div>
+                <div className="training-coverage-panel">
+                  <div className="motion-header compact-heading">
+                    <span>
+                      V4 training coverage
+                      <InlineExplain label="Explain profile strength" text={EXPLAIN.profileStrength} compact />
+                    </span>
+                    <strong>{Math.round(trainerCoverage * 100)}%</strong>
+                  </div>
+                  <div className="metric-track">
+                    <span style={{ width: `${Math.round(trainerCoverage * 100)}%` }} />
+                  </div>
+                  <div className="role-chip-grid">
+                    {TRAINING_VIEW_ROLES.map((role) => (
+                      <span className={trainingSamples.some((sample) => sample.viewRole === role) ? 'role-chip complete' : 'role-chip'} key={role}>
+                        {formatTrainingRole(role)}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="diagnostic-copy">Expected result: {trainerStrength}. Add negative examples to reduce false positives.</p>
                 </div>
                 <div className="portal-actions">
                   <button type="button" onClick={captureObjectTrainingView}>
@@ -1331,6 +1468,18 @@ export default function App() {
                         Rectangle
                       </button>
                     </div>
+                    <div className="role-picker" aria-label="Training image role">
+                      {TRAINING_VIEW_ROLES.map((role) => (
+                        <button
+                          type="button"
+                          className={pendingUpload.viewRole === role ? 'active' : ''}
+                          onClick={() => updatePendingUpload({ viewRole: role })}
+                          key={role}
+                        >
+                          {formatTrainingRole(role)}
+                        </button>
+                      ))}
+                    </div>
                     {pendingUploadPreview && (
                       <p className={pendingUploadPreview.quality >= 0.56 ? 'diagnostic-copy' : 'diagnostic-copy warn'}>
                         Image quality {Math.round(pendingUploadPreview.quality * 100)}% - {pendingUploadPreview.qualityLabel}: {pendingUploadPreview.descriptor.reasons.join(', ') || 'view is usable'}.
@@ -1355,7 +1504,7 @@ export default function App() {
                         <span className={sample.quality >= 0.56 ? 'sample-quality good' : 'sample-quality'}>
                           {sample.qualityLabel} {Math.round(sample.quality * 100)}%
                         </span>
-                        <small>{sample.sourceName ?? sample.source ?? 'training image'}</small>
+                        <small>{formatTrainingRole(sample.viewRole ?? 'front')} - {sample.sourceName ?? sample.source ?? 'training image'}</small>
                         <button type="button" onClick={() => deleteTrainingSample(sample.id)} aria-label={`Remove training image ${index + 1}`}>
                           Remove
                         </button>
@@ -1481,6 +1630,35 @@ export default function App() {
           </div>
         )}
 
+        {algorithmVersion === 'v4' && (
+          <div className="v3-panel">
+            <div className="motion-header">
+              <Activity size={18} />
+              <span>
+                V4 identity
+                <InlineExplain label="Explain V4 temporal identity" text={EXPLAIN.v4Temporal} />
+              </span>
+            </div>
+            <div className={temporalIdentity.stable ? 'v3-status ready' : 'v3-status fallback'}>
+              <span>{temporalIdentity.stable ? 'stable target' : 'warming up'}</span>
+              <strong>{Math.round(temporalIdentity.score * 100)}%</strong>
+            </div>
+            <div className="diagnostic-row neutral">
+              <span>Target</span>
+              <strong>{temporalIdentity.name ?? 'none'}</strong>
+            </div>
+            <div className="diagnostic-row neutral">
+              <span>Match streak</span>
+              <strong>{temporalIdentity.streak}/3</strong>
+            </div>
+            <p className={temporalIdentity.stable ? 'diagnostic-copy' : 'diagnostic-copy warn'}>
+              {temporalIdentity.stable
+                ? 'Enabled trained object is stable across recent frames.'
+                : 'V4 waits for repeated trained-object matches before marking the object detected.'}
+            </p>
+          </div>
+        )}
+
         <div className="trainer-panel">
           <div className="motion-header">
             <Images size={18} />
@@ -1538,7 +1716,7 @@ export default function App() {
                     </button>
                     <span>
                       {profile.name}
-                      {algorithmVersion === 'v3' && candidate && (
+                      {(algorithmVersion === 'v3' || algorithmVersion === 'v4') && candidate && (
                         <small>{Math.round(candidate.score * 100)}%</small>
                       )}
                     </span>
@@ -1546,14 +1724,14 @@ export default function App() {
                   </div>
                 );
               })}
-              {algorithmVersion === 'v3' && (
+              {(algorithmVersion === 'v3' || algorithmVersion === 'v4') && (
                 <div className="candidate-list">
                   <div className="motion-header compact-heading">
                     <span>
-                      V3 detectable now
+                      {algorithmVersion.toUpperCase()} detectable now
                       <InlineExplain
-                        label="Explain V3 detectable profiles"
-                        text="V3 scans only enabled trained profiles. Disable a profile to completely remove it from live object search."
+                        label="Explain detectable profiles"
+                        text="This mode scans only enabled trained profiles. Disable a profile to completely remove it from live object search."
                         compact
                       />
                     </span>
@@ -1749,7 +1927,8 @@ function createPendingUploadReview(
     cropSize,
     maskScale: 0.86,
     maskShape: inferMaskShape(canvas),
-    source
+    source,
+    viewRole: source === 'locked-crop' ? 'in-hand' : 'front'
   };
 }
 
@@ -1769,6 +1948,23 @@ function inferMaskShape(canvas: HTMLCanvasElement): CanvasObjectMaskOptions['mas
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function formatTrainingRole(role: TrainingViewRole) {
+  return role.replace('-', ' ');
+}
+
+function csvEscape(value: string) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function downloadTextFile(filename: string, text: string, type: string) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function profileLiveStatus(
@@ -1984,9 +2180,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' ? fromStorage : 'v2';
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' ? fromStorage : 'v4';
 }
 
 function saveAlgorithmVersion(version: AlgorithmVersion) {
@@ -2019,10 +2215,19 @@ function saveObjectProfiles(profiles: ObjectProfileV2[]) {
 }
 
 function normalizeObjectProfiles(profiles: ObjectProfileV2[]) {
-  return profiles.map((profile) => ({
-    ...profile,
-    enabled: profile.enabled !== false
-  }));
+  return profiles.map((profile) => {
+    const samples = profile.samples.map((sample) => ({
+      ...sample,
+      viewRole: sample.viewRole ?? 'front'
+    }));
+    return {
+      ...profile,
+      samples,
+      enabled: profile.enabled !== false,
+      strength: profile.strength ?? profileStrength(samples),
+      coverageScore: profile.coverageScore ?? trainingCoverage(samples)
+    };
+  });
 }
 
 async function mirrorObjectProfilesToFolder(handle: LocalDirectoryHandle, profiles: ObjectProfileV2[]) {

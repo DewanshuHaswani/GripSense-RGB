@@ -32,8 +32,9 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v1`
 - `http://127.0.0.1:5173/?version=v2`
 - `http://127.0.0.1:5173/?version=v3`
+- `http://127.0.0.1:5173/?version=v4`
 
-The toolbar also has a `V1` / `V2` / `V3` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` / `V2` / `V3` / `V4` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ## Offline Video Review
 
@@ -43,6 +44,8 @@ Offline mode adds liquid-glass overlays directly on top of the video:
 
 - Left overlay: grip percentage, guidance, tracking state, grip mode, and matched object.
 - Right overlay: confidence, object lock, closure, contact, thumb support, and slip risk.
+- Timeline overlay: grip percentage over time, object match over time, slip-risk bars, and weak-grip segments.
+- Export buttons: download the offline analysis as CSV or JSON.
 - The video remains visible behind the transparent panels, while the text and bars stay readable.
 
 You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
@@ -73,6 +76,23 @@ Object Profile V2 uses a training quality advisor:
 These labels are recommendations. Training is allowed with any readable image set, because the whole point of object training is to help when the live tracker is uncertain. More clean angles simply make matching more reliable.
 
 Each profile stores `id`, `name`, `enabled`, captured samples, crop bounds, object-region metadata, descriptor vectors, descriptor variance, minimum training quality, and the recommended view count. New profiles are enabled by default. Disabled profiles remain saved but are ignored during live matching. The descriptor logic is behind an `ObjectDescriptorProvider` interface, so a later backend, ONNX, or embedding model can replace the handcrafted browser descriptor without rewriting the trainer UI or grip scorer.
+
+## Version 4: Stable Trained Object Workflow
+
+V4 is the preferred trained-object-first flow:
+
+```text
+trained object list -> enable target object -> detect target over time -> estimate visual grip
+```
+
+V4 adds four upgrades over V3:
+
+- **Stronger browser descriptor**: the local descriptor now combines HSV/color histograms, RGB/chroma cues, edge orientation, spatial layout, radial layout, shape, coverage, contrast, and texture. It is still browser-only, but the descriptor interface remains ready for a future ONNX, CLIP, DINO, or local Python embedding provider.
+- **Data augmentation**: each masked training crop generates extra descriptor variants with horizontal flip, brightness, and contrast changes. This improves matching across lighting and camera shifts without uploading data.
+- **Guided training coverage**: every training image can be marked as `front`, `side`, `rotated`, `in hand`, `alone`, or `negative`. The portal shows whether the profile is likely weak, good, or robust. Negative examples reduce false positives from empty hands, background, or similar objects.
+- **Temporal identity**: V4 waits for repeated matches across recent frames before turning the object green. One noisy frame is not enough.
+
+V4 does not currently ship a neural embedding model. That is intentional for this browser-only build: adding CLIP/DINO-style embeddings requires either bundled ONNX assets or a local/server-side model. The current code keeps the interface ready for that upgrade while improving the local path immediately.
 
 ## Version 3: Trained Object Focus
 

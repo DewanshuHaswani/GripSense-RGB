@@ -2,6 +2,8 @@ import type { Landmark, ObjectRegion, Point } from './types';
 import { averagePoint, clamp, distance, ellipsePoint, fingertipPoints, handSize, palmCenter } from './geometry';
 
 export type TrainingQualityLabel = 'Rejected' | 'Needs more angles' | 'Mask too loose' | 'Good view' | 'Ready to train';
+export type TrainingViewRole = 'front' | 'side' | 'rotated' | 'in-hand' | 'alone' | 'negative';
+export type ProfileStrength = 'weak profile' | 'good profile' | 'robust profile';
 
 export type ObjectDescriptor = {
   vector: number[];
@@ -32,6 +34,8 @@ export type ObjectTrainingSampleV2 = {
   createdAt: number;
   source?: 'camera' | 'upload' | 'locked-crop';
   sourceName?: string;
+  viewRole?: TrainingViewRole;
+  descriptorVariants?: number[][];
 };
 
 export type CanvasObjectMaskOptions = {
@@ -40,6 +44,7 @@ export type CanvasObjectMaskOptions = {
   maskShape: 'ellipse' | 'rect';
   source?: ObjectTrainingSampleV2['source'];
   sourceName?: string;
+  viewRole?: TrainingViewRole;
 };
 
 export type ObjectProfileV2 = {
@@ -51,6 +56,9 @@ export type ObjectProfileV2 = {
   descriptorVariance: number;
   minTrainingQuality: number;
   recommendedViewCount: number;
+  negativeDescriptor?: number[];
+  strength?: ProfileStrength;
+  coverageScore?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -119,7 +127,8 @@ export function createBrowserObjectTrainingSample(
     quality: descriptor.quality,
     qualityLabel: descriptor.qualityLabel,
     createdAt: Date.now(),
-    source: 'locked-crop'
+    source: 'locked-crop',
+    viewRole: 'in-hand'
   };
 }
 
@@ -168,6 +177,7 @@ export function createMaskedCanvasObjectTrainingSample(
   };
   const descriptor = describeImageData(squareContext.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object);
   if (!descriptor) return null;
+  const descriptorVariants = buildAugmentedDescriptors(square, object);
 
   const thumbnail = document.createElement('canvas');
   thumbnail.width = THUMBNAIL_SIZE;
@@ -186,7 +196,9 @@ export function createMaskedCanvasObjectTrainingSample(
     qualityLabel: descriptor.qualityLabel,
     createdAt: Date.now(),
     source: options.source,
-    sourceName: options.sourceName
+    sourceName: options.sourceName,
+    viewRole: options.viewRole,
+    descriptorVariants
   };
 }
 
@@ -208,6 +220,45 @@ function applyObjectMask(
   }
   context.fill();
   context.restore();
+}
+
+function buildAugmentedDescriptors(source: HTMLCanvasElement, object: Pick<ObjectRegion, 'radiusX' | 'radiusY'>) {
+  const variants = [
+    { flip: true, brightness: 1, contrast: 1 },
+    { flip: false, brightness: 1.1, contrast: 1.04 },
+    { flip: false, brightness: 0.9, contrast: 1.08 },
+    { flip: false, brightness: 1, contrast: 0.9 }
+  ];
+  return variants
+    .map((variant) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = DESCRIPTOR_SIZE;
+      canvas.height = DESCRIPTOR_SIZE;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return null;
+      context.save();
+      if (variant.flip) {
+        context.translate(DESCRIPTOR_SIZE, 0);
+        context.scale(-1, 1);
+      }
+      context.drawImage(source, 0, 0);
+      context.restore();
+      const imageData = context.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE);
+      adjustImageData(imageData, variant.brightness, variant.contrast);
+      context.putImageData(imageData, 0, 0);
+      return describeImageData(context.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object)?.vector ?? null;
+    })
+    .filter((vector): vector is number[] => Boolean(vector));
+}
+
+function adjustImageData(imageData: ImageData, brightness: number, contrast: number) {
+  const { data } = imageData;
+  for (let index = 0; index < data.length; index += 4) {
+    for (let channel = 0; channel < 3; channel += 1) {
+      const centered = data[index + channel] - 128;
+      data[index + channel] = clamp(centered * contrast + 128 * brightness, 0, 255);
+    }
+  }
 }
 
 function roundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
@@ -242,6 +293,8 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
   const valueBins = new Array(4).fill(0);
   const edgeBins = new Array(8).fill(0);
   const gridBins = new Array(4).fill(0);
+  const ringBins = new Array(3).fill(0);
+  const rgbBins = new Array(6).fill(0);
   const insideLum: number[] = [];
   const borderLum: number[] = [];
   let foregroundPixels = 0;
@@ -265,6 +318,12 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
       hueBins[Math.min(7, Math.floor(hsv.h * 8))] += alpha;
       saturationBins[Math.min(3, Math.floor(hsv.s * 4))] += alpha;
       valueBins[Math.min(3, Math.floor(hsv.v * 4))] += alpha;
+      rgbBins[0] += r * alpha;
+      rgbBins[1] += g * alpha;
+      rgbBins[2] += b * alpha;
+      rgbBins[3] += Math.abs(r - g) * alpha;
+      rgbBins[4] += Math.abs(g - b) * alpha;
+      rgbBins[5] += Math.abs(b - r) * alpha;
 
       const lumLeft = luminanceAt(data, (y * width + x - 1) * 4);
       const lumRight = luminanceAt(data, (y * width + x + 1) * 4);
@@ -279,6 +338,10 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
 
       const gridIndex = (x < width / 2 ? 0 : 1) + (y < height / 2 ? 0 : 2);
       gridBins[gridIndex] += luminance * alpha;
+      const dx = x / width - 0.5;
+      const dy = y / height - 0.5;
+      const ringIndex = Math.min(2, Math.floor(Math.hypot(dx, dy) * 4.8));
+      ringBins[ringIndex] += luminance * alpha;
       insideLum.push(luminance);
       textureTotal += Math.abs(luminance - average([lumLeft, lumRight, lumUp, lumDown]));
       foregroundPixels += 1;
@@ -299,6 +362,8 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
   normalizeBins(valueBins);
   normalizeBins(edgeBins);
   normalizeBins(gridBins);
+  normalizeBins(ringBins);
+  normalizeBins(rgbBins);
 
   const quality = scoreSampleQuality({ maskCoverage, foregroundContrast, edgeStrength, textureStrength, aspectRatio });
   const qualityLabel = labelSampleQuality(quality, maskCoverage);
@@ -308,6 +373,8 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
     ...valueBins,
     ...edgeBins,
     ...gridBins,
+    ...ringBins,
+    ...rgbBins,
     maskCoverage,
     foregroundContrast,
     edgeStrength,
@@ -329,11 +396,17 @@ export function describeImageData(imageData: ImageData, object: Pick<ObjectRegio
 }
 
 export function trainingReadiness(samples: ObjectTrainingSampleV2[]) {
-  const goodSamples = samples.filter((sample) => sample.quality >= MIN_SAMPLE_QUALITY);
+  const positiveSamples = samples.filter((sample) => sample.viewRole !== 'negative');
+  const goodSamples = positiveSamples.filter((sample) => sample.quality >= MIN_SAMPLE_QUALITY);
+  const coverage = trainingCoverage(samples);
+  const strength = profileStrength(samples);
   if (!samples.length) {
     return { ready: false, label: 'Needs more angles' as TrainingQualityLabel, message: 'Capture 3 good masked views.' };
   }
-  if (samples.some((sample) => sample.qualityLabel === 'Mask too loose')) {
+  if (!positiveSamples.length) {
+    return { ready: false, label: 'Needs more angles' as TrainingQualityLabel, message: 'Add at least one positive object view. Negative examples help later, but cannot define the object.' };
+  }
+  if (positiveSamples.some((sample) => sample.qualityLabel === 'Mask too loose')) {
     return { ready: goodSamples.length >= 1, label: 'Mask too loose' as TrainingQualityLabel, message: 'Some views look loose. You can train, but add tighter object-only images for better matching.' };
   }
   if (goodSamples.length < RECOMMENDED_VIEW_COUNT) {
@@ -343,7 +416,28 @@ export function trainingReadiness(samples: ObjectTrainingSampleV2[]) {
       message: `You can train now. Add ${RECOMMENDED_VIEW_COUNT - goodSamples.length} more good view${RECOMMENDED_VIEW_COUNT - goodSamples.length === 1 ? '' : 's'} for a stronger profile.`
     };
   }
-  return { ready: true, label: 'Ready to train' as TrainingQualityLabel, message: 'Ready to train this object profile.' };
+  return {
+    ready: true,
+    label: 'Ready to train' as TrainingQualityLabel,
+    message: `Ready to train. Coverage: ${Math.round(coverage * 100)}%. Expected result: ${strength}.`
+  };
+}
+
+export function trainingCoverage(samples: ObjectTrainingSampleV2[]) {
+  const roles = new Set(samples.map((sample) => sample.viewRole).filter(Boolean));
+  const roleScore =
+    ['front', 'side', 'rotated', 'in-hand', 'alone'].filter((role) => roles.has(role as TrainingViewRole)).length / 5;
+  const negativeScore = roles.has('negative') ? 1 : 0;
+  const goodPositive = samples.filter((sample) => sample.viewRole !== 'negative' && sample.quality >= MIN_SAMPLE_QUALITY).length;
+  const countScore = clamp(goodPositive / 5);
+  return clamp(roleScore * 0.58 + negativeScore * 0.16 + countScore * 0.26);
+}
+
+export function profileStrength(samples: ObjectTrainingSampleV2[]): ProfileStrength {
+  const coverage = trainingCoverage(samples);
+  if (coverage >= 0.76) return 'robust profile';
+  if (coverage >= 0.46) return 'good profile';
+  return 'weak profile';
 }
 
 export function trainObjectProfileV2(
@@ -355,22 +449,32 @@ export function trainObjectProfileV2(
   if (!trimmed) return { ok: false, label: 'Rejected', message: 'Give the object a name before training.' };
   if (!samples.length) return { ok: false, label: 'Needs more angles', message: 'Add at least one image before training.' };
   const readiness = trainingReadiness(samples);
-  const goodSamples = samples.filter((sample) => sample.quality >= MIN_SAMPLE_QUALITY);
-  const trainingSamples = goodSamples.length ? goodSamples : samples;
-  const descriptor = averageDescriptor(trainingSamples.map((sample) => sample.descriptor.vector));
+  const positiveSamples = samples.filter((sample) => sample.viewRole !== 'negative');
+  const negativeSamples = samples.filter((sample) => sample.viewRole === 'negative');
+  if (!positiveSamples.length) return { ok: false, label: 'Needs more angles', message: 'Add at least one positive object image before training.' };
+  const goodSamples = positiveSamples.filter((sample) => sample.quality >= MIN_SAMPLE_QUALITY);
+  const trainingSamples = goodSamples.length ? goodSamples : positiveSamples;
+  const descriptorVectors = trainingSamples.flatMap((sample) => [sample.descriptor.vector, ...(sample.descriptorVariants ?? [])]);
+  const descriptor = averageDescriptor(descriptorVectors);
+  const negativeVectors = negativeSamples.flatMap((sample) => [sample.descriptor.vector, ...(sample.descriptorVariants ?? [])]);
+  const coverageScore = trainingCoverage(samples);
+  const strength = profileStrength(samples);
   return {
     ok: true,
     label: readiness.label,
-    message: `${trimmed} trained successfully with ${samples.length} image${samples.length === 1 ? '' : 's'}. ${readiness.message}`,
+    message: `${trimmed} trained successfully with ${samples.length} image${samples.length === 1 ? '' : 's'} using augmented descriptors. Profile strength: ${strength}. ${readiness.message}`,
     profile: {
       id: existingId ?? crypto.randomUUID(),
       name: trimmed,
       enabled: true,
       samples,
       descriptor,
-      descriptorVariance: descriptorVariance(trainingSamples.map((sample) => sample.descriptor.vector), descriptor),
+      descriptorVariance: descriptorVariance(descriptorVectors, descriptor),
       minTrainingQuality: Math.min(...samples.map((sample) => sample.quality)),
       recommendedViewCount: RECOMMENDED_VIEW_COUNT,
+      negativeDescriptor: negativeVectors.length ? averageDescriptor(negativeVectors) : undefined,
+      strength,
+      coverageScore,
       createdAt: Date.now(),
       updatedAt: Date.now()
     }
@@ -387,7 +491,11 @@ export function matchObjectProfiles(
       const distance = descriptorDistance(descriptor.vector, profile.descriptor);
       const tolerance = clamp(0.48 + profile.descriptorVariance * 1.6, 0.48, 0.78);
       const qualityFactor = clamp(descriptor.quality * 0.68 + profile.minTrainingQuality * 0.32, 0.35, 1);
-      const score = clamp((1 - distance / tolerance) * qualityFactor);
+      const positiveScore = clamp((1 - distance / tolerance) * qualityFactor);
+      const negativeDistance = profile.negativeDescriptor ? descriptorDistance(descriptor.vector, profile.negativeDescriptor) : 1;
+      const negativePenalty = profile.negativeDescriptor ? clamp((1 - negativeDistance / 0.52) * 0.38) : 0;
+      const coverageBoost = clamp((profile.coverageScore ?? 0.35) * 0.08, 0, 0.08);
+      const score = clamp(positiveScore + coverageBoost - negativePenalty);
       return {
         profileId: profile.id,
         name: profile.name,

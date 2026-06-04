@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   matchObjectProfiles,
   objectRegionFromProfileCandidate,
+  profileStrength,
+  trainingCoverage,
   trainingReadiness,
   trainObjectProfileV2,
   type TrainingQualityLabel,
+  type TrainingViewRole,
   type ObjectTrainingSampleV2
 } from './objectProfile';
 
@@ -67,6 +70,24 @@ describe('object profile v2', () => {
     if (!result.ok) return;
     const match = matchObjectProfiles(descriptor([0.08, 0.1, 0.72, 0.1]), [result.profile]);
     expect(match?.matched).toBe(false);
+  });
+
+  it('uses guided coverage and negative examples for V4 profile strength', () => {
+    const samples = [
+      sample('front', descriptor([0.7, 0.1, 0.1, 0.1]), 0.82, 'Good view', 'front'),
+      sample('side', descriptor([0.69, 0.11, 0.1, 0.1]), 0.82, 'Good view', 'side'),
+      sample('rotated', descriptor([0.71, 0.1, 0.09, 0.1]), 0.82, 'Good view', 'rotated'),
+      sample('hand', descriptor([0.68, 0.12, 0.1, 0.1]), 0.78, 'Good view', 'in-hand'),
+      sample('alone', descriptor([0.72, 0.08, 0.1, 0.1]), 0.82, 'Good view', 'alone'),
+      sample('negative', descriptor([0.08, 0.1, 0.72, 0.1]), 0.76, 'Good view', 'negative')
+    ];
+    const result = trainObjectProfileV2('Bottle', samples);
+    expect(result.ok).toBe(true);
+    expect(trainingCoverage(samples)).toBeGreaterThan(0.75);
+    expect(profileStrength(samples)).toBe('robust profile');
+    if (!result.ok) return;
+    expect(result.profile.negativeDescriptor).toBeTruthy();
+    expect(result.profile.strength).toBe('robust profile');
   });
 
   it('marks profile matching as uncertain when two enabled profiles are too similar', () => {
@@ -172,7 +193,8 @@ function sample(
   id: string,
   objectDescriptor: ReturnType<typeof descriptor>,
   quality = objectDescriptor.quality,
-  qualityLabel: TrainingQualityLabel = objectDescriptor.qualityLabel
+  qualityLabel: TrainingQualityLabel = objectDescriptor.qualityLabel,
+  viewRole?: TrainingViewRole
 ): ObjectTrainingSampleV2 {
   return {
     id,
@@ -188,6 +210,8 @@ function sample(
     },
     quality,
     qualityLabel,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    viewRole,
+    descriptorVariants: [[...objectDescriptor.vector]]
   };
 }
