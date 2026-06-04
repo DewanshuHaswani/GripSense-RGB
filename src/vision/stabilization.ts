@@ -1,4 +1,4 @@
-import type { GripAnalysis, GripGuidance, Landmark, ObjectRegion, Point } from './types';
+import type { GripAnalysis, GripGuidance, Landmark, MotionState, ObjectRegion, Point } from './types';
 import { clamp, subtract, vectorMagnitude } from './geometry';
 
 type FilterMap = Map<string, OneEuroFilter>;
@@ -14,6 +14,17 @@ const SMOOTHED_FIELDS = [
 ] as const;
 
 const HAND_OCCLUSION_GRACE_MS = 520;
+const MOTION_HISTORY_LIMIT = 14;
+const MOTION_MIN_DWELL_MS = 320;
+
+type MotionSample = {
+  state: MotionState;
+  slipRisk: number;
+  coupling: number;
+  handSpeed: number;
+  objectSpeed: number;
+  timestamp: number;
+};
 
 export class TrackingStabilizer {
   private landmarkFilters: FilterMap = new Map();
@@ -25,6 +36,9 @@ export class TrackingStabilizer {
   private previousHandTimestamp: number | null = null;
   private previousObjectCenter: Point | null = null;
   private slipHistory: number[] = [];
+  private motionHistory: MotionSample[] = [];
+  private displayedMotionState: MotionState = 'idle';
+  private displayedMotionChangedAt: number | null = null;
 
   reset() {
     this.landmarkFilters.clear();
@@ -36,6 +50,9 @@ export class TrackingStabilizer {
     this.previousHandTimestamp = null;
     this.previousObjectCenter = null;
     this.slipHistory = [];
+    this.motionHistory = [];
+    this.displayedMotionState = 'idle';
+    this.displayedMotionChangedAt = null;
   }
 
   stabilizeHand(hand: Landmark[] | null, timestamp: number): Landmark[] | null {
@@ -104,6 +121,7 @@ export class TrackingStabilizer {
 
     stabilized.guidance = this.stabilizeGuidance(analysis.guidance, stabilized.gripPercentage, stabilized.slipRisk);
     stabilized.message = analysis.guidance === stabilized.guidance ? analysis.message : messageForGuidance(stabilized.guidance);
+    stabilized.motionState = this.stabilizeMotionState(analysis, stabilized, timestamp);
     this.previousTimestamp = timestamp;
     return stabilized;
   }
@@ -159,6 +177,59 @@ export class TrackingStabilizer {
     this.previousGuidance = next;
     return next;
   }
+
+  private stabilizeMotionState(raw: GripAnalysis, stabilized: GripAnalysis, timestamp: number): MotionState {
+    this.motionHistory.push({
+      state: raw.motionState,
+      slipRisk: stabilized.slipRisk,
+      coupling: stabilized.motionCoupling,
+      handSpeed: vectorMagnitude(raw.handVelocity),
+      objectSpeed: raw.motionState === 'idle' ? 0 : Math.max(0, (1 - raw.motionCoupling) * 12),
+      timestamp
+    });
+    if (this.motionHistory.length > MOTION_HISTORY_LIMIT) this.motionHistory.shift();
+
+    const proposed = classifyStableMotion(this.motionHistory, this.displayedMotionState);
+    if (this.displayedMotionChangedAt === null) {
+      this.displayedMotionChangedAt = timestamp;
+      this.displayedMotionState = proposed;
+      return proposed;
+    }
+    if (proposed === this.displayedMotionState) return this.displayedMotionState;
+
+    const elapsed = timestamp - this.displayedMotionChangedAt;
+    const strongSlip = proposed === 'slipping' && median(this.motionHistory.map((sample) => sample.slipRisk)) > 0.62;
+    const strongIdle = proposed === 'idle' && this.motionHistory.slice(-8).every((sample) => sample.state === 'idle' && sample.slipRisk < 0.18);
+    if (elapsed >= MOTION_MIN_DWELL_MS || strongSlip || strongIdle) {
+      this.displayedMotionState = proposed;
+      this.displayedMotionChangedAt = timestamp;
+    }
+    return this.displayedMotionState;
+  }
+}
+
+export function classifyStableMotion(history: MotionSample[], previous: MotionState = 'idle'): MotionState {
+  if (!history.length) return previous;
+  const recent = history.slice(-12);
+  const slipMedian = median(recent.map((sample) => sample.slipRisk));
+  const couplingMedian = median(recent.map((sample) => sample.coupling));
+  const idleRatio = recent.filter((sample) => sample.state === 'idle' || sample.slipRisk < 0.1).length / recent.length;
+  const movingRatio = recent.filter((sample) => sample.state === 'moving-with-hand').length / recent.length;
+  const slippingRatio = recent.filter((sample) => sample.state === 'slipping' || sample.slipRisk > 0.48).length / recent.length;
+  const uncertainRatio = recent.filter((sample) => sample.state === 'uncertain').length / recent.length;
+
+  if (slippingRatio >= 0.5 && slipMedian > 0.42) return 'slipping';
+  if (idleRatio >= 0.72 && slipMedian < 0.18) return 'idle';
+  if (movingRatio >= 0.42 && couplingMedian > 0.54 && slipMedian < 0.42) return 'moving-with-hand';
+  if (uncertainRatio >= 0.55 && slipMedian > 0.24) return 'uncertain';
+  return previous;
+}
+
+function median(values: number[]) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 class OneEuroFilter {
