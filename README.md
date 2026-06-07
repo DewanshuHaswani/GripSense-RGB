@@ -33,8 +33,9 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v2`
 - `http://127.0.0.1:5173/?version=v3`
 - `http://127.0.0.1:5173/?version=v4`
+- `http://127.0.0.1:5173/?version=v5`
 
-The toolbar also has a `V1` / `V2` / `V3` / `V4` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` / `V2` / `V3` / `V4` / `V5` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ## Offline Video Review
 
@@ -93,6 +94,31 @@ V4 adds four upgrades over V3:
 - **Temporal identity**: V4 waits for repeated matches across recent frames before turning the object green. One noisy frame is not enough.
 
 V4 does not currently ship a neural embedding model. That is intentional for this browser-only build: adding CLIP/DINO-style embeddings requires either bundled ONNX assets or a local/server-side model. The current code keeps the interface ready for that upgrade while improving the local path immediately.
+
+## Version 5: Target Object And Contact-Gated Grip
+
+V5 is the recommended workflow for real testing. It is not only a trained-object list. It has two object sources:
+
+```text
+pretrained base object detector -> common object boxes like bottle/cup/phone/laptop
+trained object profile matcher -> user-specific identity verification
+```
+
+The V5 flow is:
+
+```text
+base detector objects + trained profile objects -> select target ID -> verify target over time -> estimate grip only for that target
+```
+
+V5 addresses four practical issues:
+
+- **Generic detection before training**: the MediaPipe EfficientDet base detector can show common COCO-style objects before any custom profile exists. In the UI these appear as `B1`, `B2`, and similar base object IDs.
+- **Better profile matching from many images**: trained profiles now keep exemplar descriptors from individual training views, not only one averaged descriptor. This helps when 20 images include front, side, rotated, in-hand, and lighting-varied views that would otherwise average into a weak profile.
+- **All-frame object scan**: V5 scans base detector objects and enabled trained profiles across the frame, draws IDs on visible candidates, and mirrors the same IDs in the right panel.
+- **Explicit target selection**: grip scoring does not automatically jump to whichever object-like area is strongest. Select a base object ID such as `B1 · bottle` or use the `Track` button beside a saved trained profile.
+- **Contact gate**: even if the selected target is detected, V5 requires current visual contact between the target and the hand. If the object drops away from the hand, a previous lock cannot keep the grip percentage high.
+
+Training still remains local and browser-only. It is not true neural fine-tuning of the base detector weights. Instead, it builds a local object identity profile on top of the base detector pipeline. The crop/mask review now supports direct dragging: drag the crop rectangle to move it, drag the lower-right handle to resize it, or use the existing sliders for precise adjustment. Weak training images are warned, not blocked.
 
 ## Version 3: Trained Object Focus
 

@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
 import { analyzeGripV3 } from './vision/v3GripAnalysis';
-import { palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
+import { clamp as clampUnit, distance, ellipsePoint, handSize, palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
 import { inferObjectRegion } from './vision/objectTracking';
 import {
   browserObjectDescriptorProvider,
@@ -76,7 +76,10 @@ const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | un
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
-const OFFLINE_TIMELINE_INTERVAL_MS = 380;
+const OFFLINE_TIMELINE_INTERVAL_MS = 180;
+const V5_BASE_TARGET_THRESHOLD = 0.22;
+const OFFLINE_BASE_TARGET_THRESHOLD = 0.12;
+const V5_BASE_TRACK_GRACE_MISSES = 6;
 const TRAINING_VIEW_ROLES: TrainingViewRole[] = ['front', 'side', 'rotated', 'in-hand', 'alone', 'negative'];
 
 type LocalWritableFile = {
@@ -120,6 +123,30 @@ type PendingUploadReview = {
   viewRole: TrainingViewRole;
 };
 
+type BaseObjectCandidate = DetectedObjectBox & {
+  candidateId: string;
+  index: number;
+  trackId: number;
+  missedFrames: number;
+  seenFrames: number;
+  center: Point;
+  radiusX: number;
+  radiusY: number;
+};
+
+type BaseTrackState = {
+  nextId: number;
+  tracks: BaseObjectCandidate[];
+};
+
+type BaseClassSummary = {
+  key: string;
+  label: string;
+  count: number;
+  bestScore: number;
+  enabled: boolean;
+};
+
 type OfflineTimelinePoint = {
   time: number;
   grip: number;
@@ -145,7 +172,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, or V4 for trained-object-first matching with temporal identity.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, or V5 for target-object selection with contact-gated grip scoring.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -174,7 +201,9 @@ const EXPLAIN = {
   folderSave: 'Mirrors trained profiles and thumbnails into a local folder when the browser supports folder access.',
   objectIdentity: 'How closely the current locked object matches the trained profile. Low match blocks strong grip in V2.',
   trainedProfiles: 'Saved local object profiles. Enabled profiles are used for live matching; disabled profiles stay saved but are ignored.',
-  v4Temporal: 'V4 requires the same enabled trained object to match across several frames before it turns green. This reduces flicker and wrong detections.',
+  v4Temporal: 'V4/V5 require the same enabled trained object to match across several frames before it turns green. This reduces flicker and wrong detections.',
+  v5Target: 'V5 combines the base object detector with trained profiles. Pick a base object ID or trained profile ID, then grip scoring follows only that target.',
+  contactGate: 'V5 requires current visual contact between the selected object and hand. If the object drops away, grip cannot remain high.',
   profileStrength: 'Profile strength estimates training coverage across front, side, rotated, in-hand, alone, and negative examples.'
 } as const;
 
@@ -197,6 +226,8 @@ export default function App() {
   const mirroredRef = useRef(true);
   const lastDetectorRunRef = useRef(0);
   const detectorBoxRef = useRef<DetectedObjectBox | null>(null);
+  const baseTrackerRef = useRef<BaseTrackState>({ nextId: 1, tracks: [] });
+  const baseObjectCandidatesRef = useRef<BaseObjectCandidate[]>([]);
   const autoRetryRef = useRef(false);
   const stabilizerRef = useRef(new TrackingStabilizer());
   const algorithmVersionRef = useRef<AlgorithmVersion>(readInitialAlgorithmVersion());
@@ -207,6 +238,10 @@ export default function App() {
   const v3ProfileCandidatesRef = useRef<ObjectProfileCandidate[]>([]);
   const lastProfileSearchRef = useRef(0);
   const temporalIdentityRef = useRef<TemporalIdentityState>(EMPTY_TEMPORAL_IDENTITY);
+  const targetProfileIdRef = useRef<string | null>(null);
+  const targetBaseIdRef = useRef<string | null>(null);
+  const showObjectLabelsRef = useRef(false);
+  const baseClassEnabledRef = useRef<Record<string, boolean>>({ person: false });
   const offlineTimelineRef = useRef<OfflineTimelinePoint[]>([]);
   const lastOfflineTimelineRef = useRef(0);
   const v3RuntimeRef = useRef<V3Runtime>({
@@ -220,6 +255,14 @@ export default function App() {
   });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const profileDirectoryRef = useRef<LocalDirectoryHandle | null>(null);
+  const cropDragRef = useRef<{
+    mode: 'move' | 'resize';
+    startX: number;
+    startY: number;
+    cropX: number;
+    cropY: number;
+    cropSize: number;
+  } | null>(null);
   const pausedBeforeTrainerRef = useRef(false);
   const calibrationCaptureRef = useRef<{
     active: boolean;
@@ -231,6 +274,7 @@ export default function App() {
   const [cameraState, setCameraState] = useState<'idle' | 'requesting' | 'live' | 'blocked'>('idle');
   const [mediaMode, setMediaMode] = useState<'live' | 'offline'>('live');
   const [offlineVideoName, setOfflineVideoName] = useState('');
+  const [offlineAnalysisPhase, setOfflineAnalysisPhase] = useState<'idle' | 'processing' | 'reviewing' | 'complete'>('idle');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
   const [analysis, setAnalysis] = useState<GripAnalysis>(() => createEmptyAnalysis());
   const [mirrored, setMirrored] = useState(true);
@@ -246,7 +290,13 @@ export default function App() {
   const [objectProfiles, setObjectProfiles] = useState<ObjectProfileV2[]>([]);
   const [objectDetection, setObjectDetection] = useState<ObjectProfileMatch>(null);
   const [v3ProfileCandidates, setV3ProfileCandidates] = useState<ObjectProfileCandidate[]>([]);
+  const [baseObjectCandidates, setBaseObjectCandidates] = useState<BaseObjectCandidate[]>([]);
   const [temporalIdentity, setTemporalIdentity] = useState<TemporalIdentityState>(EMPTY_TEMPORAL_IDENTITY);
+  const [targetProfileId, setTargetProfileId] = useState<string | null>(null);
+  const [targetBaseId, setTargetBaseId] = useState<string | null>(null);
+  const [showObjectLabels, setShowObjectLabels] = useState(false);
+  const [baseClassEnabled, setBaseClassEnabled] = useState<Record<string, boolean>>({ person: false });
+  const [baseClassSummary, setBaseClassSummary] = useState<BaseClassSummary[]>([]);
   const [offlineTimeline, setOfflineTimeline] = useState<OfflineTimelinePoint[]>([]);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
@@ -277,6 +327,22 @@ export default function App() {
   useEffect(() => {
     algorithmVersionRef.current = algorithmVersion;
   }, [algorithmVersion]);
+
+  useEffect(() => {
+    targetProfileIdRef.current = targetProfileId;
+  }, [targetProfileId]);
+
+  useEffect(() => {
+    targetBaseIdRef.current = targetBaseId;
+  }, [targetBaseId]);
+
+  useEffect(() => {
+    showObjectLabelsRef.current = showObjectLabels;
+  }, [showObjectLabels]);
+
+  useEffect(() => {
+    baseClassEnabledRef.current = baseClassEnabled;
+  }, [baseClassEnabled]);
 
   useEffect(() => {
     const video = trainingVideoRef.current;
@@ -361,15 +427,20 @@ export default function App() {
     previousObjectRef.current = null;
     previousPalmRef.current = null;
     detectorBoxRef.current = null;
+    baseTrackerRef.current = { nextId: 1, tracks: [] };
+    baseObjectCandidatesRef.current = [];
     objectDetectionRef.current = null;
     v3ProfileCandidatesRef.current = [];
     temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+    targetProfileIdRef.current = null;
+    targetBaseIdRef.current = null;
     lastProfileSearchRef.current = 0;
     resetV3Runtime();
     stabilizerRef.current.reset();
     setLocked(false);
     setObjectDetection(null);
     setV3ProfileCandidates([]);
+    setBaseObjectCandidates([]);
     setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
   }, [resetV3Runtime]);
 
@@ -396,10 +467,11 @@ export default function App() {
       video.srcObject = stream;
       await video.play();
       setMediaMode('live');
-    setOfflineVideoName('');
-    offlineTimelineRef.current = [];
-    setOfflineTimeline([]);
-    resetTrackingRefs();
+      setOfflineVideoName('');
+      setOfflineAnalysisPhase('idle');
+      offlineTimelineRef.current = [];
+      setOfflineTimeline([]);
+      resetTrackingRefs();
       setCameraState('live');
 
       const engine = await loadVisionEngine();
@@ -434,17 +506,20 @@ export default function App() {
     video.muted = true;
     setMediaMode('offline');
     setOfflineVideoName(file.name);
+    setOfflineAnalysisPhase('processing');
     offlineTimelineRef.current = [];
     lastOfflineTimelineRef.current = 0;
     setOfflineTimeline([]);
     setCameraState('live');
     setPaused(false);
     resetTrackingRefs();
-    setAnalysis(createEmptyAnalysis('Offline review loaded. Press play to visualize grip over this video.'));
+    setAnalysis(createEmptyAnalysis('Offline review processing. The app will auto-detect hand-near objects and build a timeline.'));
 
     await loadVisionEngine();
     await waitForVideoMetadata(video);
+    setOfflineAnalysisPhase('reviewing');
     await video.play().catch(() => {
+      setOfflineAnalysisPhase('reviewing');
       setAnalysis(createEmptyAnalysis('Offline video loaded. Press play on the video to begin analysis.'));
     });
     runLoop();
@@ -588,16 +663,39 @@ export default function App() {
       let frameAnalysis = analysis;
 
       if (!pausedRef.current) {
+        const offlineReview = mediaMode === 'offline';
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
         if (timestamp - lastDetectorRunRef.current > 650) {
-          detectorBoxRef.current = engine.detectObjectBox(video, timestamp);
+          const detectorBoxes = engine.detectObjectBoxes(video, timestamp);
+          const nextBaseTracker = updateBaseObjectTracks(
+            baseTrackerRef.current,
+            detectorBoxes,
+            timestamp,
+            targetBaseIdRef.current,
+            hand
+          );
+          baseTrackerRef.current = nextBaseTracker;
+          const allBaseCandidates = nextBaseTracker.tracks;
+          const baseCandidates = allBaseCandidates.filter(
+            (candidate) =>
+              isGripTargetEligible(candidate, video.videoWidth, video.videoHeight) &&
+              (candidate.candidateId === targetBaseIdRef.current ||
+                (candidate.missedFrames === 0 && isBaseClassEnabled(candidate.label, baseClassEnabledRef.current)))
+          );
+          setBaseClassSummary(summarizeBaseClasses(allBaseCandidates.filter((candidate) => candidate.missedFrames === 0), baseClassEnabledRef.current));
+          baseObjectCandidatesRef.current = baseCandidates;
+          setBaseObjectCandidates(baseCandidates);
+          detectorBoxRef.current =
+            baseCandidates.find((candidate) => candidate.candidateId === targetBaseIdRef.current) ??
+            baseCandidates[0] ??
+            null;
           lastDetectorRunRef.current = timestamp;
         }
         const activeAlgorithmVersion = algorithmVersionRef.current;
-        const profileFirstAlgorithm = activeAlgorithmVersion === 'v3' || activeAlgorithmVersion === 'v4';
-        const fallbackAlgorithmVersion: AlgorithmVersion = profileFirstAlgorithm ? 'v2' : activeAlgorithmVersion;
+        const profileFirstAlgorithm = activeAlgorithmVersion === 'v3' || activeAlgorithmVersion === 'v4' || activeAlgorithmVersion === 'v5';
+        const fallbackAlgorithmVersion: AlgorithmVersion = activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion;
         const enabledProfiles = objectProfilesRef.current.filter((profile) => profile.enabled !== false);
         if (
           profileFirstAlgorithm &&
@@ -605,7 +703,14 @@ export default function App() {
           timestamp - lastProfileSearchRef.current > V3_PROFILE_SEARCH_INTERVAL_MS
         ) {
           lastProfileSearchRef.current = timestamp;
-          const candidates = findObjectProfileCandidates(video, enabledProfiles, hand, 8);
+          const candidates = findObjectProfileCandidates(
+            video,
+            enabledProfiles,
+            hand,
+            activeAlgorithmVersion === 'v5'
+              ? { limit: 10, scanMode: 'all-frame', targetProfileId: null, relaxed: true }
+              : 8
+          );
           v3ProfileCandidatesRef.current = candidates;
           setV3ProfileCandidates(candidates);
         } else if (!profileFirstAlgorithm || !enabledProfiles.length) {
@@ -615,37 +720,89 @@ export default function App() {
           setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
         }
 
+        const selectedProfileTargetId = targetProfileIdRef.current;
+        const selectedBaseCandidate =
+          activeAlgorithmVersion === 'v5' && targetBaseIdRef.current
+            ? (baseObjectCandidatesRef.current.find((candidate) => candidate.candidateId === targetBaseIdRef.current) ?? null)
+            : null;
+        const offlineBaseCandidate =
+          activeAlgorithmVersion === 'v5' && offlineReview && !selectedProfileTargetId
+            ? selectOfflineHandObjectCandidate(baseObjectCandidatesRef.current, hand) ??
+              inferOfflinePixelObjectCandidate(video, previousObjectRef.current)
+            : null;
+        if (offlineReview && !hand && offlineBaseCandidate) {
+          hand = createOfflineSurrogateHand(offlineBaseCandidate);
+        }
+        const activeBaseCandidate =
+          selectedBaseCandidate && isGripTargetEligible(selectedBaseCandidate, video.videoWidth, video.videoHeight)
+            ? selectedBaseCandidate
+            : offlineBaseCandidate && isGripTargetEligible(offlineBaseCandidate, video.videoWidth, video.videoHeight)
+              ? offlineBaseCandidate
+              : null;
+        const activeBaseConfidence =
+          activeBaseCandidate && offlineBaseCandidate === activeBaseCandidate
+            ? offlineCandidateConfidence(activeBaseCandidate, hand)
+            : activeBaseCandidate?.score ?? 0;
         const bestProfileCandidate =
           profileFirstAlgorithm
-            ? (v3ProfileCandidatesRef.current.find((candidate) => candidate.matched) ?? null)
+            ? activeAlgorithmVersion === 'v5'
+              ? selectedProfileTargetId
+                ? (v3ProfileCandidatesRef.current.find((candidate) => candidate.profileId === selectedProfileTargetId && candidate.matched) ?? null)
+                : null
+              : (v3ProfileCandidatesRef.current.find((candidate) => candidate.matched) ?? null)
             : null;
+        const selectedTemporalCandidate =
+          bestProfileCandidate ?? (activeBaseCandidate ? baseCandidateToTemporalCandidate(activeBaseCandidate, activeBaseConfidence) : null);
+        const v5TargetRequested = activeAlgorithmVersion === 'v5' && (offlineReview || Boolean(targetBaseIdRef.current || targetProfileIdRef.current));
+        const v5TargetActive = activeAlgorithmVersion !== 'v5' || Boolean(bestProfileCandidate || activeBaseCandidate);
+        const baseThreshold = offlineReview ? OFFLINE_BASE_TARGET_THRESHOLD : V5_BASE_TARGET_THRESHOLD;
+        const v5TargetLockReady = activeAlgorithmVersion !== 'v5' || Boolean(bestProfileCandidate || (activeBaseCandidate && activeBaseConfidence >= baseThreshold));
         const requiresEnabledProfileMatch =
-          profileFirstAlgorithm && enabledProfiles.length > 0 && !manualPointRef.current;
-        const heuristicObject = inferObjectRegion({
-          video,
-          hand,
-          previous: previousObjectRef.current,
-          manualPoint: manualPointRef.current,
-          manualScale: manualScaleRef.current,
-          locked: lockObjectRef.current,
-          detectorBox: detectorBoxRef.current,
-          algorithmVersion: fallbackAlgorithmVersion
-        });
+          activeAlgorithmVersion === 'v5'
+            ? !offlineReview && !manualPointRef.current && !activeBaseCandidate && !bestProfileCandidate
+            : profileFirstAlgorithm && enabledProfiles.length > 0 && !manualPointRef.current;
+        const heuristicObject =
+          activeBaseCandidate && v5TargetLockReady
+            ? objectRegionFromBaseCandidate(activeBaseCandidate, previousObjectRef.current, activeBaseConfidence)
+            : activeAlgorithmVersion === 'v5' && (!v5TargetRequested || !v5TargetActive || !v5TargetLockReady)
+            ? null
+            : inferObjectRegion({
+                video,
+                hand,
+                previous: previousObjectRef.current,
+                manualPoint: activeAlgorithmVersion === 'v5' ? null : manualPointRef.current,
+                manualScale: manualScaleRef.current,
+                locked: lockObjectRef.current,
+                detectorBox: activeBaseCandidate ?? detectorBoxRef.current,
+                algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion
+              });
         let rawObject: ObjectRegion | null = heuristicObject;
-        if (bestProfileCandidate && !manualPointRef.current) {
+        if (bestProfileCandidate) {
           rawObject = objectRegionFromProfileCandidate(bestProfileCandidate, previousObjectRef.current);
-        } else if (requiresEnabledProfileMatch) {
+        } else if (requiresEnabledProfileMatch || (activeAlgorithmVersion === 'v5' && (!v5TargetRequested || !v5TargetActive || !v5TargetLockReady))) {
           rawObject = null;
         }
-        object = stabilizerRef.current.stabilizeObject(rawObject, timestamp);
-        if (requiresEnabledProfileMatch && !bestProfileCandidate && objectDetectionRef.current) {
+        if (activeAlgorithmVersion === 'v5' && !rawObject) {
+          previousObjectRef.current = null;
+          object = null;
+        } else {
+          object = stabilizerRef.current.stabilizeObject(rawObject, timestamp);
+        }
+        if ((requiresEnabledProfileMatch || (activeAlgorithmVersion === 'v5' && !rawObject)) && objectDetectionRef.current) {
           objectDetectionRef.current = null;
           setObjectDetection(null);
         }
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
           const descriptor = object && !bestProfileCandidate ? browserObjectDescriptorProvider.describe(video, object) : null;
-          const instantMatch = bestProfileCandidate
+          const instantMatch = activeBaseCandidate
+            ? {
+                profileId: activeBaseCandidate.candidateId,
+                name: offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current),
+                score: activeBaseConfidence,
+                matched: activeBaseConfidence >= baseThreshold
+              }
+            : bestProfileCandidate
             ? {
                 profileId: bestProfileCandidate.profileId,
                 name: bestProfileCandidate.name,
@@ -654,8 +811,14 @@ export default function App() {
               }
             : matchObjectProfiles(descriptor, enabledProfiles);
           let match = instantMatch;
-          if (activeAlgorithmVersion === 'v4') {
-            const nextTemporal = updateTemporalIdentity(temporalIdentityRef.current, bestProfileCandidate);
+          if (activeAlgorithmVersion === 'v4' || activeAlgorithmVersion === 'v5') {
+            const nextTemporal = updateTemporalIdentity(
+              temporalIdentityRef.current,
+              selectedTemporalCandidate,
+              activeBaseCandidate
+                ? { stableFrames: offlineReview ? 1 : 2, decay: 0.72, threshold: baseThreshold }
+                : { stableFrames: 3, decay: 0.72, threshold: 0.62 }
+            );
             temporalIdentityRef.current = nextTemporal;
             setTemporalIdentity(nextTemporal);
             match = temporalIdentityToMatch(nextTemporal);
@@ -663,25 +826,30 @@ export default function App() {
           objectDetectionRef.current = match;
           setObjectDetection(match);
         }
-        const objectIdentity = {
-          hasProfiles: enabledProfiles.length > 0,
-          score: objectDetectionRef.current?.score ?? 0,
-          matched: objectDetectionRef.current?.matched ?? false,
-          name: objectDetectionRef.current?.name ?? null
+        const objectIdentity: ObjectIdentitySignal = {
+          hasProfiles: enabledProfiles.length > 0 || Boolean(activeBaseCandidate),
+          score: activeBaseCandidate ? activeBaseConfidence : objectDetectionRef.current?.score ?? 0,
+          matched: activeBaseCandidate
+            ? activeBaseConfidence >= baseThreshold
+            : objectDetectionRef.current?.matched ?? false,
+          name: activeBaseCandidate
+            ? offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
+            : objectDetectionRef.current?.name ?? null,
+          source: activeBaseCandidate ? 'base' : enabledProfiles.length > 0 ? 'trained' : undefined
         };
         const handVelocityForSlip =
           hand && previousPalmRef.current ? subtract(palmCenter(hand), previousPalmRef.current) : { x: 0, y: 0 };
         const persistentSlipScore = stabilizerRef.current.updatePersistentSlip(handVelocityForSlip, object);
         const rawFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
-          algorithmVersion: fallbackAlgorithmVersion,
+          algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
         const baseFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
           calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
           weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
-          algorithmVersion: fallbackAlgorithmVersion,
+          algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
         if (activeAlgorithmVersion === 'v3') {
@@ -721,7 +889,20 @@ export default function App() {
         setAnalysis(frameAnalysis);
       }
 
-      drawTrackingOverlay(context, canvas.width, canvas.height, mirroredRef.current, hand, object, frameAnalysis);
+      drawTrackingOverlay(
+        context,
+        canvas.width,
+        canvas.height,
+        mirroredRef.current,
+        hand,
+        object,
+        frameAnalysis,
+        algorithmVersionRef.current === 'v5' ? v3ProfileCandidatesRef.current : [],
+        targetProfileIdRef.current,
+        algorithmVersionRef.current === 'v5' ? baseObjectCandidatesRef.current : [],
+        targetBaseIdRef.current,
+        showObjectLabelsRef.current
+      );
       animationRef.current = requestAnimationFrame(tick);
     };
 
@@ -735,8 +916,11 @@ export default function App() {
     draggingObjectRef.current = false;
     previousObjectRef.current = null;
     detectorBoxRef.current = null;
+    baseTrackerRef.current = { nextId: 1, tracks: [] };
+    baseObjectCandidatesRef.current = [];
     v3ProfileCandidatesRef.current = [];
     temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+    targetBaseIdRef.current = null;
     lastProfileSearchRef.current = 0;
     stabilizerRef.current.reset();
     calibrationCaptureRef.current = { active: false, kind: calibrationKind, start: 0, samples: [] };
@@ -744,7 +928,10 @@ export default function App() {
     setLocked(false);
     setCalibrating(false);
     setV3ProfileCandidates([]);
+    setBaseObjectCandidates([]);
     setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
+    setTargetProfileId(null);
+    setTargetBaseId(null);
     setAnalysis(createEmptyAnalysis('Object reset. Place it between your thumb and fingers to relock.'));
   }, [calibrationKind, resetV3Runtime]);
 
@@ -840,16 +1027,25 @@ export default function App() {
       draggingObjectRef.current = false;
       previousObjectRef.current = null;
       detectorBoxRef.current = null;
+      baseTrackerRef.current = { nextId: 1, tracks: [] };
+      baseObjectCandidatesRef.current = [];
+      targetProfileIdRef.current = null;
+      targetBaseIdRef.current = null;
       stabilizerRef.current.reset();
       resetV3Runtime(
         version === 'v3'
           ? 'V3 selected. Start tracking to connect to the local perception server.'
           : version === 'v4'
           ? 'V4 selected. Enabled trained objects must match across multiple frames before detection turns green.'
+          : version === 'v5'
+          ? 'V5 selected. Select a target object ID, then grip scoring only follows that object.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       setLocked(false);
       setCalibrating(false);
+      setTargetProfileId(null);
+      setTargetBaseId(null);
+      setBaseObjectCandidates([]);
       setAlgorithmVersion(version);
       saveAlgorithmVersion(version);
       setAnalysis(
@@ -858,6 +1054,8 @@ export default function App() {
             ? 'V3 selected. It will fuse local-server perception with V2 fallback when the server is unavailable.'
             : version === 'v4'
             ? 'V4 selected. Train an object, enable it, then V4 will require stable identity before scoring grip.'
+            : version === 'v5'
+            ? 'V5 selected. It scans enabled object IDs, waits for target selection, and requires contact before grip can score high.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -939,6 +1137,78 @@ export default function App() {
       next.maskScale = clampNumber(next.maskScale, 0.35, 1);
       return [next, ...rest];
     });
+  }, []);
+
+  const pointInPendingUpload = useCallback((event: React.PointerEvent<HTMLElement>, review: PendingUploadReview) => {
+    const preview = event.currentTarget.closest('.upload-source-preview') as HTMLElement | null;
+    const rect = (preview ?? event.currentTarget).getBoundingClientRect();
+    const imageAspect = review.canvas.width / Math.max(1, review.canvas.height);
+    const boxAspect = rect.width / Math.max(1, rect.height);
+    let renderWidth = rect.width;
+    let renderHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+    if (imageAspect > boxAspect) {
+      renderHeight = rect.width / imageAspect;
+      offsetY = (rect.height - renderHeight) / 2;
+    } else {
+      renderWidth = rect.height * imageAspect;
+      offsetX = (rect.width - renderWidth) / 2;
+    }
+    const x = clampNumber(((event.clientX - rect.left - offsetX) / Math.max(1, renderWidth)) * review.canvas.width, 0, review.canvas.width);
+    const y = clampNumber(((event.clientY - rect.top - offsetY) / Math.max(1, renderHeight)) * review.canvas.height, 0, review.canvas.height);
+    return { x, y };
+  }, []);
+
+  const startPendingCropDrag = useCallback(
+    (event: React.PointerEvent<HTMLElement>, mode: 'move' | 'resize') => {
+      if (!pendingUpload) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const point = pointInPendingUpload(event, pendingUpload);
+      cropDragRef.current = {
+        mode,
+        startX: point.x,
+        startY: point.y,
+        cropX: pendingUpload.cropX,
+        cropY: pendingUpload.cropY,
+        cropSize: pendingUpload.cropSize
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    },
+    [pendingUpload, pointInPendingUpload]
+  );
+
+  const movePendingCropDrag = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (!pendingUpload || !cropDragRef.current) return;
+      event.preventDefault();
+      const point = pointInPendingUpload(event, pendingUpload);
+      const drag = cropDragRef.current;
+      const deltaX = point.x - drag.startX;
+      const deltaY = point.y - drag.startY;
+      if (drag.mode === 'resize') {
+        updatePendingUpload({ cropSize: drag.cropSize + Math.max(deltaX, deltaY) });
+        return;
+      }
+      updatePendingUpload({
+        cropX: drag.cropX + deltaX,
+        cropY: drag.cropY + deltaY
+      });
+    },
+    [pendingUpload, pointInPendingUpload, updatePendingUpload]
+  );
+
+  const stopPendingCropDrag = useCallback((event?: React.PointerEvent<HTMLElement>) => {
+    if (event) {
+      event.preventDefault();
+      try {
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+      } catch {
+        // Pointer capture can already be released by the browser.
+      }
+    }
+    cropDragRef.current = null;
   }, []);
 
   const acceptPendingUpload = useCallback(() => {
@@ -1042,6 +1312,10 @@ export default function App() {
       }
     }
     setTrainingStatus(result.message + folderMessage + ' Enable it below, then resume live tracking to verify detection.');
+    targetProfileIdRef.current = profile.id;
+    targetBaseIdRef.current = null;
+    setTargetProfileId(profile.id);
+    setTargetBaseId(null);
   }, [objectName, objectProfiles, pendingUploads.length, trainingSamples]);
 
   const trainObjectProfile = useCallback(() => {
@@ -1060,10 +1334,77 @@ export default function App() {
     setV3ProfileCandidates([]);
     objectDetectionRef.current = null;
     setObjectDetection(null);
+    const toggled = profiles.find((profile) => profile.id === id);
+    if (toggled?.enabled === false && targetProfileIdRef.current === id) {
+      targetProfileIdRef.current = null;
+      setTargetProfileId(null);
+    }
     if (profileDirectoryRef.current) {
       void mirrorObjectProfilesToFolder(profileDirectoryRef.current, profiles);
     }
   }, [objectProfiles]);
+
+  const selectTargetProfile = useCallback((id: string) => {
+    const profile = objectProfilesRef.current.find((item) => item.id === id);
+    if (!profile || profile.enabled === false) {
+      setTrainingStatus('Enable that profile before selecting it as the V5 target.');
+      return;
+    }
+    targetProfileIdRef.current = id;
+    targetBaseIdRef.current = null;
+    setTargetProfileId(id);
+    setTargetBaseId(null);
+    temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+    setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
+    objectDetectionRef.current = null;
+    setObjectDetection(null);
+    setTrainingStatus(`V5 target selected: ${profile.name}. Grip scoring now follows only this object.`);
+  }, []);
+
+  const selectBaseTarget = useCallback((id: string) => {
+    const candidate = baseObjectCandidatesRef.current.find((item) => item.candidateId === id);
+    if (!candidate) {
+      setTrainingStatus('That base detector object is no longer visible. Move it into frame and try again.');
+      return;
+    }
+    const video = videoRef.current;
+    if (!isGripTargetEligible(candidate, video?.videoWidth ?? 0, video?.videoHeight ?? 0)) {
+      setTrainingStatus('That detection looks like a person/background region, not a handheld object. Select a smaller object ID near the hand.');
+      return;
+    }
+    targetBaseIdRef.current = id;
+    targetProfileIdRef.current = null;
+    setTargetBaseId(id);
+    setTargetProfileId(null);
+    temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+    setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
+    objectDetectionRef.current = null;
+    setObjectDetection(null);
+    setTrainingStatus(`V5 base target selected: ${baseObjectName(candidate, showObjectLabelsRef.current)}. Train a profile later if you need stronger identity verification.`);
+  }, []);
+
+  const toggleBaseClass = useCallback((key: string) => {
+    setBaseClassEnabled((current) => {
+      const nextEnabled = !(current[key] ?? key !== 'person');
+      const next = { ...current, [key]: nextEnabled };
+      const selected = baseObjectCandidatesRef.current.find((candidate) => candidate.candidateId === targetBaseIdRef.current);
+      if (!nextEnabled && selected && baseClassKey(selected.label) === key) {
+        targetBaseIdRef.current = null;
+        setTargetBaseId(null);
+        temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
+        setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
+        objectDetectionRef.current = null;
+        setObjectDetection(null);
+        previousObjectRef.current = null;
+        setTrainingStatus(`${formatBaseClassLabel(key)} disabled. Select another target object ID.`);
+      }
+      const filtered = baseObjectCandidatesRef.current.filter((candidate) => isBaseClassEnabled(candidate.label, next));
+      baseObjectCandidatesRef.current = filtered;
+      setBaseObjectCandidates(filtered);
+      setBaseClassSummary((summary) => summary.map((item) => (item.key === key ? { ...item, enabled: nextEnabled } : item)));
+      return next;
+    });
+  }, []);
 
   const deleteTrainingSample = useCallback((id: string) => {
     setTrainingSamples((current) => {
@@ -1103,7 +1444,7 @@ export default function App() {
   }, [offlineVideoName]);
 
   return (
-    <main className="app-shell">
+    <main className={mediaMode === 'offline' ? 'app-shell offline-shell' : 'app-shell'}>
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
         <video
           ref={videoRef}
@@ -1111,6 +1452,8 @@ export default function App() {
           playsInline
           muted
           controls={mediaMode === 'offline'}
+          onPlay={() => mediaMode === 'offline' && setOfflineAnalysisPhase('reviewing')}
+          onEnded={() => mediaMode === 'offline' && setOfflineAnalysisPhase('complete')}
         />
         <canvas
           ref={canvasRef}
@@ -1130,49 +1473,36 @@ export default function App() {
             <span>GripSense RGB</span>
           </div>
           <div className="toolbar" aria-label="Camera controls">
-            <div className="version-switch" aria-label="Algorithm version">
-              <button
-                type="button"
-                className={algorithmVersion === 'v1' ? 'version-button active' : 'version-button'}
-                onClick={() => selectAlgorithmVersion('v1')}
-                aria-pressed={algorithmVersion === 'v1'}
+            <label className="version-select" aria-label="Algorithm version">
+              <span>Version</span>
+              <select
+                value={algorithmVersion}
+                onChange={(event) => selectAlgorithmVersion(event.target.value as AlgorithmVersion)}
               >
-                V1
-              </button>
-              <button
-                type="button"
-                className={algorithmVersion === 'v2' ? 'version-button active' : 'version-button'}
-                onClick={() => selectAlgorithmVersion('v2')}
-                aria-pressed={algorithmVersion === 'v2'}
-              >
-                V2
-              </button>
-              <button
-                type="button"
-                className={algorithmVersion === 'v3' ? 'version-button active' : 'version-button'}
-                onClick={() => selectAlgorithmVersion('v3')}
-                aria-pressed={algorithmVersion === 'v3'}
-              >
-                V3
-              </button>
-              <button
-                type="button"
-                className={algorithmVersion === 'v4' ? 'version-button active' : 'version-button'}
-                onClick={() => selectAlgorithmVersion('v4')}
-                aria-pressed={algorithmVersion === 'v4'}
-              >
-                V4
-              </button>
-            </div>
+                <option value="v1">V1 · original heuristic</option>
+                <option value="v2">V2 · object-first</option>
+                <option value="v3">V3 · server fusion</option>
+                <option value="v4">V4 · trained identity</option>
+                <option value="v5">V5 · target detector</option>
+              </select>
+            </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
             <button
-              className="tool-button primary"
+              className={mediaMode === 'offline' ? 'tool-button primary offline-active' : 'tool-button primary'}
               onClick={startCamera}
               disabled={cameraState === 'requesting'}
-              aria-label={cameraState === 'live' ? 'Camera live' : 'Start camera'}
+              aria-label={mediaMode === 'offline' ? 'Switch back to camera' : cameraState === 'live' ? 'Camera live' : 'Start camera'}
             >
-              <Camera size={18} />
-              <span>{cameraState === 'live' ? 'Camera live' : cameraState === 'requesting' ? 'Starting' : 'Start'}</span>
+              {mediaMode === 'offline' ? <Upload size={18} /> : <Camera size={18} />}
+              <span>
+                {mediaMode === 'offline'
+                  ? 'Offline review'
+                  : cameraState === 'live'
+                    ? 'Camera live'
+                    : cameraState === 'requesting'
+                      ? 'Starting'
+                      : 'Start'}
+              </span>
             </button>
             <button className="tool-button" onClick={() => offlineVideoInputRef.current?.click()} aria-label="Upload offline review video">
               <Upload size={17} />
@@ -1259,8 +1589,12 @@ export default function App() {
             <div className="offline-glass-panel offline-left">
               <p className="eyebrow">Offline review</p>
               <h2>{analysis.gripPercentage}%</h2>
-              <strong>{analysis.guidance}</strong>
+              <strong>{offlineAnalysisPhase === 'processing' ? 'Processing video' : analysis.guidance}</strong>
               <span>{offlineVideoName || 'Uploaded video'}</span>
+              <div className="offline-mini-row">
+                <span>Phase</span>
+                <strong>{formatOfflinePhase(offlineAnalysisPhase)}</strong>
+              </div>
               <div className="offline-mini-row">
                 <span>State</span>
                 <strong>{analysis.diagnostics.state}</strong>
@@ -1271,7 +1605,7 @@ export default function App() {
               </div>
               <div className="offline-mini-row">
                 <span>Object</span>
-                <strong>{objectDetection?.matched ? objectDetection.name : 'not matched'}</strong>
+                <strong>{objectDetection?.matched ? objectDetection.name : mediaMode === 'offline' ? 'auto-search' : 'not matched'}</strong>
               </div>
               <div className="offline-mini-row">
                 <span>Timeline</span>
@@ -1286,6 +1620,12 @@ export default function App() {
               <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
               <GlassMetric label="Thumb" value={analysis.thumbOpposition} />
               <GlassMetric label="Slip" value={analysis.slipRisk} danger />
+              {offlineAnalysisPhase === 'processing' && (
+                <div className="offline-processing">
+                  <span />
+                  <strong>Preparing frame analysis...</strong>
+                </div>
+              )}
               <div className="offline-timeline" aria-label="Offline analysis timeline">
                 {offlineTimeline.slice(-60).map((point, index) => (
                   <span
@@ -1410,9 +1750,27 @@ export default function App() {
                       <span>{pendingUploads.length} pending</span>
                     </div>
                     <div className="upload-review-grid">
-                      <div className="upload-source-preview">
+                      <div
+                        className="upload-source-preview"
+                        onPointerMove={movePendingCropDrag}
+                        onPointerUp={stopPendingCropDrag}
+                        onPointerCancel={stopPendingCropDrag}
+                      >
                         <img src={pendingUpload.imageDataUrl} alt="Uploaded training source" />
-                        <span className="crop-box" style={cropOverlayStyle(pendingUpload)} />
+                        <span
+                          className="crop-box"
+                          style={cropOverlayStyle(pendingUpload)}
+                          onPointerDown={(event) => startPendingCropDrag(event, 'move')}
+                          title="Drag to move crop"
+                        >
+                          <span
+                            className="crop-resize-handle"
+                            onPointerDown={(event) => startPendingCropDrag(event, 'resize')}
+                            aria-label="Resize crop"
+                            role="button"
+                            tabIndex={0}
+                          />
+                        </span>
                       </div>
                       <div className="upload-mask-preview">
                         {pendingUploadPreview ? (
@@ -1545,7 +1903,7 @@ export default function App() {
         </section>
       )}
 
-      <aside className="analysis-rail" aria-label="Grip analysis">
+      {mediaMode === 'live' && <aside className="analysis-rail" aria-label="Grip analysis">
         <div className={`score-orb ${analysis.guidance.toLowerCase().replaceAll(' ', '-')}`}>
           <span>{analysis.gripPercentage}</span>
           <small>%</small>
@@ -1630,13 +1988,13 @@ export default function App() {
           </div>
         )}
 
-        {algorithmVersion === 'v4' && (
+        {(algorithmVersion === 'v4' || algorithmVersion === 'v5') && (
           <div className="v3-panel">
             <div className="motion-header">
               <Activity size={18} />
               <span>
-                V4 identity
-                <InlineExplain label="Explain V4 temporal identity" text={EXPLAIN.v4Temporal} />
+                {algorithmVersion === 'v5' ? 'V5 target identity' : 'V4 identity'}
+                <InlineExplain label="Explain temporal identity" text={EXPLAIN.v4Temporal} />
               </span>
             </div>
             <div className={temporalIdentity.stable ? 'v3-status ready' : 'v3-status fallback'}>
@@ -1644,17 +2002,21 @@ export default function App() {
               <strong>{Math.round(temporalIdentity.score * 100)}%</strong>
             </div>
             <div className="diagnostic-row neutral">
-              <span>Target</span>
-              <strong>{temporalIdentity.name ?? 'none'}</strong>
+              <span>{algorithmVersion === 'v5' ? 'Selected target' : 'Target'}</span>
+              <strong>{selectedTargetName(objectProfiles, targetProfileId, baseObjectCandidates, targetBaseId, showObjectLabels) ?? temporalIdentity.name ?? 'none'}</strong>
             </div>
             <div className="diagnostic-row neutral">
               <span>Match streak</span>
               <strong>{temporalIdentity.streak}/3</strong>
             </div>
             <p className={temporalIdentity.stable ? 'diagnostic-copy' : 'diagnostic-copy warn'}>
-              {temporalIdentity.stable
-                ? 'Enabled trained object is stable across recent frames.'
-                : 'V4 waits for repeated trained-object matches before marking the object detected.'}
+              {algorithmVersion === 'v5' && !targetProfileId && !targetBaseId
+                ? 'Select a base object ID or trained profile ID below. V5 will then score grip only for that target.'
+                : temporalIdentity.stable
+                  ? 'Selected target is stable across recent frames.'
+                  : targetBaseId
+                    ? 'V5 waits for the selected base object to stay detected for a few frames before marking it active.'
+                    : `${algorithmVersion.toUpperCase()} waits for repeated trained-object matches before marking the object detected.`}
             </p>
           </div>
         )}
@@ -1675,7 +2037,9 @@ export default function App() {
           <div className={objectDetection?.matched ? 'detected-object matched' : 'detected-object'}>
             <Box size={17} />
             <span>
-              {objectDetection?.matched
+              {algorithmVersion === 'v5' && !targetProfileId && !targetBaseId
+                ? 'Select a target object ID'
+                : objectDetection?.matched
                 ? `Object detected: ${objectDetection.name}`
                 : objectProfiles.some((profile) => profile.enabled !== false)
                   ? 'Enabled object not detected'
@@ -1685,6 +2049,48 @@ export default function App() {
             </span>
             <strong>{objectDetection ? `${Math.round(objectDetection.score * 100)}%` : '--'}</strong>
           </div>
+          {algorithmVersion === 'v5' && (
+            <div className="candidate-list">
+              <div className="motion-header compact-heading">
+                <span>
+                  Base detector objects
+                  <InlineExplain
+                    label="Explain base detector objects"
+                    text="These come from the pretrained MediaPipe EfficientDet object detector before any custom object profile is used. Select one for generic target tracking, then train a profile if you need stronger identity matching."
+                    compact
+                  />
+                </span>
+                <button
+                  type="button"
+                  className="label-toggle"
+                  onClick={() => setShowObjectLabels((value) => !value)}
+                  aria-pressed={showObjectLabels}
+                >
+                  {showObjectLabels ? 'Labels' : 'IDs'}
+                </button>
+              </div>
+              {baseObjectCandidates.length ? (
+                baseObjectCandidates.slice(0, 8).map((candidate) => (
+                  <button
+                    type="button"
+                    className={[
+                      'candidate-row',
+                      candidate.score > 0.42 ? 'matched' : '',
+                      targetBaseId === candidate.candidateId ? 'selected' : ''
+                    ].filter(Boolean).join(' ')}
+                    onClick={() => selectBaseTarget(candidate.candidateId)}
+                    key={candidate.candidateId}
+                  >
+                    <Box size={14} />
+                    <span>{baseObjectName(candidate, showObjectLabels)}</span>
+                    <strong>{Math.round(candidate.score * 100)}%</strong>
+                  </button>
+                ))
+              ) : (
+                <p className="diagnostic-copy">No base-model objects visible yet. The base detector knows common COCO objects like bottle, cup, phone, laptop, and similar categories.</p>
+              )}
+            </div>
+          )}
           <div className="identity-meter">
             <span>
               Object identity match
@@ -1716,38 +2122,96 @@ export default function App() {
                     </button>
                     <span>
                       {profile.name}
-                      {(algorithmVersion === 'v3' || algorithmVersion === 'v4') && candidate && (
+                      {(algorithmVersion === 'v3' || algorithmVersion === 'v4' || algorithmVersion === 'v5') && candidate && (
                         <small>{Math.round(candidate.score * 100)}%</small>
                       )}
                     </span>
+                    {algorithmVersion === 'v5' && (
+                      <button
+                        type="button"
+                        className={targetProfileId === profile.id ? 'target-chip active' : 'target-chip'}
+                        onClick={() => selectTargetProfile(profile.id)}
+                        disabled={profile.enabled === false}
+                      >
+                        {targetProfileId === profile.id ? 'Target' : 'Track'}
+                      </button>
+                    )}
                     <strong>{status.label}</strong>
                   </div>
                 );
               })}
-              {(algorithmVersion === 'v3' || algorithmVersion === 'v4') && (
+              {(algorithmVersion === 'v3' || algorithmVersion === 'v4' || algorithmVersion === 'v5') && (
                 <div className="candidate-list">
                   <div className="motion-header compact-heading">
                     <span>
-                      {algorithmVersion.toUpperCase()} detectable now
+                      {algorithmVersion === 'v5' ? 'V5 object IDs in frame' : `${algorithmVersion.toUpperCase()} detectable now`}
                       <InlineExplain
                         label="Explain detectable profiles"
-                        text="This mode scans only enabled trained profiles. Disable a profile to completely remove it from live object search."
+                        text={algorithmVersion === 'v5' ? EXPLAIN.v5Target : 'This mode scans only enabled trained profiles. Disable a profile to completely remove it from live object search.'}
                         compact
                       />
                     </span>
                   </div>
                   {v3ProfileCandidates.length ? (
-                    v3ProfileCandidates.slice(0, 5).map((candidate) => (
-                      <div className={candidate.matched ? 'candidate-row matched' : 'candidate-row'} key={candidate.profileId}>
+                    v3ProfileCandidates.slice(0, algorithmVersion === 'v5' ? 8 : 5).map((candidate, index) => (
+                      <button
+                        type="button"
+                        className={[
+                          'candidate-row',
+                          candidate.matched ? 'matched' : '',
+                          targetProfileId === candidate.profileId ? 'selected' : ''
+                        ].filter(Boolean).join(' ')}
+                        onClick={() => algorithmVersion === 'v5' ? selectTargetProfile(candidate.profileId) : undefined}
+                        key={candidate.candidateId}
+                      >
                         <Target size={14} />
-                        <span>{candidate.name}</span>
+                        <span>
+                          {algorithmVersion === 'v5' ? `O${index + 1} · ` : ''}
+                          {candidate.name}
+                        </span>
                         <strong>{Math.round(candidate.score * 100)}%</strong>
-                      </div>
+                      </button>
                     ))
                   ) : (
-                    <p className="diagnostic-copy">No enabled trained object is confidently visible yet.</p>
+                    <p className="diagnostic-copy">
+                      {algorithmVersion === 'v5'
+                        ? 'No enabled trained object IDs are visible yet. Add stronger views or improve lighting.'
+                        : 'No enabled trained object is confidently visible yet.'}
+                    </p>
                   )}
                 </div>
+              )}
+            </div>
+          )}
+          {algorithmVersion === 'v5' && (
+            <div className="class-filter-panel">
+              <div className="motion-header compact-heading">
+                <span>
+                  Detected classes
+                  <InlineExplain
+                    label="Explain detected classes"
+                    text="Classes currently reported by the base detector. Turn off classes you do not want to use as grip targets. Person is off by default."
+                    compact
+                  />
+                </span>
+              </div>
+              {baseClassSummary.length ? (
+                <div className="class-chip-grid">
+                  {baseClassSummary.map((item) => (
+                    <button
+                      type="button"
+                      className={item.enabled ? 'class-chip active' : 'class-chip'}
+                      onClick={() => toggleBaseClass(item.key)}
+                      aria-pressed={item.enabled}
+                      key={item.key}
+                    >
+                      <span>{item.label}</span>
+                      <strong>{item.count} · {Math.round(item.bestScore * 100)}%</strong>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="diagnostic-copy">No base-detector classes visible yet.</p>
               )}
             </div>
           )}
@@ -1875,7 +2339,7 @@ export default function App() {
             <p>Lock an object to reveal grip points.</p>
           )}
         </div>
-      </aside>
+      </aside>}
     </main>
   );
 }
@@ -1933,11 +2397,16 @@ function createPendingUploadReview(
 }
 
 function cropOverlayStyle(review: PendingUploadReview): React.CSSProperties {
+  const imageAspect = review.canvas.width / Math.max(1, review.canvas.height);
+  const renderWidth = imageAspect >= 1 ? 100 : imageAspect * 100;
+  const renderHeight = imageAspect >= 1 ? (1 / imageAspect) * 100 : 100;
+  const offsetX = (100 - renderWidth) / 2;
+  const offsetY = (100 - renderHeight) / 2;
   return {
-    left: `${(review.cropX / Math.max(1, review.canvas.width)) * 100}%`,
-    top: `${(review.cropY / Math.max(1, review.canvas.height)) * 100}%`,
-    width: `${(review.cropSize / Math.max(1, review.canvas.width)) * 100}%`,
-    height: `${(review.cropSize / Math.max(1, review.canvas.height)) * 100}%`
+    left: `${offsetX + (review.cropX / Math.max(1, review.canvas.width)) * renderWidth}%`,
+    top: `${offsetY + (review.cropY / Math.max(1, review.canvas.height)) * renderHeight}%`,
+    width: `${(review.cropSize / Math.max(1, review.canvas.width)) * renderWidth}%`,
+    height: `${(review.cropSize / Math.max(1, review.canvas.height)) * renderHeight}%`
   };
 }
 
@@ -1982,6 +2451,516 @@ function profileLiveStatus(
   if (candidate?.matched) return { kind: 'candidate', label: 'candidate' };
   if (candidate) return { kind: 'enabled', label: `${Math.round(candidate.score * 100)}%` };
   return { kind: 'enabled', label: 'enabled' };
+}
+
+function updateBaseObjectTracks(
+  previous: BaseTrackState,
+  boxes: DetectedObjectBox[],
+  timestamp: number,
+  selectedId: string | null,
+  hand: Landmark[] | null
+): BaseTrackState {
+  const unmatchedTracks = [...previous.tracks];
+  const nextTracks: BaseObjectCandidate[] = [];
+  let nextId = previous.nextId;
+  const sortedBoxes = [...boxes].sort((a, b) => b.score - a.score).slice(0, 12);
+
+  sortedBoxes.forEach((box) => {
+    const detection = createBaseCandidateFromBox(box, nextId, 0, timestamp);
+    let bestTrack: BaseObjectCandidate | null = null;
+    let bestScore = 0;
+
+    unmatchedTracks.forEach((track) => {
+      const score = baseTrackMatchScore(track, detection) + (track.candidateId === selectedId ? 0.06 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestTrack = track;
+      }
+    });
+
+    if (bestTrack && bestScore >= 0.28) {
+      const track = smoothBaseTrack(bestTrack, detection, timestamp);
+      nextTracks.push(track);
+      unmatchedTracks.splice(unmatchedTracks.indexOf(bestTrack), 1);
+      return;
+    }
+
+    nextTracks.push(createBaseCandidateFromBox(box, nextId, nextId - 1, timestamp));
+    nextId += 1;
+  });
+
+  unmatchedTracks.forEach((track) => {
+    const missedFrames = track.missedFrames + 1;
+    const keepMissed = track.candidateId === selectedId ? V5_BASE_TRACK_GRACE_MISSES + 4 : V5_BASE_TRACK_GRACE_MISSES;
+    if (missedFrames > keepMissed) return;
+    nextTracks.push({
+      ...track,
+      score: clampUnit(track.score * 0.72),
+      missedFrames,
+      box: makeDomRectLike(track.box.x, track.box.y, track.box.width, track.box.height)
+    });
+  });
+
+  const reacquiredTracks = maybeReacquireSelectedBaseTrack(nextTracks, selectedId, hand);
+
+  return {
+    nextId,
+    tracks: reacquiredTracks
+      .sort((a, b) => {
+        if (a.candidateId === selectedId) return -1;
+        if (b.candidateId === selectedId) return 1;
+        if (a.missedFrames !== b.missedFrames) return a.missedFrames - b.missedFrames;
+        return b.score - a.score;
+      })
+      .slice(0, 12)
+  };
+}
+
+function maybeReacquireSelectedBaseTrack(
+  tracks: BaseObjectCandidate[],
+  selectedId: string | null,
+  hand: Landmark[] | null
+) {
+  if (!selectedId || !hand) return tracks;
+  const selected = tracks.find((track) => track.candidateId === selectedId);
+  if (!selected || selected.missedFrames < 1) return tracks;
+
+  const freshCandidates = tracks.filter((track) => track.candidateId !== selectedId && track.missedFrames === 0 && isGripTargetEligible(track));
+  let best: { candidate: BaseObjectCandidate; score: number } | null = null;
+  for (const candidate of freshCandidates) {
+    const handAffinity = baseCandidateHandAffinity(candidate, hand);
+    const sizeSimilarity = baseSizeSimilarity(selected, candidate);
+    const score = handAffinity * 0.68 + candidate.score * 0.22 + sizeSimilarity * 0.1;
+    if (!best || score > best.score) {
+      best = { candidate, score };
+    }
+  }
+
+  if (!best) return tracks;
+  const bestCandidate = best.candidate;
+  const handAffinity = baseCandidateHandAffinity(bestCandidate, hand);
+  if (handAffinity < 0.34 || bestCandidate.score < 0.14) return tracks;
+  if (selected.missedFrames < 2 && selected.score > bestCandidate.score + 0.18) return tracks;
+
+  const transferred: BaseObjectCandidate = {
+    ...bestCandidate,
+    index: selected.index,
+    trackId: selected.trackId,
+    candidateId: selected.candidateId,
+    missedFrames: 0,
+    seenFrames: selected.seenFrames + 1,
+    score: clampUnit(Math.max(bestCandidate.score, selected.score * 0.82))
+  };
+
+  return tracks
+    .filter((track) => track.candidateId !== selectedId && track.candidateId !== bestCandidate.candidateId)
+    .concat(transferred);
+}
+
+function selectOfflineHandObjectCandidate(candidates: BaseObjectCandidate[], hand: Landmark[] | null) {
+  if (!hand) return null;
+  let best: { candidate: BaseObjectCandidate; confidence: number } | null = null;
+  for (const candidate of candidates) {
+    if (candidate.missedFrames > 2 || !isGripTargetEligible(candidate)) continue;
+    const confidence = offlineCandidateConfidence(candidate, hand);
+    if (!best || confidence > best.confidence) best = { candidate, confidence };
+  }
+  return best && best.confidence >= OFFLINE_BASE_TARGET_THRESHOLD ? best.candidate : null;
+}
+
+function offlineCandidateConfidence(candidate: BaseObjectCandidate, hand: Landmark[] | null) {
+  if (!hand) return candidate.score;
+  const affinity = baseCandidateHandAffinity(candidate, hand);
+  const detectorScore = candidate.score;
+  const continuity = candidate.missedFrames === 0 ? 0.08 : -0.08 * candidate.missedFrames;
+  return clampUnit(affinity * 0.72 + detectorScore * 0.28 + continuity);
+}
+
+let offlinePixelCanvas: HTMLCanvasElement | null = null;
+let offlinePixelContext: CanvasRenderingContext2D | null = null;
+
+function inferOfflinePixelObjectCandidate(video: HTMLVideoElement, previous: ObjectRegion | null): BaseObjectCandidate | null {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  if (!offlinePixelCanvas) {
+    offlinePixelCanvas = document.createElement('canvas');
+    offlinePixelContext = offlinePixelCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (!offlinePixelContext || !offlinePixelCanvas) return null;
+
+  const sampleWidth = 180;
+  const sampleHeight = Math.max(80, Math.round(sampleWidth * (video.videoHeight / Math.max(1, video.videoWidth))));
+  offlinePixelCanvas.width = sampleWidth;
+  offlinePixelCanvas.height = sampleHeight;
+  offlinePixelContext.drawImage(video, 0, 0, sampleWidth, sampleHeight);
+  const { data } = offlinePixelContext.getImageData(0, 0, sampleWidth, sampleHeight);
+
+  let minX = sampleWidth;
+  let minY = sampleHeight;
+  let maxX = 0;
+  let maxY = 0;
+  let scoreTotal = 0;
+  let count = 0;
+
+  for (let y = 0; y < sampleHeight; y += 2) {
+    for (let x = 0; x < sampleWidth; x += 2) {
+      const index = (y * sampleWidth + x) * 4;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const saturation = max <= 0 ? 0 : (max - min) / max;
+      const greenObject = g > 55 && g > r * 1.04 && g > b * 1.02 && saturation > 0.16;
+      const coloredObject = saturation > 0.34 && max > 70 && !(r > g * 1.14 && r > b * 1.18);
+      if (!greenObject && !coloredObject) continue;
+      const weight = greenObject ? 1 : 0.54;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      scoreTotal += weight * saturation;
+      count += 1;
+    }
+  }
+
+  if (count < 24) {
+    if (!previous || !previous.locked || (previous.lockAgeFrames ?? 0) < 2) return null;
+    return baseCandidateFromRect(
+      makeDomRectLike(
+        previous.center.x - previous.radiusX,
+        previous.center.y - previous.radiusY,
+        previous.radiusX * 2,
+        previous.radiusY * 2
+      ),
+      'offline-object',
+      clampUnit((previous.confidence ?? 0.4) * 0.82),
+      0,
+      9001
+    );
+  }
+
+  const scaleX = video.videoWidth / sampleWidth;
+  const scaleY = video.videoHeight / sampleHeight;
+  const paddingX = Math.max(18, (maxX - minX) * scaleX * 0.22);
+  const paddingY = Math.max(18, (maxY - minY) * scaleY * 0.22);
+  const x = clampNumber(minX * scaleX - paddingX, 0, video.videoWidth - 1);
+  const y = clampNumber(minY * scaleY - paddingY, 0, video.videoHeight - 1);
+  const width = clampNumber((maxX - minX) * scaleX + paddingX * 2, 36, video.videoWidth - x);
+  const height = clampNumber((maxY - minY) * scaleY + paddingY * 2, 36, video.videoHeight - y);
+  const confidence = clampUnit(0.2 + (scoreTotal / Math.max(1, count)) * 0.9 + Math.min(0.18, count / 2400));
+  return baseCandidateFromRect(makeDomRectLike(x, y, width, height), 'offline-object', confidence, 0, 9001);
+}
+
+function baseCandidateFromRect(
+  rect: DOMRectReadOnly,
+  label: string,
+  score: number,
+  index: number,
+  trackId: number
+): BaseObjectCandidate {
+  return {
+    box: rect,
+    label,
+    score,
+    index,
+    trackId,
+    candidateId: `base-track-${trackId}`,
+    missedFrames: 0,
+    seenFrames: 1,
+    center: {
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2
+    },
+    radiusX: Math.max(14, rect.width / 2),
+    radiusY: Math.max(14, rect.height / 2)
+  };
+}
+
+function createOfflineSurrogateHand(candidate: BaseObjectCandidate): Landmark[] {
+  const cx = candidate.center.x;
+  const cy = candidate.center.y;
+  const rx = Math.max(26, candidate.radiusX);
+  const ry = Math.max(34, candidate.radiusY);
+  const wrist = { x: cx + rx * 0.18, y: cy + ry * 1.35 };
+  const hand: Landmark[] = Array.from({ length: 21 }, () => ({ ...wrist }));
+  hand[0] = wrist;
+  hand[1] = { x: cx - rx * 0.2, y: cy + ry * 1.05 };
+  hand[2] = { x: cx - rx * 0.42, y: cy + ry * 0.72 };
+  hand[3] = { x: cx - rx * 0.62, y: cy + ry * 0.42 };
+  hand[4] = { x: cx - rx * 0.76, y: cy + ry * 0.14 };
+  hand[5] = { x: cx - rx * 0.42, y: cy + ry * 0.7 };
+  hand[6] = { x: cx - rx * 0.58, y: cy + ry * 0.26 };
+  hand[7] = { x: cx - rx * 0.5, y: cy - ry * 0.08 };
+  hand[8] = { x: cx - rx * 0.18, y: cy - ry * 0.22 };
+  hand[9] = { x: cx - rx * 0.08, y: cy + ry * 0.78 };
+  hand[10] = { x: cx - rx * 0.16, y: cy + ry * 0.22 };
+  hand[11] = { x: cx - rx * 0.03, y: cy - ry * 0.08 };
+  hand[12] = { x: cx + rx * 0.18, y: cy - ry * 0.2 };
+  hand[13] = { x: cx + rx * 0.2, y: cy + ry * 0.82 };
+  hand[14] = { x: cx + rx * 0.16, y: cy + ry * 0.3 };
+  hand[15] = { x: cx + rx * 0.28, y: cy + ry * 0.02 };
+  hand[16] = { x: cx + rx * 0.48, y: cy - ry * 0.08 };
+  hand[17] = { x: cx + rx * 0.46, y: cy + ry * 0.88 };
+  hand[18] = { x: cx + rx * 0.42, y: cy + ry * 0.42 };
+  hand[19] = { x: cx + rx * 0.52, y: cy + ry * 0.16 };
+  hand[20] = { x: cx + rx * 0.72, y: cy + ry * 0.08 };
+  return hand;
+}
+
+function isGripTargetEligible(candidate: BaseObjectCandidate, frameWidth = 0, frameHeight = 0) {
+  const label = baseClassKey(candidate.label);
+  if (label === 'person') return false;
+  const width = candidate.box.width;
+  const height = candidate.box.height;
+  const area = width * height;
+  const frameArea = frameWidth > 0 && frameHeight > 0 ? frameWidth * frameHeight : 0;
+  if (frameArea > 0 && area / frameArea > 0.34) return false;
+  const longerSide = Math.max(width, height);
+  const shorterSide = Math.max(1, Math.min(width, height));
+  const aspectRatio = longerSide / shorterSide;
+  if (frameWidth > 0 && width / frameWidth > 0.72) return false;
+  if (frameHeight > 0 && height / frameHeight > 0.78) return false;
+  if (aspectRatio > 5.5) return false;
+  return true;
+}
+
+function createBaseCandidateFromBox(
+  box: DetectedObjectBox,
+  trackId: number,
+  index: number,
+  _timestamp: number
+): BaseObjectCandidate {
+  return {
+    ...box,
+    box: makeDomRectLike(box.box.x, box.box.y, box.box.width, box.box.height),
+    index,
+    trackId,
+    candidateId: `base-track-${trackId}`,
+    missedFrames: 0,
+    seenFrames: 1,
+    center: {
+      x: box.box.x + box.box.width / 2,
+      y: box.box.y + box.box.height / 2
+    },
+    radiusX: Math.max(14, box.box.width / 2),
+    radiusY: Math.max(14, box.box.height / 2)
+  };
+}
+
+function smoothBaseTrack(
+  track: BaseObjectCandidate,
+  detection: BaseObjectCandidate,
+  _timestamp: number
+): BaseObjectCandidate {
+  const alpha = track.missedFrames > 0 ? 0.74 : 0.58;
+  const x = track.box.x * (1 - alpha) + detection.box.x * alpha;
+  const y = track.box.y * (1 - alpha) + detection.box.y * alpha;
+  const width = track.box.width * (1 - alpha) + detection.box.width * alpha;
+  const height = track.box.height * (1 - alpha) + detection.box.height * alpha;
+  const center = {
+    x: x + width / 2,
+    y: y + height / 2
+  };
+  return {
+    ...detection,
+    index: track.index,
+    trackId: track.trackId,
+    candidateId: track.candidateId,
+    score: clampUnit(track.score * 0.46 + detection.score * 0.54),
+    box: makeDomRectLike(x, y, width, height),
+    center,
+    radiusX: Math.max(14, width / 2),
+    radiusY: Math.max(14, height / 2),
+    missedFrames: 0,
+    seenFrames: track.seenFrames + 1
+  };
+}
+
+function baseCandidateHandAffinity(candidate: BaseObjectCandidate, hand: Landmark[]) {
+  if (hand.length < 6) return 0;
+  const scale = handSize(hand);
+  const fingertips = [4, 8, 12, 16, 20].map((index) => hand[index]).filter(Boolean);
+  const contactPoints = [...fingertips, palmCenter(hand)];
+  const nearestRectDistance = Math.min(...contactPoints.map((point) => pointToRectDistance(point, candidate.box)));
+  const rectContact = clampUnit(1 - nearestRectDistance / Math.max(18, scale * 0.82));
+  const centerDistance = distance(candidate.center, palmCenter(hand));
+  const centerProximity = clampUnit(1 - centerDistance / Math.max(24, scale * 1.75));
+  const handBounds = landmarksBounds(hand);
+  const overlap = rectIoU(candidate.box, handBounds);
+  return clampUnit(rectContact * 0.62 + centerProximity * 0.24 + Math.min(1, overlap * 4) * 0.14);
+}
+
+function baseSizeSimilarity(a: BaseObjectCandidate, b: BaseObjectCandidate) {
+  const areaA = Math.max(1, a.box.width * a.box.height);
+  const areaB = Math.max(1, b.box.width * b.box.height);
+  return Math.min(areaA, areaB) / Math.max(areaA, areaB);
+}
+
+function baseTrackMatchScore(track: BaseObjectCandidate, detection: BaseObjectCandidate) {
+  const overlap = rectIoU(track.box, detection.box);
+  const radius = Math.max(24, Math.max(track.radiusX, track.radiusY, detection.radiusX, detection.radiusY));
+  const centerScore = clampUnit(1 - distance(track.center, detection.center) / (radius * 2.35));
+  const areaA = Math.max(1, track.box.width * track.box.height);
+  const areaB = Math.max(1, detection.box.width * detection.box.height);
+  const sizeScore = Math.min(areaA, areaB) / Math.max(areaA, areaB);
+  return overlap * 0.5 + centerScore * 0.38 + sizeScore * 0.12;
+}
+
+function pointToRectDistance(point: Point, rect: DOMRectReadOnly) {
+  const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.width));
+  const dy = Math.max(rect.y - point.y, 0, point.y - (rect.y + rect.height));
+  return Math.hypot(dx, dy);
+}
+
+function landmarksBounds(points: Landmark[]) {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  const padding = Math.max(18, Math.max(maxX - minX, maxY - minY) * 0.18);
+  return makeDomRectLike(minX - padding, minY - padding, maxX - minX + padding * 2, maxY - minY + padding * 2);
+}
+
+function rectIoU(a: DOMRectReadOnly, b: DOMRectReadOnly) {
+  const left = Math.max(a.x, b.x);
+  const top = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const union = Math.max(1, a.width * a.height + b.width * b.height - intersection);
+  return intersection / union;
+}
+
+function makeDomRectLike(x: number, y: number, width: number, height: number): DOMRectReadOnly {
+  return {
+    x,
+    y,
+    width,
+    height,
+    top: y,
+    left: x,
+    right: x + width,
+    bottom: y + height,
+    toJSON: () => ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height })
+  } as DOMRectReadOnly;
+}
+
+function summarizeBaseClasses(candidates: BaseObjectCandidate[], enabledMap: Record<string, boolean>): BaseClassSummary[] {
+  const byClass = new Map<string, BaseClassSummary>();
+  candidates.forEach((candidate) => {
+    const key = baseClassKey(candidate.label);
+    const existing = byClass.get(key);
+    const label = formatBaseClassLabel(key);
+    if (!existing) {
+      byClass.set(key, {
+        key,
+        label,
+        count: 1,
+        bestScore: candidate.score,
+        enabled: isBaseClassEnabled(candidate.label, enabledMap)
+      });
+      return;
+    }
+    existing.count += 1;
+    existing.bestScore = Math.max(existing.bestScore, candidate.score);
+    existing.enabled = isBaseClassEnabled(candidate.label, enabledMap);
+  });
+  return Array.from(byClass.values()).sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.bestScore - a.bestScore || a.label.localeCompare(b.label));
+}
+
+function isBaseClassEnabled(label: string, enabledMap: Record<string, boolean>) {
+  const key = baseClassKey(label);
+  return enabledMap[key] ?? key !== 'person';
+}
+
+function baseClassKey(label: string) {
+  return (label || 'unknown').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+function formatBaseClassLabel(key: string) {
+  return key.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatOfflinePhase(phase: 'idle' | 'processing' | 'reviewing' | 'complete') {
+  if (phase === 'processing') return 'processing';
+  if (phase === 'reviewing') return 'reviewing';
+  if (phase === 'complete') return 'complete';
+  return 'ready';
+}
+
+function baseCandidateToTemporalCandidate(candidate: BaseObjectCandidate, confidenceOverride?: number): ObjectProfileCandidate {
+  const score = confidenceOverride ?? candidate.score;
+  return {
+    candidateId: candidate.candidateId,
+    profileId: candidate.candidateId,
+    name: baseObjectName(candidate, false),
+    score,
+    matched: score >= OFFLINE_BASE_TARGET_THRESHOLD,
+    center: candidate.center,
+    radiusX: candidate.radiusX,
+    radiusY: candidate.radiusY,
+    aspectRatio: Math.max(candidate.radiusX, candidate.radiusY) / Math.max(1, Math.min(candidate.radiusX, candidate.radiusY)),
+    descriptorQuality: Math.min(0.82, Math.max(0.32, score)),
+    scanRank: candidate.index
+  };
+}
+
+function objectRegionFromBaseCandidate(candidate: BaseObjectCandidate, previous: ObjectRegion | null, confidenceOverride?: number): ObjectRegion {
+  const radiusX = Math.max(16, candidate.radiusX);
+  const radiusY = Math.max(16, candidate.radiusY);
+  const aspectRatio = Math.max(radiusX, radiusY) / Math.max(1, Math.min(radiusX, radiusY));
+  const detectorLabel = `base:${candidate.candidateId}`;
+  const sameTarget = previous?.detectorLabel === detectorLabel;
+  const detectorConfidence = confidenceOverride ?? candidate.score;
+  const confidence = clampUnit(0.62 + detectorConfidence * 0.38);
+  const region: ObjectRegion = {
+    center: candidate.center,
+    radiusX,
+    radiusY,
+    angle: sameTarget ? previous?.angle ?? 0 : 0,
+    confidence,
+    locked: detectorConfidence >= OFFLINE_BASE_TARGET_THRESHOLD,
+    source: 'detector',
+    velocity: sameTarget && previous ? { x: candidate.center.x - previous.center.x, y: candidate.center.y - previous.center.y } : { x: 0, y: 0 },
+    contour: [],
+    shape: aspectRatio > 1.35 ? 'phone-like' : aspectRatio > 1.12 ? 'ellipse' : 'unknown',
+    aspectRatio,
+    tightness: 0.76,
+    lockAgeFrames: detectorConfidence >= OFFLINE_BASE_TARGET_THRESHOLD ? (sameTarget ? previous?.lockAgeFrames ?? 0 : 0) + 1 : 0,
+    manuallyAdjusted: false,
+    visualEdgeScore: Math.min(0.82, 0.32 + detectorConfidence * 0.58),
+    visualTextureScore: Math.min(0.72, 0.28 + detectorConfidence * 0.48),
+    independentEvidenceScore: Math.min(0.9, 0.56 + detectorConfidence * 0.34),
+    relativeDriftScore: sameTarget && previous ? clampUnit(distance(candidate.center, previous.center) / Math.max(1, Math.max(radiusX, radiusY) * 1.8)) : 0,
+    detectorLabel,
+    detectorScore: detectorConfidence
+  };
+  region.contour = Array.from({ length: 28 }, (_item, index) => ellipsePoint(region, (index / 28) * Math.PI * 2));
+  return region;
+}
+
+function baseObjectName(candidate: Pick<BaseObjectCandidate, 'index' | 'label'>, showLabel = true) {
+  const id = `B${candidate.index + 1}`;
+  if (!showLabel) return id;
+  const label = candidate.label && candidate.label !== 'unknown' ? candidate.label : 'object';
+  return `${id} · ${label}`;
+}
+
+function selectedTargetName(
+  profiles: ObjectProfileV2[],
+  profileId: string | null,
+  baseCandidates: BaseObjectCandidate[],
+  baseId: string | null,
+  showBaseLabel = true
+) {
+  if (profileId) return profiles.find((profile) => profile.id === profileId)?.name ?? null;
+  if (baseId) {
+    const candidate = baseCandidates.find((item) => item.candidateId === baseId);
+    return candidate ? baseObjectName(candidate, showBaseLabel) : null;
+  }
+  return null;
 }
 
 function waitForVideoMetadata(video: HTMLVideoElement) {
@@ -2180,9 +3159,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' ? fromStorage : 'v4';
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' ? fromStorage : 'v5';
 }
 
 function saveAlgorithmVersion(version: AlgorithmVersion) {
@@ -2224,6 +3203,7 @@ function normalizeObjectProfiles(profiles: ObjectProfileV2[]) {
       ...profile,
       samples,
       enabled: profile.enabled !== false,
+      exemplarDescriptors: profile.exemplarDescriptors ?? samples.flatMap((sample) => sample.descriptorVariants ?? [sample.descriptor.vector]).slice(0, 96),
       strength: profile.strength ?? profileStrength(samples),
       coverageScore: profile.coverageScore ?? trainingCoverage(samples)
     };

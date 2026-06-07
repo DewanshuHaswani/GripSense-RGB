@@ -22,6 +22,7 @@ export type VisionModelStatus = {
 export type VisionEngine = {
   status: VisionModelStatus;
   detectHands(video: HTMLVideoElement, timestamp: number): Landmark[][];
+  detectObjectBoxes(video: HTMLVideoElement, timestamp: number): DetectedObjectBox[];
   detectObjectBox(video: HTMLVideoElement, timestamp: number): DetectedObjectBox | null;
   segmentAt(video: HTMLVideoElement, point: Point): Promise<boolean>;
   dispose(): void;
@@ -66,8 +67,8 @@ export async function createVisionEngine(onStatus: (status: VisionModelStatus) =
           delegate
         },
         runningMode: 'VIDEO',
-        scoreThreshold: 0.28,
-        maxResults: 3
+        scoreThreshold: 0.22,
+        maxResults: 8
       })
     );
     status.detector = 'ready';
@@ -103,27 +104,11 @@ export async function createVisionEngine(onStatus: (status: VisionModelStatus) =
       const result = handLandmarker.detectForVideo(video, timestamp);
       return (result.landmarks ?? []) as Landmark[][];
     },
+    detectObjectBoxes(video, timestamp) {
+      return detectObjectBoxes(objectDetector, status, video, timestamp);
+    },
     detectObjectBox(video, timestamp) {
-      if (!objectDetector || status.detector !== 'ready') return null;
-      const detections = objectDetector.detectForVideo(video, timestamp).detections ?? [];
-      const ranked = detections
-        .map((detection) => {
-          const box = detection.boundingBox;
-          const category = detection.categories?.[0];
-          const label = category?.categoryName || category?.displayName || 'unknown';
-          const score = category?.score ?? 0;
-          return box
-            ? {
-                box: new DOMRectReadOnly(box.originX, box.originY, box.width, box.height),
-                label,
-                score,
-                rank: score + (isPhoneLabel(label) ? 1.2 : 0)
-              }
-            : null;
-        })
-        .filter((candidate): candidate is DetectedObjectBox & { rank: number } => Boolean(candidate))
-        .sort((a, b) => b.rank - a.rank);
-      return ranked[0] ?? null;
+      return detectObjectBoxes(objectDetector, status, video, timestamp)[0] ?? null;
     },
     async segmentAt(video, point) {
       if (!segmenter || status.segmenter !== 'ready') return false;
@@ -143,6 +128,34 @@ export async function createVisionEngine(onStatus: (status: VisionModelStatus) =
       segmenter?.close();
     }
   };
+}
+
+function detectObjectBoxes(
+  objectDetector: ObjectDetector | null,
+  status: VisionModelStatus,
+  video: HTMLVideoElement,
+  timestamp: number
+): DetectedObjectBox[] {
+  if (!objectDetector || status.detector !== 'ready') return [];
+  const detections = objectDetector.detectForVideo(video, timestamp).detections ?? [];
+  return detections
+    .map((detection) => {
+      const box = detection.boundingBox;
+      const category = detection.categories?.[0];
+      const label = category?.categoryName || category?.displayName || 'unknown';
+      const score = category?.score ?? 0;
+      return box
+        ? {
+            box: new DOMRectReadOnly(box.originX, box.originY, box.width, box.height),
+            label,
+            score,
+            rank: score + (isPhoneLabel(label) ? 1.2 : 0)
+          }
+        : null;
+    })
+    .filter((candidate): candidate is DetectedObjectBox & { rank: number } => Boolean(candidate))
+    .sort((a, b) => b.rank - a.rank)
+    .map(({ rank: _rank, ...candidate }) => candidate);
 }
 
 function isPhoneLabel(label: string) {

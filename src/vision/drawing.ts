@@ -1,4 +1,5 @@
-import type { GripAnalysis, Landmark, ObjectRegion } from './types';
+import type { ObjectProfileCandidate } from './objectProfile';
+import type { DetectedObjectBox, GripAnalysis, Landmark, ObjectRegion } from './types';
 import { FINGER_MCP_INDICES, FINGERTIP_INDICES, PALM_INDICES, palmCenter } from './geometry';
 
 const HAND_CONNECTIONS = [
@@ -32,7 +33,12 @@ export function drawTrackingOverlay(
   mirrored: boolean,
   hand: Landmark[] | null,
   object: ObjectRegion | null,
-  analysis: GripAnalysis
+  analysis: GripAnalysis,
+  candidates: ObjectProfileCandidate[] = [],
+  selectedProfileId: string | null = null,
+  baseCandidates: Array<DetectedObjectBox & { candidateId: string }> = [],
+  selectedBaseId: string | null = null,
+  showObjectLabels = true
 ) {
   context.clearRect(0, 0, width, height);
   context.save();
@@ -41,11 +47,107 @@ export function drawTrackingOverlay(
     context.scale(-1, 1);
   }
 
+  if (baseCandidates.length && !selectedProfileId) {
+    drawBaseCandidates(context, baseCandidates, selectedBaseId, mirrored, showObjectLabels);
+  }
+  if (candidates.length && !selectedBaseId) {
+    drawProfileCandidates(context, candidates, selectedProfileId, mirrored, showObjectLabels);
+  }
   if (object) drawObject(context, object, analysis);
   if (hand) drawHand(context, hand, analysis);
 
   context.restore();
   drawHud(context, width, analysis);
+}
+
+function drawBaseCandidates(
+  context: CanvasRenderingContext2D,
+  candidates: Array<DetectedObjectBox & { candidateId: string }>,
+  selectedBaseId: string | null,
+  mirrored: boolean,
+  showObjectLabels: boolean
+) {
+  context.save();
+  context.font = '800 13px Inter, system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  const visibleCandidates = selectedBaseId ? candidates.filter((candidate) => candidate.candidateId === selectedBaseId) : candidates.slice(0, 8);
+  visibleCandidates.forEach((candidate) => {
+    const center = {
+      x: candidate.box.x + candidate.box.width / 2,
+      y: candidate.box.y + candidate.box.height / 2
+    };
+    const selected = selectedBaseId === candidate.candidateId;
+    const color = selected ? '34, 211, 238' : '167, 243, 208';
+    context.strokeStyle = `rgba(${color}, ${selected ? 0.94 : 0.58})`;
+    context.fillStyle = `rgba(${color}, ${selected ? 0.14 : 0.07})`;
+    context.lineWidth = selected ? 4 : 2;
+    roundRect(context, candidate.box.x, candidate.box.y, candidate.box.width, candidate.box.height, 10);
+    context.fill();
+    context.stroke();
+
+    const label = idFromBaseCandidateId(candidate.candidateId);
+    const text = showObjectLabels && candidate.label !== 'unknown' ? `${label} ${candidate.label}` : label;
+    context.beginPath();
+    context.arc(center.x, center.y, selected ? 12 : 9, 0, Math.PI * 2);
+    context.fillStyle = `rgba(${color}, 0.94)`;
+    context.fill();
+    context.strokeStyle = 'rgba(2, 6, 12, 0.82)';
+    context.lineWidth = 3;
+    context.stroke();
+    const labelWidth = showObjectLabels ? Math.max(36, context.measureText(text).width + 18) : 36;
+    context.fillStyle = 'rgba(2, 6, 12, 0.72)';
+    roundRect(context, center.x - labelWidth / 2, center.y - 34, labelWidth, 23, 7);
+    context.fill();
+    context.fillStyle = '#f8fafc';
+    drawReadableText(context, text, center.x, center.y - 22, mirrored);
+  });
+  context.restore();
+}
+
+function drawProfileCandidates(
+  context: CanvasRenderingContext2D,
+  candidates: ObjectProfileCandidate[],
+  selectedProfileId: string | null,
+  mirrored: boolean,
+  showObjectLabels: boolean
+) {
+  context.save();
+  context.font = '800 14px Inter, system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  const visibleCandidates = selectedProfileId
+    ? candidates.filter((candidate) => candidate.profileId === selectedProfileId)
+    : candidates.slice(0, 8);
+  visibleCandidates.forEach((candidate, index) => {
+    const selected = selectedProfileId === candidate.profileId;
+    const matched = candidate.matched;
+    const color = selected ? '34, 211, 238' : matched ? '134, 239, 172' : '250, 204, 21';
+    const radius = selected ? 13 : 10;
+    context.beginPath();
+    context.arc(candidate.center.x, candidate.center.y, radius + 7, 0, Math.PI * 2);
+    context.fillStyle = `rgba(${color}, 0.14)`;
+    context.fill();
+    context.beginPath();
+    context.arc(candidate.center.x, candidate.center.y, radius, 0, Math.PI * 2);
+    context.fillStyle = `rgba(${color}, 0.92)`;
+    context.fill();
+    context.lineWidth = selected ? 4 : 3;
+    context.strokeStyle = 'rgba(2, 6, 12, 0.82)';
+    context.stroke();
+
+    const label = selectedProfileId ? 'O1' : `O${index + 1}`;
+    const text = showObjectLabels ? `${label} ${candidate.name}` : label;
+    const labelX = candidate.center.x;
+    const labelY = candidate.center.y - radius - 20;
+    const labelWidth = showObjectLabels ? Math.max(36, context.measureText(text).width + 18) : 36;
+    context.fillStyle = 'rgba(2, 6, 12, 0.72)';
+    roundRect(context, labelX - labelWidth / 2, labelY - 12, labelWidth, 24, 7);
+    context.fill();
+    context.fillStyle = selected ? '#67e8f9' : '#f8fafc';
+    drawReadableText(context, text, labelX, labelY + 1, mirrored);
+  });
+  context.restore();
 }
 
 function drawHand(context: CanvasRenderingContext2D, hand: Landmark[], analysis: GripAnalysis) {
@@ -142,4 +244,37 @@ function drawPoint(context: CanvasRenderingContext2D, x: number, y: number, radi
   context.beginPath();
   context.arc(x, y, radius, 0, Math.PI * 2);
   context.fill();
+}
+
+function roundRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function drawReadableText(context: CanvasRenderingContext2D, text: string, x: number, y: number, mirrored: boolean) {
+  if (!mirrored) {
+    context.fillText(text, x, y);
+    return;
+  }
+  context.save();
+  context.translate(x, y);
+  context.scale(-1, 1);
+  context.fillText(text, 0, 0);
+  context.restore();
+}
+
+function idFromBaseCandidateId(id: string) {
+  const legacyIndex = Number(id.replace('base-', ''));
+  if (Number.isFinite(legacyIndex)) return `B${legacyIndex + 1}`;
+  const stableId = Number(id.replace('base-track-', ''));
+  return Number.isFinite(stableId) ? `B${stableId}` : 'B?';
 }

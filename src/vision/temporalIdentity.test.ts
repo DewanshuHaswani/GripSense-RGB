@@ -4,6 +4,7 @@ import { EMPTY_TEMPORAL_IDENTITY, temporalIdentityToMatch, updateTemporalIdentit
 describe('temporal identity', () => {
   it('requires repeated matches before becoming stable', () => {
     const candidate = {
+      candidateId: 'bottle-1',
       profileId: 'bottle',
       name: 'Bottle',
       score: 0.82,

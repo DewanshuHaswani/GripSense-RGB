@@ -236,6 +236,26 @@ describe('analyzeGrip', () => {
     expect(poseBlocked.diagnostics.issueCategory).toBe('pose_problem');
   });
 
+  it('v5 blocks high grip when the selected object is detected but not touching the hand', () => {
+    const droppedObject = phoneObjectAt(610, 120, 0.91);
+    droppedObject.detectorLabel = 'profile:Bottle';
+    droppedObject.independentEvidenceScore = 0.9;
+    const analysis = analyzeGrip(phoneGripHand(), droppedObject, { x: 326, y: 346 }, {
+      algorithmVersion: 'v5',
+      objectIdentity: {
+        hasProfiles: true,
+        score: 0.88,
+        matched: true,
+        name: 'Bottle'
+      }
+    });
+
+    expect(analysis.gripPercentage).toBeLessThanOrEqual(12);
+    expect(analysis.guidance).toBe('Reposition');
+    expect(analysis.diagnostics.gripIssue).toContain('not visibly in contact');
+    expect(analysis.diagnostics.scoreBreakdown.some((item) => item.label === 'Contact gate')).toBe(true);
+  });
+
   it('v3 falls back to V2 when the local server is unavailable', () => {
     const hand = phoneGripHand();
     const object = phoneObjectAt(350, 316, 0.88);

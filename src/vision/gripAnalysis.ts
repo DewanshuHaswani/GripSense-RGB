@@ -176,13 +176,13 @@ export function analyzeGrip(
       closureScore,
       palmCenter: currentPalm,
       handVelocity,
-        guidance: 'Object not locked',
-        objectLockQuality: 0,
-        objectIdentityScore: objectIdentity.score,
-        objectIdentityName: objectIdentity.name,
-        objectIdentityMatched: objectIdentity.matched,
-        hasObjectProfiles: objectIdentity.hasProfiles,
-        diagnostics: {
+      guidance: 'Object not locked',
+      objectLockQuality: 0,
+      objectIdentityScore: objectIdentity.score,
+      objectIdentityName: objectIdentity.name,
+      objectIdentityMatched: objectIdentity.matched,
+      hasObjectProfiles: objectIdentity.hasProfiles,
+      diagnostics: {
         ...EMPTY_ANALYSIS.diagnostics,
         state: 'Hand only',
         recommendation: 'No object detected in the hand. Click an object to lock it if the camera missed it.',
@@ -219,9 +219,11 @@ export function analyzeGrip(
   const calibration = calibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.calibrationBaseline ?? null);
   const weakCalibration = weakCalibrationAdjustment(evidence, mode, closureScore, enclosureScore, options.weakCalibrationBaseline ?? null);
   const identityFactor = objectIdentityReadiness(objectIdentity, fallbackAlgorithmVersion);
-  const objectReadiness = fallbackAlgorithmVersion === 'v2' ? v2ObjectReadiness(object, evidence) * identityFactor : 1;
+  const objectReadiness = usesObjectIdentityGate(fallbackAlgorithmVersion)
+    ? v2ObjectReadiness(object, evidence) * identityFactor
+    : 1;
 
-  const gripPercentage = Math.round(
+  let gripPercentage = Math.round(
     100 *
       clamp(
         (contactScore +
@@ -233,10 +235,21 @@ export function analyzeGrip(
           objectReadiness
       )
   );
-  const calibratedGripPercentage =
+  const v5ContactGate = contactGateScore(evidence);
+  const v5NoContact =
+    fallbackAlgorithmVersion === 'v5' &&
+    evidence.objectLockQuality >= 0.38 &&
+    v5ContactGate < 0.28;
+  if (v5NoContact) {
+    gripPercentage = Math.min(gripPercentage, Math.round(v5ContactGate * 45));
+  }
+  let calibratedGripPercentage =
     calibration.similarToBaseline && options.calibrationBaseline
       ? Math.max(gripPercentage, Math.round(options.calibrationBaseline.gripPercentage * 0.88))
       : gripPercentage;
+  if (v5NoContact) {
+    calibratedGripPercentage = Math.min(calibratedGripPercentage, Math.round(v5ContactGate * 45));
+  }
   const confidence = computeConfidence({
     evidence,
     gripPercentage,
@@ -249,11 +262,15 @@ export function analyzeGrip(
     scoringConfig
   });
   const motionState = !moving ? 'idle' : slipRisk > 0.45 ? 'slipping' : motionCoupling > 0.58 ? 'moving-with-hand' : 'uncertain';
-  const state = computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, fallbackAlgorithmVersion);
+  const state = v5NoContact
+    ? 'Object uncertain'
+    : computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, fallbackAlgorithmVersion);
   const objectUncertainGuidance =
     evidence.objectLockQuality < 0.38 || identityBlocksStrongGrip(objectIdentity, fallbackAlgorithmVersion);
   const guidance =
-    objectUncertainGuidance
+    v5NoContact
+      ? 'Reposition'
+      : objectUncertainGuidance
       ? 'Object uncertain'
       : calibratedGripPercentage >= 70 && slipRisk < 0.38
       ? 'Strong grip'
@@ -269,7 +286,8 @@ export function analyzeGrip(
     calibration.similarToBaseline,
     weakCalibration.similarToWeak,
     fallbackAlgorithmVersion,
-    objectIdentity
+    objectIdentity,
+    v5NoContact
   );
 
   return {
@@ -410,6 +428,18 @@ function scoreByMode(evidence: GripEvidence, mode: GripMode, algorithmVersion: A
     evidence.thumbSupportScore * 0.14 +
     evidence.motionStabilityScore * 0.12
   ) * v2ObjectFactor;
+}
+
+function contactGateScore(evidence: GripEvidence) {
+  const roleScore = roleCoverage(evidence.contactRoles);
+  return clamp(
+    evidence.fingerSegmentContactScore * 0.34 +
+      evidence.visibleContactScore * 0.18 +
+      roleScore * 0.18 +
+      evidence.palmObjectContainmentScore * 0.16 +
+      evidence.thumbSupportScore * 0.08 +
+      Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.pinchScore) * 0.06
+  );
 }
 
 function computeConfidence({
@@ -553,13 +583,19 @@ function v2ObjectReadiness(object: ObjectRegion, evidence: GripEvidence) {
 }
 
 function objectIdentityReadiness(identity: ObjectIdentitySignal, algorithmVersion: AlgorithmVersion) {
-  if (algorithmVersion !== 'v2' || !identity.hasProfiles) return 1;
+  if (!usesObjectIdentityGate(algorithmVersion) || !identity.hasProfiles) return 1;
+  if (identity.source === 'base') return identity.matched ? clamp(0.82 + identity.score * 0.18, 0.82, 1) : 0;
   if (identity.matched) return clamp(0.9 + identity.score * 0.12, 0.9, 1);
   return 0;
 }
 
 function identityBlocksStrongGrip(identity: ObjectIdentitySignal, algorithmVersion: AlgorithmVersion) {
-  return algorithmVersion === 'v2' && identity.hasProfiles && !identity.matched;
+  if (identity.source === 'base') return usesObjectIdentityGate(algorithmVersion) && identity.hasProfiles && !identity.matched;
+  return usesObjectIdentityGate(algorithmVersion) && identity.hasProfiles && !identity.matched;
+}
+
+function usesObjectIdentityGate(algorithmVersion: AlgorithmVersion) {
+  return algorithmVersion === 'v2' || algorithmVersion === 'v4' || algorithmVersion === 'v5';
 }
 
 function computeGripState(
@@ -590,18 +626,25 @@ function createDiagnostics(
   calibrated: boolean,
   weakMatched: boolean,
   algorithmVersion: AlgorithmVersion,
-  identity: ObjectIdentitySignal
+  identity: ObjectIdentitySignal,
+  noContact = false
 ): GripDiagnostics {
   const objectIssue =
-    identityBlocksStrongGrip(identity, algorithmVersion)
-      ? 'Trained object not found. Relock the intended object or train another profile.'
+    noContact
+      ? null
+      : identityBlocksStrongGrip(identity, algorithmVersion)
+      ? identity.source === 'base'
+        ? 'Selected base object is below detector confidence threshold. Pick another ID or improve visibility.'
+        : 'Trained object not found. Relock the intended object or train another profile.'
       : evidence.objectLockQuality < 0.38
       ? 'Object lock is uncertain. Click or resize the object region.'
       : evidence.objectLockQuality < 0.62
         ? 'Object lock is usable but could be tighter.'
         : null;
   const gripIssue =
-    state === 'Slip risk'
+    noContact
+      ? 'Target object is detected, but it is not visibly in contact with the hand.'
+      : state === 'Slip risk'
       ? 'Object and hand have diverged over multiple frames.'
       : evidence.thumbSupportScore < 0.3
         ? 'Thumb support is unclear.'
@@ -631,6 +674,7 @@ function createDiagnostics(
       { label: 'Mode fit', value: mode === 'uncertain' ? 0 : evidence.modeScores[mode], impact: 'positive' },
       { label: 'Object lock', value: evidence.objectLockQuality, impact: objectIssue ? 'negative' : 'positive' },
       { label: 'Contact', value: evidence.fingerSegmentContactScore, impact: 'positive' },
+      { label: 'Contact gate', value: contactGateScore(evidence), impact: noContact ? 'negative' : 'positive' },
       { label: 'Contact roles', value: roleCoverage(evidence.contactRoles), impact: 'positive' },
       { label: 'Finger wrap', value: evidence.fingerCurlScore, impact: 'positive' },
       { label: 'Thumb support', value: evidence.thumbSupportScore, impact: evidence.thumbSupportScore < 0.3 ? 'negative' : 'positive' },

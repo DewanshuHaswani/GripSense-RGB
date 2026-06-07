@@ -53,6 +53,7 @@ export type ObjectProfileV2 = {
   enabled: boolean;
   samples: ObjectTrainingSampleV2[];
   descriptor: number[];
+  exemplarDescriptors?: number[][];
   descriptorVariance: number;
   minTrainingQuality: number;
   recommendedViewCount: number;
@@ -71,6 +72,7 @@ export type ObjectProfileMatch = {
 } | null;
 
 export type ObjectProfileCandidate = {
+  candidateId: string;
   profileId: string;
   name: string;
   score: number;
@@ -80,6 +82,7 @@ export type ObjectProfileCandidate = {
   radiusY: number;
   aspectRatio: number;
   descriptorQuality: number;
+  scanRank?: number;
 };
 
 export type TrainObjectProfileResult =
@@ -98,6 +101,8 @@ export const RECOMMENDED_VIEW_COUNT = 3;
 export const OBJECT_MATCH_THRESHOLD = 0.62;
 export const OBJECT_SEARCH_THRESHOLD = 0.58;
 export const OBJECT_MATCH_MARGIN = 0.07;
+export const V5_OBJECT_MATCH_THRESHOLD = 0.56;
+export const V5_OBJECT_SEARCH_THRESHOLD = 0.52;
 
 export const browserObjectDescriptorProvider: ObjectDescriptorProvider = {
   describe: describeObjectPatch,
@@ -469,6 +474,7 @@ export function trainObjectProfileV2(
       enabled: true,
       samples,
       descriptor,
+      exemplarDescriptors: descriptorVectors.slice(0, 96).map((vector) => [...vector]),
       descriptorVariance: descriptorVariance(descriptorVectors, descriptor),
       minTrainingQuality: Math.min(...samples.map((sample) => sample.quality)),
       recommendedViewCount: RECOMMENDED_VIEW_COUNT,
@@ -483,15 +489,25 @@ export function trainObjectProfileV2(
 
 export function matchObjectProfiles(
   descriptor: ObjectDescriptor | null,
-  profiles: ObjectProfileV2[]
+  profiles: ObjectProfileV2[],
+  options: { threshold?: number; margin?: number; useExemplars?: boolean } = {}
 ): ObjectProfileMatch {
   if (!descriptor || !profiles.length || descriptor.quality < 0.36) return null;
+  const threshold = options.threshold ?? OBJECT_MATCH_THRESHOLD;
+  const margin = options.margin ?? OBJECT_MATCH_MARGIN;
   const ranked = profiles
     .map((profile) => {
       const distance = descriptorDistance(descriptor.vector, profile.descriptor);
+      const exemplarDistance =
+        options.useExemplars && profile.exemplarDescriptors?.length
+          ? Math.min(...profile.exemplarDescriptors.map((vector) => descriptorDistance(descriptor.vector, vector)))
+          : distance;
+      const blendedDistance = Math.min(distance * 0.72 + exemplarDistance * 0.28, exemplarDistance * 1.08, distance);
       const tolerance = clamp(0.48 + profile.descriptorVariance * 1.6, 0.48, 0.78);
       const qualityFactor = clamp(descriptor.quality * 0.68 + profile.minTrainingQuality * 0.32, 0.35, 1);
-      const positiveScore = clamp((1 - distance / tolerance) * qualityFactor);
+      const strengthBoost =
+        profile.strength === 'robust profile' ? 0.05 : profile.strength === 'good profile' ? 0.025 : 0;
+      const positiveScore = clamp((1 - blendedDistance / tolerance) * qualityFactor + strengthBoost);
       const negativeDistance = profile.negativeDescriptor ? descriptorDistance(descriptor.vector, profile.negativeDescriptor) : 1;
       const negativePenalty = profile.negativeDescriptor ? clamp((1 - negativeDistance / 0.52) * 0.38) : 0;
       const coverageBoost = clamp((profile.coverageScore ?? 0.35) * 0.08, 0, 0.08);
@@ -500,7 +516,7 @@ export function matchObjectProfiles(
         profileId: profile.id,
         name: profile.name,
         score,
-        matched: score >= OBJECT_MATCH_THRESHOLD
+        matched: score >= threshold
       };
     })
     .sort((a, b) => b.score - a.score);
@@ -509,8 +525,8 @@ export function matchObjectProfiles(
   const runnerUp = ranked[1];
   const ambiguous =
     Boolean(runnerUp) &&
-    best.score - (runnerUp?.score ?? 0) < OBJECT_MATCH_MARGIN &&
-    (runnerUp?.score ?? 0) > OBJECT_MATCH_THRESHOLD * 0.82;
+    best.score - (runnerUp?.score ?? 0) < margin &&
+    (runnerUp?.score ?? 0) > threshold * 0.82;
   return {
     ...best,
     matched: best.matched && !ambiguous
@@ -521,32 +537,52 @@ export function findObjectProfileCandidates(
   video: HTMLVideoElement,
   profiles: ObjectProfileV2[],
   hand: Landmark[] | null,
-  limit = 6
+  limitOrOptions: number | { limit?: number; scanMode?: 'hand-corridor' | 'all-frame'; targetProfileId?: string | null; relaxed?: boolean } = 6
 ): ObjectProfileCandidate[] {
-  if (!profiles.length || !video.videoWidth || !video.videoHeight) return [];
-  const centers = candidateCenters(video, hand);
-  const sizes = candidateSizes(video, hand);
+  const options =
+    typeof limitOrOptions === 'number'
+      ? { limit: limitOrOptions, scanMode: 'hand-corridor' as const, targetProfileId: null, relaxed: false }
+      : {
+          limit: limitOrOptions.limit ?? 6,
+          scanMode: limitOrOptions.scanMode ?? 'hand-corridor',
+          targetProfileId: limitOrOptions.targetProfileId ?? null,
+          relaxed: limitOrOptions.relaxed ?? false
+        };
+  const searchableProfiles = options.targetProfileId ? profiles.filter((profile) => profile.id === options.targetProfileId) : profiles;
+  if (!searchableProfiles.length || !video.videoWidth || !video.videoHeight) return [];
+  const centers = candidateCenters(video, hand, options.scanMode);
+  const sizes = candidateSizes(video, hand, options.scanMode);
   const candidatesByProfile = new Map<string, ObjectProfileCandidate>();
+  const threshold = options.relaxed ? V5_OBJECT_MATCH_THRESHOLD : OBJECT_MATCH_THRESHOLD;
+  const searchThreshold = options.relaxed ? V5_OBJECT_SEARCH_THRESHOLD : OBJECT_SEARCH_THRESHOLD;
+  let scanRank = 0;
 
   for (const center of centers) {
     for (const size of sizes) {
+      scanRank += 1;
       const descriptor = describeVideoSquare(video, center, size);
       if (!descriptor || descriptor.quality < 0.28) continue;
-      const match = matchObjectProfiles(descriptor, profiles);
+      const match = matchObjectProfiles(descriptor, searchableProfiles, {
+        threshold,
+        margin: options.relaxed ? OBJECT_MATCH_MARGIN * 0.75 : OBJECT_MATCH_MARGIN,
+        useExemplars: options.relaxed
+      });
       if (!match) continue;
-      const profile = profiles.find((item) => item.id === match.profileId);
+      const profile = searchableProfiles.find((item) => item.id === match.profileId);
       if (!profile) continue;
       const aspectRatio = averageProfileAspectRatio(profile);
       const candidate = {
+        candidateId: `${match.profileId}-${scanRank}`,
         profileId: match.profileId,
         name: match.name,
         score: match.score,
-        matched: match.score >= OBJECT_SEARCH_THRESHOLD,
+        matched: match.score >= searchThreshold,
         center,
         radiusX: size * 0.26,
         radiusY: size * 0.26 * Math.min(2.6, Math.max(1, aspectRatio)),
         aspectRatio,
-        descriptorQuality: descriptor.quality
+        descriptorQuality: descriptor.quality,
+        scanRank
       };
       const existing = candidatesByProfile.get(match.profileId);
       if (!existing || candidate.score > existing.score) {
@@ -557,7 +593,7 @@ export function findObjectProfileCandidates(
 
   return Array.from(candidatesByProfile.values())
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .slice(0, options.limit);
 }
 
 export function objectRegionFromProfileCandidate(candidate: ObjectProfileCandidate, previous: ObjectRegion | null): ObjectRegion {
@@ -609,7 +645,20 @@ function describeVideoSquare(video: HTMLVideoElement, center: Point, size: numbe
   return describeImageData(context.getImageData(0, 0, DESCRIPTOR_SIZE, DESCRIPTOR_SIZE), object);
 }
 
-function candidateCenters(video: HTMLVideoElement, hand: Landmark[] | null) {
+function candidateCenters(video: HTMLVideoElement, hand: Landmark[] | null, scanMode: 'hand-corridor' | 'all-frame' = 'hand-corridor') {
+  if (scanMode === 'all-frame') {
+    const xs = [0.22, 0.38, 0.5, 0.62, 0.78];
+    const ys = [0.24, 0.38, 0.52, 0.66, 0.8];
+    const grid = xs.flatMap((x) => ys.map((y) => ({ x: video.videoWidth * x, y: video.videoHeight * y })));
+    if (!hand?.length) return grid;
+    const palm = palmCenter(hand);
+    const tips = fingertipPoints(hand);
+    return [
+      averagePoint([palm, averagePoint(tips), hand[8], hand[12], hand[16]]),
+      ...tips,
+      ...grid
+    ].map((point) => ({ x: clamp(point.x, 0, video.videoWidth), y: clamp(point.y, 0, video.videoHeight) }));
+  }
   if (!hand?.length) {
     return [
       { x: video.videoWidth * 0.5, y: video.videoHeight * 0.5 },
@@ -637,9 +686,10 @@ function candidateCenters(video: HTMLVideoElement, hand: Landmark[] | null) {
   }));
 }
 
-function candidateSizes(video: HTMLVideoElement, hand: Landmark[] | null) {
+function candidateSizes(video: HTMLVideoElement, hand: Landmark[] | null, scanMode: 'hand-corridor' | 'all-frame' = 'hand-corridor') {
   const base = hand ? handSize(hand) : Math.min(video.videoWidth, video.videoHeight) * 0.26;
-  return [base * 0.55, base * 0.78, base * 1.02].map((size) => clamp(size, 42, Math.min(video.videoWidth, video.videoHeight) * 0.72));
+  const multipliers = scanMode === 'all-frame' ? [0.42, 0.58, 0.78, 1.02, 1.28] : [0.55, 0.78, 1.02];
+  return multipliers.map((size) => clamp(base * size, 42, Math.min(video.videoWidth, video.videoHeight) * 0.72));
 }
 
 function averageProfileAspectRatio(profile: ObjectProfileV2) {

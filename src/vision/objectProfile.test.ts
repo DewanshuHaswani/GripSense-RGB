@@ -60,6 +60,32 @@ describe('object profile v2', () => {
     expect(match?.score).toBeGreaterThan(0.62);
   });
 
+  it('uses exemplar descriptors so one good trained view can still match in V5', () => {
+    const result = trainObjectProfileV2('Bottle', [
+      sample('front', descriptor([0.78, 0.08, 0.06, 0.08])),
+      sample('side', descriptor([0.08, 0.76, 0.08, 0.08])),
+      sample('rotated', descriptor([0.08, 0.08, 0.76, 0.08])),
+      sample('in-hand', descriptor([0.06, 0.08, 0.1, 0.76]))
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const centroidOnly = matchObjectProfiles(descriptor([0.78, 0.08, 0.06, 0.08]), [result.profile], {
+      useExemplars: false,
+      threshold: 0.56,
+      margin: 0.04
+    });
+    const exemplarMatch = matchObjectProfiles(descriptor([0.78, 0.08, 0.06, 0.08]), [result.profile], {
+      useExemplars: true,
+      threshold: 0.56,
+      margin: 0.04
+    });
+
+    expect(centroidOnly?.score ?? 0).toBeLessThan(exemplarMatch?.score ?? 0);
+    expect(exemplarMatch?.matched).toBe(true);
+  });
+
+
   it('does not match a different object descriptor', () => {
     const result = trainObjectProfileV2('Bottle', [
       sample('a', descriptor([0.7, 0.1, 0.1, 0.1])),
@@ -114,6 +140,7 @@ describe('object profile v2', () => {
   it('turns a trained-object candidate into a tracked object region', () => {
     const object = objectRegionFromProfileCandidate(
       {
+        candidateId: 'phone-profile-1',
         profileId: 'phone-profile',
         name: 'Phone',
         score: 0.84,
@@ -137,6 +164,7 @@ describe('object profile v2', () => {
   it('does not inherit lock history from a different trained profile', () => {
     const previous = objectRegionFromProfileCandidate(
       {
+        candidateId: 'remote-profile-1',
         profileId: 'remote-profile',
         name: 'Remote',
         score: 0.9,
@@ -154,6 +182,7 @@ describe('object profile v2', () => {
 
     const next = objectRegionFromProfileCandidate(
       {
+        candidateId: 'phone-profile-1',
         profileId: 'phone-profile',
         name: 'Phone',
         score: 0.88,
