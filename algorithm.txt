@@ -1,0 +1,92 @@
+GripSense RGB Algorithm Notes
+=============================
+
+Project goal
+------------
+GripSense RGB estimates whether a visible hand is holding a visible object using only an RGB camera or an uploaded RGB video. It does not measure true grip force. The percentage shown by the app is a visual grip stability estimate based on hand pose, object proximity, object lock quality, contact evidence, and temporal consistency.
+
+Main pipeline
+-------------
+1. Video input
+   The app can run in live webcam mode or offline video mode. Live mode processes the current camera frame. Offline mode plays an uploaded video and builds a timeline so the app can smooth evidence across time.
+
+2. Hand tracking
+   MediaPipe Hand Landmarker finds 21 hand landmarks. These landmarks are converted from normalized coordinates to screen pixels. A stabilizer smooths the points so the hand skeleton does not jump too much between frames.
+
+3. Base object candidates
+   The app uses the MediaPipe object detector when it has a useful detection. Each detected object is given a stable local ID such as B1, B2, B3. Labels are optional because labels from the base detector can be wrong for unusual objects. For grip analysis, the ID and bounding box are more important than the label.
+
+4. Class filtering
+   Some classes are unsafe for grip tracking. Person is disabled by default because otherwise the app may treat the user face or body as the object. The right panel lets the user enable or disable detected classes.
+
+5. Target selection
+   In V5, the app is target-first. The user selects one object ID from the right panel. After that, the overlay focuses on that selected target instead of drawing every object. This reduces confusion and prevents the grip scorer from switching objects every frame.
+
+6. Temporal identity
+   A single frame is not trusted. The selected object must remain plausible over several frames before the app marks it active. The tracker uses box overlap, center distance, size similarity, and hand proximity to keep the same object ID while it moves.
+
+7. Object lock quality
+   Object lock quality answers: is the app following a stable object region? It is based on detector confidence, temporal continuity, target selection, object size sanity checks, and proximity to the hand grasp corridor.
+
+8. Grip mode classification
+   The hand pose is classified into modes such as phone-side grip, power grip, pinch grip, hook grip, open hand, or uncertain. Different modes use different scoring weights. A bottle/can-like grip should rely more on wrap and palm support; a phone-side grip should rely more on side contact and thumb/finger opposition.
+
+9. Grip evidence
+   The grip score combines these visual signals:
+   - Finger curl: are the fingers bent around the object?
+   - Segment contact: are finger segments close to or overlapping the object region?
+   - Thumb support: is the thumb opposing the fingers?
+   - Palm containment: is the object between palm and fingers?
+   - Object-hand coupling: does the object move with the hand?
+   - Slip risk: is there persistent relative motion between object and hand?
+   - Object identity match: if a trained profile is enabled, does the current object look like that profile?
+
+10. Contact gate
+    V5 prevents a high grip score when the object has moved away from the hand. Even if the previous frame looked good, the app requires current contact or very recent contact before showing a strong grip.
+
+11. Offline mode
+    Offline mode is allowed to be slower and more stable than live mode. It uses lower object candidate thresholds, a hand-near-object fallback, a color/object fallback for saturated objects such as green cans, and timeline smoothing. This mode is better for review and export because it can build CSV/JSON data over the whole clip.
+
+12. Export
+    Offline mode exports CSV and JSON timeline files. It also exports an annotated video. WebM is the most reliable browser format. MP4 is offered when the browser supports MP4 through MediaRecorder. If the browser cannot encode MP4 directly, the app explains that WebM should be used or converted with ffmpeg.
+
+Why object labels can be wrong
+------------------------------
+The base detector was trained on generic classes. A green can may be labeled as toothbrush, scissors, remote, or another class depending on lighting, blur, and pose. This is why V5 can hide labels and show only stable object IDs. For grip analysis, the exact class name is less important than tracking the same physical object near the hand.
+
+Why training is fast
+--------------------
+Current browser training is not neural-network fine tuning. It creates a local visual profile using image descriptors, augmentation, masked crops, color, texture, edge, and shape signals. This is fast and private, but it is not the same as training CLIP, DINO, YOLO, or a segmentation model. Real training would require a backend or local GPU/CPU pipeline, labeled data, validation, and model export.
+
+Recommended real-training upgrade
+---------------------------------
+For a production V6, use one of these:
+1. Object detector fine tuning
+   Fine tune YOLO/RT-DETR/DETR on captured object images and negative frames. Export to ONNX or TensorFlow Lite for browser or on-device inference.
+
+2. Embedding-based recognition
+   Use CLIP/DINO/SigLIP-style image embeddings. Store multiple object view embeddings. During inference, compare the current crop embedding to the enabled object profile. This is stronger across lighting and viewpoint changes than handcrafted descriptors.
+
+3. Segmentation-assisted tracking
+   Use a segmentation model such as SAM-style prompting or a lightweight mobile segmentation network to separate object pixels from hand and background. This would improve contact detection and reduce false object boxes.
+
+4. Temporal video model
+   Use previous and future frames in offline mode to smooth object identity, reject one-frame false positives, and detect slip events more reliably.
+
+Limitations
+-----------
+- RGB-only cannot measure physical force.
+- Occlusion is hard: fingers may hide the object or the object may hide the fingers.
+- Motion blur reduces detector quality.
+- Generic detector labels are not reliable for arbitrary household objects.
+- Webcam lighting and reflections can make a bottle/can look like another class.
+- Current browser training is a descriptor profile, not deep model fine tuning.
+
+Best demo workflow
+------------------
+1. Open V5.
+2. Turn labels off and use object IDs for clarity.
+3. Disable person class.
+4. Select the object ID closest to the hand.
+5. For live demo, keep the object visible and avoid very fast movement.
+6. For a stronger result, use offline review and export CSV, JSON, or annotated video.

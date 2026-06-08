@@ -223,6 +223,7 @@ export default function App() {
   const draggingObjectRef = useRef(false);
   const lockObjectRef = useRef(false);
   const pausedRef = useRef(false);
+  const mediaModeRef = useRef<'live' | 'offline'>('live');
   const mirroredRef = useRef(true);
   const lastDetectorRunRef = useRef(0);
   const detectorBoxRef = useRef<DetectedObjectBox | null>(null);
@@ -240,6 +241,7 @@ export default function App() {
   const temporalIdentityRef = useRef<TemporalIdentityState>(EMPTY_TEMPORAL_IDENTITY);
   const targetProfileIdRef = useRef<string | null>(null);
   const targetBaseIdRef = useRef<string | null>(null);
+  const analysisRef = useRef<GripAnalysis>(createEmptyAnalysis());
   const showObjectLabelsRef = useRef(false);
   const baseClassEnabledRef = useRef<Record<string, boolean>>({ person: false });
   const offlineTimelineRef = useRef<OfflineTimelinePoint[]>([]);
@@ -275,6 +277,8 @@ export default function App() {
   const [mediaMode, setMediaMode] = useState<'live' | 'offline'>('live');
   const [offlineVideoName, setOfflineVideoName] = useState('');
   const [offlineAnalysisPhase, setOfflineAnalysisPhase] = useState<'idle' | 'processing' | 'reviewing' | 'complete'>('idle');
+  const [offlineVideoExporting, setOfflineVideoExporting] = useState(false);
+  const [offlineVideoExportStatus, setOfflineVideoExportStatus] = useState('');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
   const [analysis, setAnalysis] = useState<GripAnalysis>(() => createEmptyAnalysis());
   const [mirrored, setMirrored] = useState(true);
@@ -319,6 +323,14 @@ export default function App() {
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
+
+  useEffect(() => {
+    mediaModeRef.current = mediaMode;
+  }, [mediaMode]);
+
+  useEffect(() => {
+    analysisRef.current = analysis;
+  }, [analysis]);
 
   useEffect(() => {
     lockObjectRef.current = locked;
@@ -466,6 +478,7 @@ export default function App() {
       video.removeAttribute('src');
       video.srcObject = stream;
       await video.play();
+      mediaModeRef.current = 'live';
       setMediaMode('live');
       setOfflineVideoName('');
       setOfflineAnalysisPhase('idle');
@@ -504,6 +517,7 @@ export default function App() {
     video.src = url;
     video.loop = false;
     video.muted = true;
+    mediaModeRef.current = 'offline';
     setMediaMode('offline');
     setOfflineVideoName(file.name);
     setOfflineAnalysisPhase('processing');
@@ -663,7 +677,7 @@ export default function App() {
       let frameAnalysis = analysis;
 
       if (!pausedRef.current) {
-        const offlineReview = mediaMode === 'offline';
+        const offlineReview = mediaModeRef.current === 'offline';
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
@@ -869,7 +883,10 @@ export default function App() {
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
-        if (mediaMode === 'offline' && timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS) {
+        if (
+          mediaModeRef.current === 'offline' &&
+          (timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS || offlineTimelineRef.current.length === 0)
+        ) {
           lastOfflineTimelineRef.current = timestamp;
           const point = {
             time: video.currentTime,
@@ -1443,6 +1460,91 @@ export default function App() {
     downloadTextFile(`${fileBase}.${format}`, payload, format === 'json' ? 'application/json' : 'text/csv');
   }, [offlineVideoName]);
 
+  const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm') => {
+    const video = videoRef.current;
+    const overlay = canvasRef.current;
+    if (mediaModeRef.current !== 'offline' || !video || !overlay || !video.duration || Number.isNaN(video.duration)) {
+      setOfflineVideoExportStatus('Upload an offline video first.');
+      return;
+    }
+
+    const composite = document.createElement('canvas');
+    composite.width = video.videoWidth || overlay.width;
+    composite.height = video.videoHeight || overlay.height;
+    const ctx = composite.getContext('2d');
+    if (!ctx || !('captureStream' in composite) || typeof MediaRecorder === 'undefined') {
+      setOfflineVideoExportStatus('This browser cannot export annotated video.');
+      return;
+    }
+
+    const captureStream = composite.captureStream(30);
+    const supportedType = mediaRecorderTypeFor(format);
+    if (!supportedType) {
+      setOfflineVideoExportStatus(
+        format === 'mp4'
+          ? 'MP4 export is not supported by this browser. Use WebM here, or convert with ffmpeg.'
+          : 'WebM export is not supported by this browser.'
+      );
+      return;
+    }
+    const recorder = new MediaRecorder(captureStream, supportedType ? { mimeType: supportedType } : undefined);
+    const chunks: BlobPart[] = [];
+    const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const previousTime = video.currentTime;
+    const wasPaused = video.paused;
+    let raf = 0;
+    let stopped = false;
+
+    const finish = () => {
+      if (stopped) return;
+      stopped = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (recorder.state !== 'inactive') recorder.stop();
+      captureStream.getTracks().forEach((track) => track.stop());
+      video.removeEventListener('ended', finish);
+    };
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: supportedType });
+      downloadBlobFile(`${fileBase}-annotated.${format}`, blob);
+      setOfflineVideoExporting(false);
+      setOfflineVideoExportStatus(`Downloaded ${fileBase}-annotated.${format}`);
+      video.currentTime = Math.min(previousTime, video.duration || previousTime);
+      if (wasPaused) video.pause();
+    };
+
+    const drawFrame = () => {
+      ctx.clearRect(0, 0, composite.width, composite.height);
+      ctx.drawImage(video, 0, 0, composite.width, composite.height);
+      ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
+      drawOfflineExportHud(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current.length, offlineVideoName);
+      if (!video.ended && video.currentTime < video.duration - 0.04) {
+        raf = requestAnimationFrame(drawFrame);
+      } else {
+        finish();
+      }
+    };
+
+    try {
+      setOfflineVideoExporting(true);
+      setOfflineVideoExportStatus('Rendering annotated video...');
+      setOfflineAnalysisPhase('reviewing');
+      video.currentTime = 0;
+      await video.play();
+      recorder.start(500);
+      video.addEventListener('ended', finish, { once: true });
+      drawFrame();
+    } catch {
+      finish();
+      setOfflineVideoExporting(false);
+      setOfflineVideoExportStatus('Video export could not start. Try pressing play once, then export again.');
+    }
+  }, [offlineVideoName]);
+
   return (
     <main className={mediaMode === 'offline' ? 'app-shell offline-shell' : 'app-shell'}>
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
@@ -1643,7 +1745,14 @@ export default function App() {
                 <button type="button" onClick={() => exportOfflineTimeline('json')} disabled={!offlineTimeline.length}>
                   JSON
                 </button>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting}>
+                  {offlineVideoExporting ? 'Rendering' : 'MP4'}
+                </button>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting}>
+                  WebM
+                </button>
               </div>
+              {offlineVideoExportStatus && <p className="offline-export-status">{offlineVideoExportStatus}</p>}
             </div>
           </div>
         )}
@@ -2436,6 +2545,73 @@ function downloadTextFile(filename: string, text: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function downloadBlobFile(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function mediaRecorderTypeFor(format: 'mp4' | 'webm') {
+  const candidates =
+    format === 'mp4'
+      ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=h264', 'video/mp4']
+      : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+}
+
+function drawOfflineExportHud(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  analysis: GripAnalysis,
+  timelinePoints: number,
+  videoName: string
+) {
+  const panelWidth = Math.min(360, width * 0.34);
+  const panelHeight = 156;
+  const x = 24;
+  const y = Math.max(24, height - panelHeight - 24);
+  ctx.save();
+  ctx.fillStyle = 'rgba(5, 12, 22, 0.62)';
+  ctx.strokeStyle = 'rgba(190, 242, 255, 0.42)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, x, y, panelWidth, panelHeight, 14);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#67e8f9';
+  ctx.font = '700 15px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText('OFFLINE GRIP REVIEW', x + 18, y + 30);
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 52px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(`${analysis.gripPercentage}%`, x + 18, y + 84);
+
+  ctx.font = '700 20px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(analysis.guidance, x + 18, y + 112);
+
+  ctx.fillStyle = 'rgba(226, 232, 240, 0.88)';
+  ctx.font = '500 13px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  const source = videoName || 'Uploaded video';
+  ctx.fillText(`${source.slice(0, 32)}${source.length > 32 ? '...' : ''}`, x + 18, y + 134);
+  ctx.fillText(`Timeline points: ${timelinePoints}`, x + 18, y + 152);
+  ctx.restore();
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
 function profileLiveStatus(
   profile: ObjectProfileV2,
   detection: ObjectProfileMatch,
@@ -2569,11 +2745,11 @@ function selectOfflineHandObjectCandidate(candidates: BaseObjectCandidate[], han
 }
 
 function offlineCandidateConfidence(candidate: BaseObjectCandidate, hand: Landmark[] | null) {
-  if (!hand) return candidate.score;
+  if (!hand) return clampUnit(Math.max(0.42, candidate.score));
   const affinity = baseCandidateHandAffinity(candidate, hand);
   const detectorScore = candidate.score;
   const continuity = candidate.missedFrames === 0 ? 0.08 : -0.08 * candidate.missedFrames;
-  return clampUnit(affinity * 0.72 + detectorScore * 0.28 + continuity);
+  return clampUnit(Math.max(0.42, affinity * 0.72 + detectorScore * 0.28 + continuity));
 }
 
 let offlinePixelCanvas: HTMLCanvasElement | null = null;
@@ -2647,7 +2823,7 @@ function inferOfflinePixelObjectCandidate(video: HTMLVideoElement, previous: Obj
   const y = clampNumber(minY * scaleY - paddingY, 0, video.videoHeight - 1);
   const width = clampNumber((maxX - minX) * scaleX + paddingX * 2, 36, video.videoWidth - x);
   const height = clampNumber((maxY - minY) * scaleY + paddingY * 2, 36, video.videoHeight - y);
-  const confidence = clampUnit(0.2 + (scoreTotal / Math.max(1, count)) * 0.9 + Math.min(0.18, count / 2400));
+  const confidence = clampUnit(Math.max(0.5, 0.28 + (scoreTotal / Math.max(1, count)) * 1.05 + Math.min(0.22, count / 2200)));
   return baseCandidateFromRect(makeDomRectLike(x, y, width, height), 'offline-object', confidence, 0, 9001);
 }
 
