@@ -237,7 +237,7 @@ export function analyzeGrip(
   );
   const v5ContactGate = contactGateScore(evidence);
   const v5NoContact =
-    fallbackAlgorithmVersion === 'v5' &&
+    (fallbackAlgorithmVersion === 'v5' || fallbackAlgorithmVersion === 'v6') &&
     evidence.objectLockQuality >= 0.38 &&
     v5ContactGate < 0.28;
   if (v5NoContact) {
@@ -595,7 +595,7 @@ function identityBlocksStrongGrip(identity: ObjectIdentitySignal, algorithmVersi
 }
 
 function usesObjectIdentityGate(algorithmVersion: AlgorithmVersion) {
-  return algorithmVersion === 'v2' || algorithmVersion === 'v4' || algorithmVersion === 'v5';
+  return algorithmVersion === 'v2' || algorithmVersion === 'v4' || algorithmVersion === 'v5' || algorithmVersion === 'v6';
 }
 
 function computeGripState(

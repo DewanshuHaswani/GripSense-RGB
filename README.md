@@ -34,8 +34,9 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v3`
 - `http://127.0.0.1:5173/?version=v4`
 - `http://127.0.0.1:5173/?version=v5`
+- `http://127.0.0.1:5173/?version=v6`
 
-The toolbar also has a `V1` / `V2` / `V3` / `V4` / `V5` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` / `V2` / `V3` / `V4` / `V5` / `V6` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ## Offline Video Review
 
@@ -119,6 +120,24 @@ V5 addresses four practical issues:
 - **Contact gate**: even if the selected target is detected, V5 requires current visual contact between the target and the hand. If the object drops away from the hand, a previous lock cannot keep the grip percentage high.
 
 Training still remains local and browser-only. It is not true neural fine-tuning of the base detector weights. Instead, it builds a local object identity profile on top of the base detector pipeline. The crop/mask review now supports direct dragging: drag the crop rectangle to move it, drag the lower-right handle to resize it, or use the existing sliders for precise adjustment. Weak training images are warned, not blocked.
+
+## Version 6: Offline V2 Tracking For Live Video
+
+V6 keeps V5's contact-gated grip scoring, but replaces the live object acquisition path with the stronger Offline V2 tracking strategy:
+
+```text
+live hand landmarks -> hand-near object candidates -> sticky target track -> contact-gated grip score
+```
+
+V6 is useful when the generic detector label is unstable or wrong. Instead of trusting a single frame, V6 keeps a stable object track using:
+
+- **Track first, classify second**: V6 follows the object-like region near the hand before caring about the class label.
+- **Short miss tolerance**: if the detector misses the object for a few frames because of blur or occlusion, V6 keeps the previous object region alive.
+- **Hand-object proximity**: an object inside or close to the hand corridor can stay active even when the generic detector is uncertain.
+- **Label ignoring for sticky tracking**: V6 can track a can even if the base detector temporarily calls it `toothbrush`, `remote`, or `person`.
+- **Same safety gate as V5**: grip percentage still requires visible contact, so an object that moves away from the hand should not keep a high score.
+
+Use V5 when you want explicit target selection and stricter behavior. Use V6 when you want the live camera to behave more like the improved offline review.
 
 ## Version 3: Trained Object Focus
 

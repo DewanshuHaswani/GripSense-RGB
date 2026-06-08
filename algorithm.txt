@@ -20,7 +20,7 @@ Main pipeline
    Some classes are unsafe for grip tracking. Person is disabled by default because otherwise the app may treat the user face or body as the object. The right panel lets the user enable or disable detected classes.
 
 5. Target selection
-   In V5, the app is target-first. The user selects one object ID from the right panel. After that, the overlay focuses on that selected target instead of drawing every object. This reduces confusion and prevents the grip scorer from switching objects every frame.
+   In V5, the app is target-first. The user selects one object ID from the right panel. After that, the overlay focuses on that selected target instead of drawing every object. V6 can also accept a selected target, but it can auto-follow the best hand-near object using the Offline V2 sticky tracker.
 
 6. Temporal identity
    A single frame is not trusted. The selected object must remain plausible over several frames before the app marks it active. The tracker uses box overlap, center distance, size similarity, and hand proximity to keep the same object ID while it moves.
@@ -42,7 +42,7 @@ Main pipeline
    - Object identity match: if a trained profile is enabled, does the current object look like that profile?
 
 10. Contact gate
-    V5 prevents a high grip score when the object has moved away from the hand. Even if the previous frame looked good, the app requires current contact or very recent contact before showing a strong grip.
+    V5 and V6 prevent a high grip score when the object has moved away from the hand. Even if the previous frame looked good, the app requires current contact or very recent contact before showing a strong grip.
 
 11. Offline mode
     Offline mode is allowed to be slower and more stable than live mode. It has two selectable paths:
@@ -52,12 +52,15 @@ Main pipeline
 12. Offline V2 final report
     Offline V2 builds a timeline while the uploaded video plays. When the video ends, it smooths the timeline using neighboring past and future points. This reduces one-frame flicker, so a frame between two strong object matches is less likely to become "object not locked." The final CSV/JSON/video export uses this corrected timeline.
 
-13. Export
+13. Live V6
+    V6 brings the Offline V2 track-first idea into live camera mode. It scans reasonable object candidates, ignores unreliable class labels for sticky target tracking, chooses the object-like region closest to the hand, keeps it alive through short detector misses, and then uses V5's contact-gated grip scoring. V6 is meant for live demos where the object is visible but labels and detector confidence fluctuate.
+
+14. Export
     Offline mode exports CSV and JSON timeline files. It also exports an annotated video. WebM is the most reliable browser format. MP4 is offered when the browser supports MP4 through MediaRecorder. If the browser cannot encode MP4 directly, the app explains that WebM should be used or converted with ffmpeg.
 
 Why object labels can be wrong
 ------------------------------
-The base detector was trained on generic classes. A green can may be labeled as toothbrush, scissors, remote, or another class depending on lighting, blur, and pose. This is why V5 can hide labels and show only stable object IDs. For grip analysis, the exact class name is less important than tracking the same physical object near the hand.
+The base detector was trained on generic classes. A green can may be labeled as toothbrush, scissors, remote, or another class depending on lighting, blur, and pose. This is why V5 can hide labels and show only stable object IDs. V6 goes further by ignoring labels for sticky hand-near tracking. For grip analysis, the exact class name is less important than tracking the same physical object near the hand.
 
 Why training is fast
 --------------------
@@ -89,7 +92,7 @@ Limitations
 
 Best demo workflow
 ------------------
-1. Open V5.
+1. Open V5 for strict target selection or V6 for sticky live tracking.
 2. Turn labels off and use object IDs for clarity.
 3. Disable person class.
 4. Select the object ID closest to the hand.
