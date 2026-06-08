@@ -45,9 +45,14 @@ Main pipeline
     V5 prevents a high grip score when the object has moved away from the hand. Even if the previous frame looked good, the app requires current contact or very recent contact before showing a strong grip.
 
 11. Offline mode
-    Offline mode is allowed to be slower and more stable than live mode. It uses lower object candidate thresholds, a hand-near-object fallback, a color/object fallback for saturated objects such as green cans, and timeline smoothing. This mode is better for review and export because it can build CSV/JSON data over the whole clip.
+    Offline mode is allowed to be slower and more stable than live mode. It has two selectable paths:
+    - Offline V1 keeps the original live-style review logic as a fallback.
+    - Offline V2 uses a track-first approach. Once an object-like region appears near the hand, V2 keeps that target alive through short detector misses by using hand proximity, previous object position, object size sanity checks, and color/shape continuity. Detector labels are ignored for V2 target identity because generic labels can be wrong for household objects.
 
-12. Export
+12. Offline V2 final report
+    Offline V2 builds a timeline while the uploaded video plays. When the video ends, it smooths the timeline using neighboring past and future points. This reduces one-frame flicker, so a frame between two strong object matches is less likely to become "object not locked." The final CSV/JSON/video export uses this corrected timeline.
+
+13. Export
     Offline mode exports CSV and JSON timeline files. It also exports an annotated video. WebM is the most reliable browser format. MP4 is offered when the browser supports MP4 through MediaRecorder. If the browser cannot encode MP4 directly, the app explains that WebM should be used or converted with ffmpeg.
 
 Why object labels can be wrong

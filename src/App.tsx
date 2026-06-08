@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
 import { analyzeGripV3 } from './vision/v3GripAnalysis';
-import { clamp as clampUnit, distance, ellipsePoint, handSize, palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
+import { clamp as clampUnit, distance, ellipsePoint, FINGERTIP_INDICES, handSize, palmCenter, pointsToPixelSpace, subtract } from './vision/geometry';
 import { inferObjectRegion } from './vision/objectTracking';
 import {
   browserObjectDescriptorProvider,
@@ -157,6 +157,16 @@ type OfflineTimelinePoint = {
   object: string;
 };
 
+type OfflineReviewVersion = 'v1' | 'v2';
+
+type OfflineV2TrackState = {
+  candidate: BaseObjectCandidate | null;
+  confidence: number;
+  ageFrames: number;
+  missedFrames: number;
+  lastSeenAt: number;
+};
+
 const METRIC_INFO = {
   confidence: 'How much the app trusts the object lock and tracking signal in this frame.',
   contacts: 'How many fingertip or finger-segment contacts appear close enough to support the object.',
@@ -246,6 +256,8 @@ export default function App() {
   const baseClassEnabledRef = useRef<Record<string, boolean>>({ person: false });
   const offlineTimelineRef = useRef<OfflineTimelinePoint[]>([]);
   const lastOfflineTimelineRef = useRef(0);
+  const offlineReviewVersionRef = useRef<OfflineReviewVersion>('v2');
+  const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -277,6 +289,7 @@ export default function App() {
   const [mediaMode, setMediaMode] = useState<'live' | 'offline'>('live');
   const [offlineVideoName, setOfflineVideoName] = useState('');
   const [offlineAnalysisPhase, setOfflineAnalysisPhase] = useState<'idle' | 'processing' | 'reviewing' | 'complete'>('idle');
+  const [offlineReviewVersion, setOfflineReviewVersion] = useState<OfflineReviewVersion>('v2');
   const [offlineVideoExporting, setOfflineVideoExporting] = useState(false);
   const [offlineVideoExportStatus, setOfflineVideoExportStatus] = useState('');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
@@ -327,6 +340,10 @@ export default function App() {
   useEffect(() => {
     mediaModeRef.current = mediaMode;
   }, [mediaMode]);
+
+  useEffect(() => {
+    offlineReviewVersionRef.current = offlineReviewVersion;
+  }, [offlineReviewVersion]);
 
   useEffect(() => {
     analysisRef.current = analysis;
@@ -523,6 +540,7 @@ export default function App() {
     setOfflineAnalysisPhase('processing');
     offlineTimelineRef.current = [];
     lastOfflineTimelineRef.current = 0;
+    offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     setOfflineTimeline([]);
     setCameraState('live');
     setPaused(false);
@@ -678,6 +696,7 @@ export default function App() {
 
       if (!pausedRef.current) {
         const offlineReview = mediaModeRef.current === 'offline';
+        const offlineV2Review = offlineReview && offlineReviewVersionRef.current === 'v2';
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
@@ -696,7 +715,8 @@ export default function App() {
             (candidate) =>
               isGripTargetEligible(candidate, video.videoWidth, video.videoHeight) &&
               (candidate.candidateId === targetBaseIdRef.current ||
-                (candidate.missedFrames === 0 && isBaseClassEnabled(candidate.label, baseClassEnabledRef.current)))
+                (candidate.missedFrames === 0 &&
+                  (offlineV2Review || isBaseClassEnabled(candidate.label, baseClassEnabledRef.current))))
           );
           setBaseClassSummary(summarizeBaseClasses(allBaseCandidates.filter((candidate) => candidate.missedFrames === 0), baseClassEnabledRef.current));
           baseObjectCandidatesRef.current = baseCandidates;
@@ -739,10 +759,26 @@ export default function App() {
           activeAlgorithmVersion === 'v5' && targetBaseIdRef.current
             ? (baseObjectCandidatesRef.current.find((candidate) => candidate.candidateId === targetBaseIdRef.current) ?? null)
             : null;
+        const offlineV2Track =
+          activeAlgorithmVersion === 'v5' && offlineV2Review && !selectedProfileTargetId
+            ? updateOfflineV2Track(
+                offlineV2TrackRef.current,
+                baseObjectCandidatesRef.current,
+                hand,
+                previousObjectRef.current,
+                video,
+                timestamp
+              )
+            : null;
+        if (offlineV2Review) {
+          offlineV2TrackRef.current = offlineV2Track ?? { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: timestamp };
+        }
         const offlineBaseCandidate =
           activeAlgorithmVersion === 'v5' && offlineReview && !selectedProfileTargetId
-            ? selectOfflineHandObjectCandidate(baseObjectCandidatesRef.current, hand) ??
-              inferOfflinePixelObjectCandidate(video, previousObjectRef.current)
+            ? offlineV2Review
+              ? offlineV2Track?.candidate ?? null
+              : selectOfflineHandObjectCandidate(baseObjectCandidatesRef.current, hand) ??
+                inferOfflinePixelObjectCandidate(video, previousObjectRef.current)
             : null;
         if (offlineReview && !hand && offlineBaseCandidate) {
           hand = createOfflineSurrogateHand(offlineBaseCandidate);
@@ -754,9 +790,11 @@ export default function App() {
               ? offlineBaseCandidate
               : null;
         const activeBaseConfidence =
-          activeBaseCandidate && offlineBaseCandidate === activeBaseCandidate
-            ? offlineCandidateConfidence(activeBaseCandidate, hand)
-            : activeBaseCandidate?.score ?? 0;
+          activeBaseCandidate && offlineV2Review && offlineV2Track?.candidate === activeBaseCandidate
+            ? offlineV2Track.confidence
+            : activeBaseCandidate && offlineBaseCandidate === activeBaseCandidate
+              ? offlineCandidateConfidence(activeBaseCandidate, hand)
+              : activeBaseCandidate?.score ?? 0;
         const bestProfileCandidate =
           profileFirstAlgorithm
             ? activeAlgorithmVersion === 'v5'
@@ -1460,6 +1498,16 @@ export default function App() {
     downloadTextFile(`${fileBase}.${format}`, payload, format === 'json' ? 'application/json' : 'text/csv');
   }, [offlineVideoName]);
 
+  const finalizeOfflineReview = useCallback(() => {
+    if (mediaModeRef.current !== 'offline') return;
+    if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
+      const smoothed = smoothOfflineTimeline(offlineTimelineRef.current);
+      offlineTimelineRef.current = smoothed;
+      setOfflineTimeline(smoothed);
+    }
+    setOfflineAnalysisPhase('complete');
+  }, []);
+
   const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm') => {
     const video = videoRef.current;
     const overlay = canvasRef.current;
@@ -1519,9 +1567,9 @@ export default function App() {
 
     const drawFrame = () => {
       ctx.clearRect(0, 0, composite.width, composite.height);
-      ctx.drawImage(video, 0, 0, composite.width, composite.height);
+      drawExportVideoFrame(ctx, video, composite.width, composite.height, mirroredRef.current);
       ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
-      drawOfflineExportHud(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current.length, offlineVideoName);
+      drawOfflineExportOverlay(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current, offlineVideoName);
       if (!video.ended && video.currentTime < video.duration - 0.04) {
         raf = requestAnimationFrame(drawFrame);
       } else {
@@ -1555,7 +1603,7 @@ export default function App() {
           muted
           controls={mediaMode === 'offline'}
           onPlay={() => mediaMode === 'offline' && setOfflineAnalysisPhase('reviewing')}
-          onEnded={() => mediaMode === 'offline' && setOfflineAnalysisPhase('complete')}
+          onEnded={finalizeOfflineReview}
         />
         <canvas
           ref={canvasRef}
@@ -1690,6 +1738,22 @@ export default function App() {
           <div className="offline-review-overlay" aria-label="Offline grip video review">
             <div className="offline-glass-panel offline-left">
               <p className="eyebrow">Offline review</p>
+              <div className="offline-version-toggle" aria-label="Offline review algorithm version">
+                <button
+                  type="button"
+                  className={offlineReviewVersion === 'v1' ? 'active' : ''}
+                  onClick={() => setOfflineReviewVersion('v1')}
+                >
+                  V1
+                </button>
+                <button
+                  type="button"
+                  className={offlineReviewVersion === 'v2' ? 'active' : ''}
+                  onClick={() => setOfflineReviewVersion('v2')}
+                >
+                  V2
+                </button>
+              </div>
               <h2>{analysis.gripPercentage}%</h2>
               <strong>{offlineAnalysisPhase === 'processing' ? 'Processing video' : analysis.guidance}</strong>
               <span>{offlineVideoName || 'Uploaded video'}</span>
@@ -2562,42 +2626,157 @@ function mediaRecorderTypeFor(format: 'mp4' | 'webm') {
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
 }
 
-function drawOfflineExportHud(
+function drawExportVideoFrame(
+  ctx: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+  mirrored: boolean
+) {
+  ctx.save();
+  if (mirrored) {
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, 0, 0, width, height);
+  ctx.restore();
+}
+
+function drawOfflineExportOverlay(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   analysis: GripAnalysis,
-  timelinePoints: number,
+  timeline: OfflineTimelinePoint[],
   videoName: string
 ) {
-  const panelWidth = Math.min(360, width * 0.34);
-  const panelHeight = 156;
-  const x = 24;
-  const y = Math.max(24, height - panelHeight - 24);
+  const margin = Math.max(18, Math.round(width * 0.018));
+  const leftWidth = Math.min(380, Math.max(260, width * 0.24));
+  const rightWidth = Math.min(420, Math.max(300, width * 0.28));
+  const leftHeight = 300;
+  const rightHeight = 370;
+  const bottom = Math.max(26, Math.round(height * 0.035));
+  const leftX = margin;
+  const leftY = Math.max(96, height - bottom - leftHeight);
+  const rightX = width - margin - rightWidth;
+  const rightY = Math.max(96, height - bottom - rightHeight);
+  drawExportGlassPanel(ctx, leftX, leftY, leftWidth, leftHeight);
+  drawExportGlassPanel(ctx, rightX, rightY, rightWidth, rightHeight);
+
+  drawExportText(ctx, 'OFFLINE REVIEW', leftX + 22, leftY + 34, 15, 800, '#67e8f9');
+  drawExportText(ctx, `${analysis.gripPercentage}%`, leftX + 22, leftY + 104, 74, 900, '#f8fafc');
+  drawExportText(ctx, analysis.guidance, leftX + 22, leftY + 142, 24, 800, '#f8fafc');
+  const source = videoName || 'Uploaded video';
+  drawExportText(ctx, `${source.slice(0, 33)}${source.length > 33 ? '...' : ''}`, leftX + 22, leftY + 176, 17, 600, 'rgba(226, 232, 240, 0.86)');
+  drawExportMiniRow(ctx, leftX, leftY + 208, leftWidth, 'State', analysis.diagnostics.state);
+  drawExportMiniRow(ctx, leftX, leftY + 242, leftWidth, 'Mode', analysis.diagnostics.mode);
+  drawExportMiniRow(ctx, leftX, leftY + 276, leftWidth, 'Timeline', `${timeline.length} pts`);
+
+  drawExportText(ctx, 'PARAMETERS', rightX + 22, rightY + 34, 15, 800, '#67e8f9');
+  const metrics = [
+    ['Confidence', analysis.confidence],
+    ['Lock', analysis.objectLockQuality],
+    ['Closure', analysis.closureScore],
+    ['Contact', analysis.evidence.fingerSegmentContactScore],
+    ['Thumb', analysis.thumbOpposition],
+    ['Slip', analysis.slipRisk]
+  ] as const;
+  metrics.forEach(([label, value], index) => {
+    drawExportMetric(ctx, rightX + 22, rightY + 66 + index * 42, rightWidth - 44, label, value, label === 'Slip');
+  });
+  drawExportTimeline(ctx, rightX + 22, rightY + 324, rightWidth - 44, 30, timeline);
+}
+
+function drawExportGlassPanel(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
   ctx.save();
-  ctx.fillStyle = 'rgba(5, 12, 22, 0.62)';
-  ctx.strokeStyle = 'rgba(190, 242, 255, 0.42)';
+  const gradient = ctx.createLinearGradient(x, y, x + width, y + height);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 0.22)');
+  gradient.addColorStop(1, 'rgba(8, 13, 20, 0.32)');
+  ctx.fillStyle = gradient;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
   ctx.lineWidth = 2;
-  roundRect(ctx, x, y, panelWidth, panelHeight, 14);
+  roundRect(ctx, x, y, width, height, 14);
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
+}
 
-  ctx.fillStyle = '#67e8f9';
-  ctx.font = '700 15px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.fillText('OFFLINE GRIP REVIEW', x + 18, y + 30);
+function drawExportText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  size: number,
+  weight: number,
+  color: string
+) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = `${weight} ${size}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
 
+function drawExportMiniRow(ctx: CanvasRenderingContext2D, panelX: number, y: number, panelWidth: number, label: string, value: string) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+  ctx.beginPath();
+  ctx.moveTo(panelX + 22, y - 20);
+  ctx.lineTo(panelX + panelWidth - 22, y - 20);
+  ctx.stroke();
+  drawExportText(ctx, label, panelX + 22, y, 17, 650, 'rgba(226, 232, 240, 0.75)');
+  ctx.textAlign = 'right';
   ctx.fillStyle = '#f8fafc';
-  ctx.font = '800 52px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.fillText(`${analysis.gripPercentage}%`, x + 18, y + 84);
+  ctx.font = '800 17px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(value, panelX + panelWidth - 22, y);
+  ctx.restore();
+}
 
-  ctx.font = '700 20px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.fillText(analysis.guidance, x + 18, y + 112);
+function drawExportMetric(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  label: string,
+  value: number,
+  danger = false
+) {
+  const percent = Math.round(value * 100);
+  drawExportText(ctx, label, x, y, 17, 750, 'rgba(226, 232, 240, 0.78)');
+  ctx.save();
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 17px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(`${percent}%`, x + width, y);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+  roundRect(ctx, x, y + 13, width, 8, 4);
+  ctx.fill();
+  const fill = Math.max(4, width * clampNumber(value, 0, 1));
+  ctx.fillStyle = danger ? 'rgba(248, 113, 113, 0.92)' : 'rgba(103, 232, 249, 0.92)';
+  roundRect(ctx, x, y + 13, fill, 8, 4);
+  ctx.fill();
+  ctx.restore();
+}
 
-  ctx.fillStyle = 'rgba(226, 232, 240, 0.88)';
-  ctx.font = '500 13px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-  const source = videoName || 'Uploaded video';
-  ctx.fillText(`${source.slice(0, 32)}${source.length > 32 ? '...' : ''}`, x + 18, y + 134);
-  ctx.fillText(`Timeline points: ${timelinePoints}`, x + 18, y + 152);
+function drawExportTimeline(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, timeline: OfflineTimelinePoint[]) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.54)';
+  roundRect(ctx, x, y, width, height, 8);
+  ctx.fill();
+  const points = timeline.slice(-60);
+  if (!points.length) {
+    drawExportText(ctx, 'Timeline building...', x + 12, y + 20, 13, 650, 'rgba(226, 232, 240, 0.72)');
+    ctx.restore();
+    return;
+  }
+  const gap = 2;
+  const barWidth = Math.max(2, (width - gap * (points.length - 1)) / points.length);
+  points.forEach((point, index) => {
+    const barHeight = Math.max(5, height * (point.grip / 100));
+    ctx.fillStyle = point.slip > 0.45 ? '#f87171' : point.weak ? '#facc15' : '#86efac';
+    roundRect(ctx, x + index * (barWidth + gap), y + height - barHeight, barWidth, barHeight, 2);
+    ctx.fill();
+  });
   ctx.restore();
 }
 
@@ -2752,6 +2931,60 @@ function offlineCandidateConfidence(candidate: BaseObjectCandidate, hand: Landma
   return clampUnit(Math.max(0.42, affinity * 0.72 + detectorScore * 0.28 + continuity));
 }
 
+function updateOfflineV2Track(
+  previousTrack: OfflineV2TrackState,
+  candidates: BaseObjectCandidate[],
+  hand: Landmark[] | null,
+  previousObject: ObjectRegion | null,
+  video: HTMLVideoElement,
+  timestamp: number
+): OfflineV2TrackState {
+  const pixelCandidate = inferOfflinePixelObjectCandidate(video, previousObject);
+  const pool = [...candidates.filter((candidate) => candidate.missedFrames <= 3), ...(pixelCandidate ? [pixelCandidate] : [])];
+  let best: { candidate: BaseObjectCandidate; confidence: number } | null = null;
+
+  for (const candidate of pool) {
+    if (!isOfflineV2CandidateSizeValid(candidate, video.videoWidth, video.videoHeight)) continue;
+    const handAffinity = hand ? offlineV2HandAffinity(candidate, hand) : 0.35;
+    const previousAffinity = previousObject ? offlineV2PreviousAffinity(candidate, previousObject) : 0;
+    const continuity =
+      previousTrack.candidate && previousTrack.candidate.candidateId === candidate.candidateId
+        ? Math.max(0.12, 0.28 - candidate.missedFrames * 0.04)
+        : 0;
+    const detectorSignal = Math.min(0.75, Math.max(0.18, candidate.score));
+    const confidence = clampUnit(handAffinity * 0.48 + previousAffinity * 0.28 + detectorSignal * 0.16 + continuity);
+    if (!best || confidence > best.confidence) best = { candidate, confidence };
+  }
+
+  if (best && best.confidence >= 0.16) {
+    return {
+      candidate: best.candidate,
+      confidence: Math.max(0.38, best.confidence),
+      ageFrames: previousTrack.candidate?.candidateId === best.candidate.candidateId ? previousTrack.ageFrames + 1 : 1,
+      missedFrames: 0,
+      lastSeenAt: timestamp
+    };
+  }
+
+  const canHoldPrevious =
+    previousTrack.candidate &&
+    previousObject &&
+    previousTrack.missedFrames < 14 &&
+    timestamp - previousTrack.lastSeenAt < 2600 &&
+    (!hand || offlineV2ObjectNearHand(previousObject, hand));
+  if (canHoldPrevious && previousTrack.candidate) {
+    const decayed = Math.max(0.18, previousTrack.confidence * 0.9);
+    return {
+      ...previousTrack,
+      candidate: previousObjectToBaseCandidate(previousObject, previousTrack.candidate, decayed),
+      confidence: decayed,
+      missedFrames: previousTrack.missedFrames + 1
+    };
+  }
+
+  return { candidate: null, confidence: 0, ageFrames: 0, missedFrames: previousTrack.missedFrames + 1, lastSeenAt: previousTrack.lastSeenAt };
+}
+
 let offlinePixelCanvas: HTMLCanvasElement | null = null;
 let offlinePixelContext: CanvasRenderingContext2D | null = null;
 
@@ -2825,6 +3058,101 @@ function inferOfflinePixelObjectCandidate(video: HTMLVideoElement, previous: Obj
   const height = clampNumber((maxY - minY) * scaleY + paddingY * 2, 36, video.videoHeight - y);
   const confidence = clampUnit(Math.max(0.5, 0.28 + (scoreTotal / Math.max(1, count)) * 1.05 + Math.min(0.22, count / 2200)));
   return baseCandidateFromRect(makeDomRectLike(x, y, width, height), 'offline-object', confidence, 0, 9001);
+}
+
+function isOfflineV2CandidateSizeValid(candidate: BaseObjectCandidate, frameWidth: number, frameHeight: number) {
+  const frameArea = Math.max(1, frameWidth * frameHeight);
+  const areaRatio = (candidate.box.width * candidate.box.height) / frameArea;
+  if (areaRatio > 0.42 || areaRatio < 0.002) return false;
+  if (candidate.box.width > frameWidth * 0.72 || candidate.box.height > frameHeight * 0.86) return false;
+  return true;
+}
+
+function offlineV2HandAffinity(candidate: BaseObjectCandidate, hand: Landmark[]) {
+  const bounds = landmarksBounds(hand);
+  const expandedHand = makeDomRectLike(
+    bounds.x - bounds.width * 0.18,
+    bounds.y - bounds.height * 0.22,
+    bounds.width * 1.36,
+    bounds.height * 1.44
+  );
+  const overlap = rectIoU(candidate.box, expandedHand);
+  const palm = palmCenter(hand);
+  const distanceToPalm = pointToRectDistance(palm, candidate.box);
+  const handSpan = Math.max(bounds.width, bounds.height, 80);
+  const palmScore = 1 - clampNumber(distanceToPalm / (handSpan * 0.92), 0, 1);
+  const fingertipDistances = FINGERTIP_INDICES.map((index) => pointToRectDistance(hand[index], candidate.box));
+  const nearTips = fingertipDistances.filter((value) => value < handSpan * 0.32).length / FINGERTIP_INDICES.length;
+  return clampUnit(overlap * 0.42 + palmScore * 0.34 + nearTips * 0.24);
+}
+
+function offlineV2PreviousAffinity(candidate: BaseObjectCandidate, previous: ObjectRegion) {
+  const previousRect = makeDomRectLike(
+    previous.center.x - previous.radiusX,
+    previous.center.y - previous.radiusY,
+    previous.radiusX * 2,
+    previous.radiusY * 2
+  );
+  const overlap = rectIoU(candidate.box, previousRect);
+  const centerDistance = distance(candidate.center, previous.center);
+  const size = Math.max(previous.radiusX, previous.radiusY, candidate.radiusX, candidate.radiusY, 1);
+  const centerScore = 1 - clampNumber(centerDistance / (size * 2.2), 0, 1);
+  return clampUnit(overlap * 0.56 + centerScore * 0.44);
+}
+
+function offlineV2ObjectNearHand(object: ObjectRegion, hand: Landmark[]) {
+  const bounds = landmarksBounds(hand);
+  const objectRect = makeDomRectLike(object.center.x - object.radiusX, object.center.y - object.radiusY, object.radiusX * 2, object.radiusY * 2);
+  return rectIoU(objectRect, bounds) > 0.08 || pointToRectDistance(palmCenter(hand), objectRect) < Math.max(bounds.width, bounds.height) * 0.8;
+}
+
+function previousObjectToBaseCandidate(previous: ObjectRegion, seed: BaseObjectCandidate, score: number): BaseObjectCandidate {
+  const box = makeDomRectLike(previous.center.x - previous.radiusX, previous.center.y - previous.radiusY, previous.radiusX * 2, previous.radiusY * 2);
+  return {
+    ...seed,
+    box,
+    score,
+    center: previous.center,
+    radiusX: previous.radiusX,
+    radiusY: previous.radiusY,
+    missedFrames: seed.missedFrames + 1
+  };
+}
+
+function smoothOfflineTimeline(points: OfflineTimelinePoint[]) {
+  if (points.length < 3) return points;
+  return points.map((point, index) => {
+    const neighbors = points.slice(Math.max(0, index - 2), Math.min(points.length, index + 3));
+    const grip = Math.round(weightedAverage(neighbors.map((item) => item.grip)));
+    const objectMatch = weightedAverage(neighbors.map((item) => item.objectMatch));
+    const slip = weightedAverage(neighbors.map((item) => item.slip));
+    const weakVotes = neighbors.filter((item) => item.weak).length;
+    const bestGuidance = mostCommon(neighbors.map((item) => item.guidance));
+    const bestObject = mostCommon(neighbors.map((item) => item.object).filter(Boolean));
+    return {
+      ...point,
+      grip,
+      objectMatch,
+      slip,
+      weak: weakVotes > neighbors.length / 2,
+      guidance: bestGuidance || point.guidance,
+      object: bestObject || point.object
+    };
+  });
+}
+
+function weightedAverage(values: number[]) {
+  if (!values.length) return 0;
+  const weights = values.map((_value, index) => (index === Math.floor(values.length / 2) ? 1.4 : 1));
+  const total = values.reduce((sum, value, index) => sum + value * weights[index], 0);
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+  return total / Math.max(1, weightTotal);
+}
+
+function mostCommon(values: string[]) {
+  const counts = new Map<string, number>();
+  values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
 }
 
 function baseCandidateFromRect(
