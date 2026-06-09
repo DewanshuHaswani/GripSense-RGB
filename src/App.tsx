@@ -1069,7 +1069,10 @@ export default function App() {
             palmX: frameAnalysis.palmCenter?.x ?? null,
             palmY: frameAnalysis.palmCenter?.y ?? null
           };
-          offlineTimelineRef.current = [...offlineTimelineRef.current.slice(-239), point];
+          offlineTimelineRef.current =
+            offlineReviewVersionRef.current === 'v2'
+              ? [...offlineTimelineRef.current, point]
+              : [...offlineTimelineRef.current.slice(-239), point];
           setOfflineTimeline(offlineTimelineRef.current);
         }
         updateCalibrationCapture(frameAnalysis, timestamp);
@@ -3468,15 +3471,40 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
     const futurePastObject = context.filter((item) => item.objectMatch > 0.22 || item.lock > 0.24);
     const continuityScore = futurePastObject.length / Math.max(1, context.length);
     const proximityScore = offlinePointHandObjectProximity(point);
-    const handEvidence = clampUnit(point.contact * 0.44 + point.closure * 0.28 + point.enclosure * 0.18 + point.thumb * 0.1);
+    const contextContact = average(context.map((item) => item.contact));
+    const contextThumb = average(context.map((item) => item.thumb));
+    const contextClosure = average(context.map((item) => item.closure));
+    const contextEnclosure = average(context.map((item) => item.enclosure));
+    const handEvidence = clampUnit(
+      Math.max(point.contact, contextContact) * 0.42 +
+        Math.max(point.closure, contextClosure) * 0.2 +
+        Math.max(point.enclosure, contextEnclosure) * 0.16 +
+        Math.max(point.thumb, contextThumb) * 0.22
+    );
     const repairedObjectMatch = Math.max(point.objectMatch, continuityScore * 0.46, proximityScore * 0.42);
     const repairedLock = Math.max(point.lock, repairedObjectMatch * 0.9, continuityScore * 0.34);
+    const occlusionAwareHold =
+      repairedLock > 0.42 &&
+      repairedObjectMatch > 0.28 &&
+      proximityScore > 0.28 &&
+      (Math.max(point.contact, contextContact) > 0.18 || Math.max(point.thumb, contextThumb) > 0.34 || Math.max(point.enclosure, contextEnclosure) > 0.28);
+    const wrapHoldScore = clampUnit(
+      repairedLock * 0.3 +
+        repairedObjectMatch * 0.2 +
+        proximityScore * 0.18 +
+        Math.max(point.contact, contextContact) * 0.16 +
+        Math.max(point.thumb, contextThumb) * 0.1 +
+        continuityScore * 0.06
+    );
     const contactDrivenGrip =
       repairedObjectMatch > 0.2 && handEvidence > 0.32
         ? Math.round(clampUnit(handEvidence * 0.62 + repairedObjectMatch * 0.38) * 86)
         : point.grip;
+    const occlusionDrivenGrip = occlusionAwareHold
+      ? Math.round(Math.max(wrapHoldScore * 92, Math.min(76, repairedLock * 82 + continuityScore * 12)))
+      : point.grip;
     const slip = Math.max(point.slip, offlineMotionDivergence(smoothed, index));
-    const grip = Math.max(point.grip, contactDrivenGrip);
+    const grip = Math.max(point.grip, contactDrivenGrip, occlusionDrivenGrip);
     const weak = grip < 42 || repairedLock < 0.2 || slip > 0.62;
     const guidance =
       repairedLock < 0.18
@@ -3498,6 +3526,9 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
       weak,
       guidance,
       state: repairedLock > 0.22 ? (grip > 68 ? 'Strong hold' : 'Grip detected') : point.state,
+      mode: occlusionAwareHold && point.mode === 'open hand' ? 'power grip' : point.mode,
+      contact: Math.max(point.contact, occlusionAwareHold ? Math.min(0.82, Math.max(contextContact, repairedLock * 0.58)) : point.contact),
+      thumb: Math.max(point.thumb, occlusionAwareHold ? Math.min(0.78, contextThumb + repairedLock * 0.18) : point.thumb),
       object: point.object || (repairedObjectMatch > 0.22 ? 'tracked object' : '')
     };
   });
