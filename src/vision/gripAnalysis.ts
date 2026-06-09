@@ -196,6 +196,44 @@ export function analyzeGrip(
   const contactPoints = countContactPoints(evidence);
   const contactScore = scoreByMode(evidence, mode, fallbackAlgorithmVersion, scoringConfig);
   const thumbOpposition = evidence.thumbSupportScore;
+  const v6OpenPalmFalseObject =
+    fallbackAlgorithmVersion === 'v6' &&
+    object.source === 'detector' &&
+    !object.manuallyAdjusted &&
+    closureScore < 0.34 &&
+    evidence.fingerCurlScore < 0.5 &&
+    evidence.palmObjectContainmentScore > 0.28 &&
+    evidence.phoneSideGripScore < 0.35 &&
+    (objectIdentity.source === 'base' || !objectIdentity.source);
+
+  if (v6OpenPalmFalseObject) {
+    return {
+      ...createEmptyAnalysis('Object dropped or no longer separate from the hand. Relock the target object when it is visible.'),
+      closureScore,
+      palmCenter: currentPalm,
+      handVelocity,
+      guidance: 'Object not locked',
+      objectLockQuality: 0,
+      objectIdentityScore: 0,
+      objectIdentityName: null,
+      objectIdentityMatched: false,
+      hasObjectProfiles: objectIdentity.hasProfiles,
+      evidence: {
+        ...evidence,
+        objectLockQuality: 0,
+        independentObjectScore: 0,
+        temporalLockScore: 0
+      },
+      diagnostics: {
+        ...EMPTY_ANALYSIS.diagnostics,
+        mode: 'open hand',
+        state: 'Hand only',
+        recommendation: 'The selected target is no longer visibly separate from the hand. Relock when the object is back in frame.',
+        objectIssue: 'V6 rejected the lock because the region looks like open palm/hand after a drop.',
+        issueCategory: 'object_problem'
+      }
+    };
+  }
 
   const angles = tips
     .filter((tip) => distance(tip, object.center) < Math.max(object.radiusX, object.radiusY) + size * 0.32)

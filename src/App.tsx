@@ -1010,6 +1010,21 @@ export default function App() {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
         if (
+          liveV6Review &&
+          targetBaseIdRef.current &&
+          frameAnalysis.guidance === 'Object not locked' &&
+          frameAnalysis.diagnostics.objectIssue?.includes('open palm')
+        ) {
+          targetBaseIdRef.current = null;
+          setTargetBaseId(null);
+          liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: timestamp };
+          previousObjectRef.current = null;
+          objectDetectionRef.current = null;
+          liveIdentityMemoryRef.current = null;
+          setObjectDetection(null);
+          object = null;
+        }
+        if (
           mediaModeRef.current === 'offline' &&
           (timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS || offlineTimelineRef.current.length === 0)
         ) {
