@@ -300,6 +300,7 @@ export default function App() {
   const offlineReportRef = useRef<OfflineReport>(null);
   const lastOfflineTimelineRef = useRef(0);
   const offlineReviewVersionRef = useRef<OfflineReviewVersion>('v2');
+  const offlineBatchProcessingRef = useRef(false);
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
@@ -602,12 +603,30 @@ export default function App() {
 
     await loadVisionEngine();
     await waitForVideoMetadata(video);
+    runLoop();
+
+    if (offlineReviewVersionRef.current === 'v2') {
+      offlineBatchProcessingRef.current = true;
+      setOfflineAnalysisPhase('processing');
+      setAnalysis(createEmptyAnalysis('Offline V2 is scanning the full video before review. It will use past and future frames to smooth the result.'));
+      video.currentTime = 0;
+      video.playbackRate = 2.5;
+      await video.play().catch(() => {
+        offlineBatchProcessingRef.current = false;
+        video.playbackRate = 1;
+        setOfflineAnalysisPhase('reviewing');
+        setAnalysis(createEmptyAnalysis('Offline video loaded. Press play once to let V2 process the full video.'));
+      });
+      return;
+    }
+
+    offlineBatchProcessingRef.current = false;
+    video.playbackRate = 1;
     setOfflineAnalysisPhase('reviewing');
     await video.play().catch(() => {
       setOfflineAnalysisPhase('reviewing');
       setAnalysis(createEmptyAnalysis('Offline video loaded. Press play on the video to begin analysis.'));
     });
-    runLoop();
   }, [loadVisionEngine, resetTrackingRefs]);
 
   const handleOfflineVideoUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1599,6 +1618,41 @@ export default function App() {
     });
   }, []);
 
+  const switchOfflineReviewVersion = useCallback((version: OfflineReviewVersion) => {
+    offlineReviewVersionRef.current = version;
+    setOfflineReviewVersion(version);
+
+    const video = videoRef.current;
+    if (mediaModeRef.current !== 'offline' || !video || !video.src) return;
+
+    if (version === 'v1') {
+      offlineBatchProcessingRef.current = false;
+      video.playbackRate = 1;
+      setOfflineAnalysisPhase(video.ended ? 'complete' : 'reviewing');
+      return;
+    }
+
+    video.pause();
+    video.currentTime = 0;
+    video.playbackRate = 2.5;
+    offlineBatchProcessingRef.current = true;
+    offlineTimelineRef.current = [];
+    offlineReportRef.current = null;
+    offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    lastOfflineTimelineRef.current = 0;
+    setOfflineTimeline([]);
+    setOfflineReport(null);
+    setOfflineAnalysisPhase('processing');
+    setAnalysis(createEmptyAnalysis('Offline V2 is reprocessing the full video with future and past frame correction.'));
+    runLoop();
+    void video.play().catch(() => {
+      offlineBatchProcessingRef.current = false;
+      video.playbackRate = 1;
+      setOfflineAnalysisPhase('reviewing');
+      setAnalysis(createEmptyAnalysis('Offline video loaded. Press play once to let V2 process the full video.'));
+    });
+  }, [runLoop]);
+
   const deleteTrainingSample = useCallback((id: string) => {
     setTrainingSamples((current) => {
       const next = current.filter((sample) => sample.id !== id);
@@ -1653,6 +1707,8 @@ export default function App() {
 
   const finalizeOfflineReview = useCallback(() => {
     if (mediaModeRef.current !== 'offline') return;
+    offlineBatchProcessingRef.current = false;
+    if (videoRef.current) videoRef.current.playbackRate = 1;
     if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
       const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
       offlineTimelineRef.current = smoothed;
@@ -1725,7 +1781,10 @@ export default function App() {
       ctx.clearRect(0, 0, composite.width, composite.height);
       drawExportVideoFrame(ctx, video, composite.width, composite.height, mirroredRef.current);
       ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
-      drawOfflineExportOverlay(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+      const refinedPoint =
+        offlineReviewVersionRef.current === 'v2' ? nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime) : null;
+      const exportAnalysis = refinedPoint ? analysisFromOfflineTimelinePoint(analysisRef.current, refinedPoint) : analysisRef.current;
+      drawOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
       if (!video.ended && video.currentTime < video.duration - 0.04) {
         raf = requestAnimationFrame(drawFrame);
       } else {
@@ -1736,6 +1795,14 @@ export default function App() {
     try {
       setOfflineVideoExporting(true);
       setOfflineVideoExportStatus('Rendering annotated video...');
+      if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
+        const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
+        offlineTimelineRef.current = smoothed;
+        setOfflineTimeline(smoothed);
+        const report = buildOfflineReport(smoothed, offlineVideoName, video.duration);
+        offlineReportRef.current = report;
+        setOfflineReport(report);
+      }
       setOfflineAnalysisPhase('reviewing');
       video.currentTime = 0;
       await video.play();
@@ -1749,16 +1816,22 @@ export default function App() {
     }
   }, [offlineVideoName]);
 
+  const offlineBatchProcessing = mediaMode === 'offline' && offlineReviewVersion === 'v2' && offlineAnalysisPhase === 'processing';
+
   return (
-    <main className={mediaMode === 'offline' ? 'app-shell offline-shell' : 'app-shell'}>
+    <main className={['app-shell', mediaMode === 'offline' ? 'offline-shell' : '', offlineBatchProcessing ? 'offline-batch-processing' : ''].filter(Boolean).join(' ')}>
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
         <video
           ref={videoRef}
           className={mirrored ? 'camera-feed mirrored' : 'camera-feed'}
           playsInline
           muted
-          controls={mediaMode === 'offline'}
-          onPlay={() => mediaMode === 'offline' && setOfflineAnalysisPhase('reviewing')}
+          controls={mediaMode === 'offline' && !offlineBatchProcessing}
+          onPlay={() => {
+            if (mediaMode !== 'offline') return;
+            if (offlineReviewVersionRef.current === 'v2' && offlineBatchProcessingRef.current) return;
+            setOfflineAnalysisPhase('reviewing');
+          }}
           onEnded={finalizeOfflineReview}
         />
         <canvas
@@ -1899,20 +1972,26 @@ export default function App() {
                 <button
                   type="button"
                   className={offlineReviewVersion === 'v1' ? 'active' : ''}
-                  onClick={() => setOfflineReviewVersion('v1')}
+                  onClick={() => switchOfflineReviewVersion('v1')}
                 >
                   V1
                 </button>
                 <button
                   type="button"
                   className={offlineReviewVersion === 'v2' ? 'active' : ''}
-                  onClick={() => setOfflineReviewVersion('v2')}
+                  onClick={() => switchOfflineReviewVersion('v2')}
                 >
                   V2
                 </button>
               </div>
               <h2>{analysis.gripPercentage}%</h2>
-              <strong>{offlineAnalysisPhase === 'processing' ? 'Processing video' : analysis.guidance}</strong>
+              <strong>
+                {offlineBatchProcessing
+                  ? 'Batch processing video'
+                  : offlineAnalysisPhase === 'processing'
+                    ? 'Processing video'
+                    : analysis.guidance}
+              </strong>
               <span>{offlineVideoName || 'Uploaded video'}</span>
               <div className="offline-mini-row">
                 <span>Phase</span>
@@ -1952,7 +2031,11 @@ export default function App() {
               {offlineAnalysisPhase === 'processing' && (
                 <div className="offline-processing">
                   <span />
-                  <strong>Preparing frame analysis...</strong>
+                  <strong>
+                    {offlineReviewVersion === 'v2'
+                      ? `Scanning full video for V2 correction... ${offlineTimeline.length} pts`
+                      : 'Preparing frame analysis...'}
+                  </strong>
                 </div>
               )}
               <div className="offline-timeline" aria-label="Offline analysis timeline">
@@ -1974,16 +2057,16 @@ export default function App() {
                 </div>
               )}
               <div className="offline-export-row">
-                <button type="button" onClick={() => exportOfflineTimeline('csv')} disabled={!offlineTimeline.length}>
+                <button type="button" onClick={() => exportOfflineTimeline('csv')} disabled={!offlineTimeline.length || offlineBatchProcessing}>
                   CSV
                 </button>
-                <button type="button" onClick={() => exportOfflineTimeline('json')} disabled={!offlineTimeline.length}>
+                <button type="button" onClick={() => exportOfflineTimeline('json')} disabled={!offlineTimeline.length || offlineBatchProcessing}>
                   JSON
                 </button>
-                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting}>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting || offlineBatchProcessing}>
                   {offlineVideoExporting ? 'Rendering' : 'MP4'}
                 </button>
-                <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting}>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting || offlineBatchProcessing}>
                   WebM
                 </button>
               </div>
@@ -2819,6 +2902,42 @@ function drawExportVideoFrame(
   }
   ctx.drawImage(video, 0, 0, width, height);
   ctx.restore();
+}
+
+function nearestOfflineTimelinePoint(points: OfflineTimelinePoint[], time: number) {
+  if (!points.length) return null;
+  return points.reduce((best, point) => (Math.abs(point.time - time) < Math.abs(best.time - time) ? point : best), points[0]);
+}
+
+function analysisFromOfflineTimelinePoint(base: GripAnalysis, point: OfflineTimelinePoint): GripAnalysis {
+  return {
+    ...base,
+    gripPercentage: point.grip,
+    confidence: point.confidence,
+    contactPoints: Math.round(point.contact * 5),
+    closureScore: point.closure,
+    thumbOpposition: point.thumb,
+    enclosureScore: point.enclosure,
+    slipRisk: point.slip,
+    motionState: point.slip > 0.55 ? 'slipping' : 'moving-with-hand',
+    guidance: point.guidance as GripAnalysis['guidance'],
+    objectLockQuality: point.lock,
+    objectIdentityScore: point.objectMatch,
+    objectIdentityName: point.object || base.objectIdentityName,
+    objectIdentityMatched: point.objectMatch > 0.25,
+    evidence: {
+      ...base.evidence,
+      fingerSegmentContactScore: point.contact,
+      objectLockQuality: point.lock,
+      persistentSlipScore: point.slip
+    },
+    diagnostics: {
+      ...base.diagnostics,
+      mode: point.mode as GripAnalysis['diagnostics']['mode'],
+      state: point.state as GripAnalysis['diagnostics']['state'],
+      recommendation: point.guidance
+    }
+  };
 }
 
 function drawOfflineExportOverlay(
