@@ -151,14 +151,46 @@ type BaseClassSummary = {
 type OfflineTimelinePoint = {
   time: number;
   grip: number;
+  confidence: number;
   objectMatch: number;
+  lock: number;
+  contact: number;
+  closure: number;
+  thumb: number;
+  enclosure: number;
   slip: number;
   weak: boolean;
   guidance: string;
   object: string;
+  mode: string;
+  state: string;
+  objectX: number | null;
+  objectY: number | null;
+  palmX: number | null;
+  palmY: number | null;
 };
 
 type OfflineReviewVersion = 'v1' | 'v2';
+
+type OfflineSegment = {
+  start: number;
+  end: number;
+  reason: string;
+};
+
+type OfflineReport = {
+  generatedAt: string;
+  videoName: string;
+  duration: number;
+  points: number;
+  averageGrip: number;
+  peakGrip: number;
+  averageObjectMatch: number;
+  averageLock: number;
+  weakSegments: OfflineSegment[];
+  slipEvents: OfflineSegment[];
+  summary: string;
+} | null;
 
 type OfflineV2TrackState = {
   candidate: BaseObjectCandidate | null;
@@ -167,6 +199,15 @@ type OfflineV2TrackState = {
   missedFrames: number;
   lastSeenAt: number;
 };
+
+type LiveIdentityMemory = {
+  profileId: string;
+  name: string;
+  score: number;
+  matched: boolean;
+  seenFrames: number;
+  missedFrames: number;
+} | null;
 
 const METRIC_INFO = {
   confidence: 'How much the app trusts the object lock and tracking signal in this frame.',
@@ -256,10 +297,12 @@ export default function App() {
   const showObjectLabelsRef = useRef(false);
   const baseClassEnabledRef = useRef<Record<string, boolean>>({ person: false });
   const offlineTimelineRef = useRef<OfflineTimelinePoint[]>([]);
+  const offlineReportRef = useRef<OfflineReport>(null);
   const lastOfflineTimelineRef = useRef(0);
   const offlineReviewVersionRef = useRef<OfflineReviewVersion>('v2');
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
+  const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -317,6 +360,7 @@ export default function App() {
   const [baseClassEnabled, setBaseClassEnabled] = useState<Record<string, boolean>>({ person: false });
   const [baseClassSummary, setBaseClassSummary] = useState<BaseClassSummary[]>([]);
   const [offlineTimeline, setOfflineTimeline] = useState<OfflineTimelinePoint[]>([]);
+  const [offlineReport, setOfflineReport] = useState<OfflineReport>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
@@ -462,6 +506,7 @@ export default function App() {
     baseObjectCandidatesRef.current = [];
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    liveIdentityMemoryRef.current = null;
     objectDetectionRef.current = null;
     v3ProfileCandidatesRef.current = [];
     temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
@@ -504,7 +549,9 @@ export default function App() {
       setOfflineVideoName('');
       setOfflineAnalysisPhase('idle');
       offlineTimelineRef.current = [];
+      offlineReportRef.current = null;
       setOfflineTimeline([]);
+      setOfflineReport(null);
       resetTrackingRefs();
       setCameraState('live');
 
@@ -543,9 +590,11 @@ export default function App() {
     setOfflineVideoName(file.name);
     setOfflineAnalysisPhase('processing');
     offlineTimelineRef.current = [];
+    offlineReportRef.current = null;
     lastOfflineTimelineRef.current = 0;
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     setOfflineTimeline([]);
+    setOfflineReport(null);
     setCameraState('live');
     setPaused(false);
     resetTrackingRefs();
@@ -859,21 +908,36 @@ export default function App() {
         if (timestamp - lastObjectMatchRef.current > 420) {
           lastObjectMatchRef.current = timestamp;
           const descriptor = object && !bestProfileCandidate ? browserObjectDescriptorProvider.describe(video, object) : null;
-          const instantMatch = activeBaseCandidate
+          const descriptorMatch =
+            descriptor && enabledProfiles.length
+              ? matchObjectProfiles(descriptor, enabledProfiles, {
+                  threshold: liveV6Review ? 0.5 : 0.56,
+                  margin: liveV6Review ? 0.04 : 0.06,
+                  useExemplars: true
+                })
+              : null;
+          const baseMatch = activeBaseCandidate
             ? {
                 profileId: activeBaseCandidate.candidateId,
                 name: offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current),
                 score: activeBaseConfidence,
                 matched: activeBaseConfidence >= baseThreshold
               }
-            : bestProfileCandidate
+            : null;
+          const instantMatch = bestProfileCandidate
             ? {
                 profileId: bestProfileCandidate.profileId,
                 name: bestProfileCandidate.name,
                 score: bestProfileCandidate.score,
                 matched: bestProfileCandidate.matched
               }
-            : matchObjectProfiles(descriptor, enabledProfiles);
+            : descriptorMatch && baseMatch
+              ? {
+                  ...descriptorMatch,
+                  score: clampUnit(Math.max(descriptorMatch.score, baseMatch.score * 0.72)),
+                  matched: descriptorMatch.matched || (descriptorMatch.score >= 0.5 && baseMatch.matched)
+                }
+              : baseMatch ?? descriptorMatch;
           let match = instantMatch;
           if (activeAlgorithmVersion === 'v4' || targetDetectorAlgorithm) {
             const nextTemporal = updateTemporalIdentity(
@@ -887,19 +951,31 @@ export default function App() {
             setTemporalIdentity(nextTemporal);
             match = temporalIdentityToMatch(nextTemporal);
           }
+          if (liveV6Review) {
+            const memory = updateLiveIdentityMemory(liveIdentityMemoryRef.current, descriptorMatch ?? match, activeBaseConfidence >= baseThreshold);
+            liveIdentityMemoryRef.current = memory;
+            match = liveIdentityMemoryToMatch(memory);
+          }
           objectDetectionRef.current = match;
           setObjectDetection(match);
         }
+        const identityScore = activeBaseCandidate
+          ? Math.max(activeBaseConfidence, (objectDetectionRef.current?.score ?? 0) * 0.86)
+          : objectDetectionRef.current?.score ?? 0;
+        const identityMatched = activeBaseCandidate
+          ? activeBaseConfidence >= baseThreshold || Boolean(objectDetectionRef.current?.matched)
+          : objectDetectionRef.current?.matched ?? false;
+        const identityName =
+          objectDetectionRef.current?.name ??
+          (activeBaseCandidate
+            ? offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
+            : null);
         const objectIdentity: ObjectIdentitySignal = {
           hasProfiles: enabledProfiles.length > 0 || Boolean(activeBaseCandidate),
-          score: activeBaseCandidate ? activeBaseConfidence : objectDetectionRef.current?.score ?? 0,
-          matched: activeBaseCandidate
-            ? activeBaseConfidence >= baseThreshold
-            : objectDetectionRef.current?.matched ?? false,
-          name: activeBaseCandidate
-            ? offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
-            : objectDetectionRef.current?.name ?? null,
-          source: activeBaseCandidate ? 'base' : enabledProfiles.length > 0 ? 'trained' : undefined
+          score: identityScore,
+          matched: identityMatched,
+          name: identityName,
+          source: objectDetectionRef.current?.profileId && !objectDetectionRef.current.profileId.startsWith('base-track-') ? 'trained' : activeBaseCandidate ? 'base' : undefined
         };
         const handVelocityForSlip =
           hand && previousPalmRef.current ? subtract(palmCenter(hand), previousPalmRef.current) : { x: 0, y: 0 };
@@ -941,11 +1017,23 @@ export default function App() {
           const point = {
             time: video.currentTime,
             grip: frameAnalysis.gripPercentage,
+            confidence: frameAnalysis.confidence,
             objectMatch: objectIdentity.score,
+            lock: frameAnalysis.objectLockQuality,
+            contact: frameAnalysis.evidence.fingerSegmentContactScore,
+            closure: frameAnalysis.closureScore,
+            thumb: frameAnalysis.thumbOpposition,
+            enclosure: frameAnalysis.enclosureScore,
             slip: frameAnalysis.slipRisk,
             weak: frameAnalysis.gripPercentage < 44 || frameAnalysis.guidance === 'Reposition' || frameAnalysis.guidance === 'Object uncertain',
             guidance: frameAnalysis.guidance,
-            object: objectIdentity.name ?? ''
+            object: objectIdentity.name ?? '',
+            mode: frameAnalysis.diagnostics.mode,
+            state: frameAnalysis.diagnostics.state,
+            objectX: object?.center.x ?? null,
+            objectY: object?.center.y ?? null,
+            palmX: frameAnalysis.palmCenter?.x ?? null,
+            palmY: frameAnalysis.palmCenter?.y ?? null
           };
           offlineTimelineRef.current = [...offlineTimelineRef.current.slice(-239), point];
           setOfflineTimeline(offlineTimelineRef.current);
@@ -1495,20 +1583,35 @@ export default function App() {
   const exportOfflineTimeline = useCallback((format: 'csv' | 'json') => {
     if (!offlineTimelineRef.current.length) return;
     const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const report = offlineReportRef.current ?? buildOfflineReport(offlineTimelineRef.current, offlineVideoName, videoRef.current?.duration ?? 0);
     const payload =
       format === 'json'
-        ? JSON.stringify(offlineTimelineRef.current, null, 2)
+        ? JSON.stringify({ report, timeline: offlineTimelineRef.current }, null, 2)
         : [
-            'time,grip,objectMatch,slip,weak,guidance,object',
+            `# ${report?.summary ?? 'GripSense offline report'}`,
+            `# averageGrip=${report?.averageGrip ?? 0},averageObjectMatch=${report?.averageObjectMatch ?? 0},weakSegments=${report?.weakSegments.length ?? 0},slipEvents=${report?.slipEvents.length ?? 0}`,
+            'time,grip,confidence,objectMatch,lock,contact,closure,thumb,enclosure,slip,weak,guidance,object,mode,state,objectX,objectY,palmX,palmY',
             ...offlineTimelineRef.current.map((point) =>
               [
                 point.time.toFixed(2),
                 point.grip,
+                Math.round(point.confidence * 100),
                 Math.round(point.objectMatch * 100),
+                Math.round(point.lock * 100),
+                Math.round(point.contact * 100),
+                Math.round(point.closure * 100),
+                Math.round(point.thumb * 100),
+                Math.round(point.enclosure * 100),
                 Math.round(point.slip * 100),
                 point.weak ? 'yes' : 'no',
                 csvEscape(point.guidance),
-                csvEscape(point.object)
+                csvEscape(point.object),
+                csvEscape(point.mode),
+                csvEscape(point.state),
+                point.objectX?.toFixed(1) ?? '',
+                point.objectY?.toFixed(1) ?? '',
+                point.palmX?.toFixed(1) ?? '',
+                point.palmY?.toFixed(1) ?? ''
               ].join(',')
             )
           ].join('\n');
@@ -1518,12 +1621,15 @@ export default function App() {
   const finalizeOfflineReview = useCallback(() => {
     if (mediaModeRef.current !== 'offline') return;
     if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
-      const smoothed = smoothOfflineTimeline(offlineTimelineRef.current);
+      const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
       offlineTimelineRef.current = smoothed;
       setOfflineTimeline(smoothed);
     }
+    const report = buildOfflineReport(offlineTimelineRef.current, offlineVideoName, videoRef.current?.duration ?? 0);
+    offlineReportRef.current = report;
+    setOfflineReport(report);
     setOfflineAnalysisPhase('complete');
-  }, []);
+  }, [offlineVideoName]);
 
   const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm') => {
     const video = videoRef.current;
@@ -1586,7 +1692,7 @@ export default function App() {
       ctx.clearRect(0, 0, composite.width, composite.height);
       drawExportVideoFrame(ctx, video, composite.width, composite.height, mirroredRef.current);
       ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
-      drawOfflineExportOverlay(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current, offlineVideoName);
+      drawOfflineExportOverlay(ctx, composite.width, composite.height, analysisRef.current, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
       if (!video.ended && video.currentTime < video.duration - 0.04) {
         raf = requestAnimationFrame(drawFrame);
       } else {
@@ -1795,6 +1901,12 @@ export default function App() {
                 <span>Timeline</span>
                 <strong>{offlineTimeline.length} pts</strong>
               </div>
+              {offlineReport && (
+                <div className="offline-report-summary">
+                  <span>Report</span>
+                  <strong>{offlineReport.summary}</strong>
+                </div>
+              )}
             </div>
             <div className="offline-glass-panel offline-right">
               <p className="eyebrow">Parameters</p>
@@ -1820,6 +1932,14 @@ export default function App() {
                   />
                 ))}
               </div>
+              {offlineReport && (
+                <div className="offline-report-grid">
+                  <span>Avg grip <strong>{offlineReport.averageGrip}%</strong></span>
+                  <span>Peak <strong>{offlineReport.peakGrip}%</strong></span>
+                  <span>Weak <strong>{offlineReport.weakSegments.length}</strong></span>
+                  <span>Slip <strong>{offlineReport.slipEvents.length}</strong></span>
+                </div>
+              )}
               <div className="offline-export-row">
                 <button type="button" onClick={() => exportOfflineTimeline('csv')} disabled={!offlineTimeline.length}>
                   CSV
@@ -2434,6 +2554,12 @@ export default function App() {
           </div>
         )}
 
+        {algorithmVersion === 'v6' && !hasCalibration && (
+          <div className="calibration-note warning">
+            V6 is using RGB-only defaults. Calibrate strong and weak holds once for more stable live percentages.
+          </div>
+        )}
+
         <div className="diagnostics-panel">
           <div className="motion-header">
             <Activity size={18} />
@@ -2668,7 +2794,8 @@ function drawOfflineExportOverlay(
   height: number,
   analysis: GripAnalysis,
   timeline: OfflineTimelinePoint[],
-  videoName: string
+  videoName: string,
+  report: OfflineReport
 ) {
   const margin = Math.max(18, Math.round(width * 0.018));
   const leftWidth = Math.min(380, Math.max(260, width * 0.24));
@@ -2704,6 +2831,9 @@ function drawOfflineExportOverlay(
   metrics.forEach(([label, value], index) => {
     drawExportMetric(ctx, rightX + 22, rightY + 66 + index * 42, rightWidth - 44, label, value, label === 'Slip');
   });
+  if (report) {
+    drawExportText(ctx, `Avg ${report.averageGrip}%  Peak ${report.peakGrip}%`, rightX + 22, rightY + 308, 14, 800, 'rgba(240, 253, 250, 0.92)');
+  }
   drawExportTimeline(ctx, rightX + 22, rightY + 324, rightWidth - 44, 30, timeline);
 }
 
@@ -3144,21 +3274,196 @@ function smoothOfflineTimeline(points: OfflineTimelinePoint[]) {
   return points.map((point, index) => {
     const neighbors = points.slice(Math.max(0, index - 2), Math.min(points.length, index + 3));
     const grip = Math.round(weightedAverage(neighbors.map((item) => item.grip)));
+    const confidence = weightedAverage(neighbors.map((item) => item.confidence));
     const objectMatch = weightedAverage(neighbors.map((item) => item.objectMatch));
+    const lock = weightedAverage(neighbors.map((item) => item.lock));
+    const contact = weightedAverage(neighbors.map((item) => item.contact));
+    const closure = weightedAverage(neighbors.map((item) => item.closure));
+    const thumb = weightedAverage(neighbors.map((item) => item.thumb));
+    const enclosure = weightedAverage(neighbors.map((item) => item.enclosure));
     const slip = weightedAverage(neighbors.map((item) => item.slip));
     const weakVotes = neighbors.filter((item) => item.weak).length;
     const bestGuidance = mostCommon(neighbors.map((item) => item.guidance));
     const bestObject = mostCommon(neighbors.map((item) => item.object).filter(Boolean));
+    const bestMode = mostCommon(neighbors.map((item) => item.mode).filter(Boolean));
+    const bestState = mostCommon(neighbors.map((item) => item.state).filter(Boolean));
     return {
       ...point,
       grip,
+      confidence,
       objectMatch,
+      lock,
+      contact,
+      closure,
+      thumb,
+      enclosure,
       slip,
       weak: weakVotes > neighbors.length / 2,
       guidance: bestGuidance || point.guidance,
-      object: bestObject || point.object
+      object: bestObject || point.object,
+      mode: bestMode || point.mode,
+      state: bestState || point.state
     };
   });
+}
+
+function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
+  const smoothed = smoothOfflineTimeline(points);
+  if (smoothed.length < 3) return smoothed;
+  return smoothed.map((point, index) => {
+    const context = smoothed.slice(Math.max(0, index - 4), Math.min(smoothed.length, index + 5));
+    const futurePastObject = context.filter((item) => item.objectMatch > 0.22 || item.lock > 0.24);
+    const continuityScore = futurePastObject.length / Math.max(1, context.length);
+    const proximityScore = offlinePointHandObjectProximity(point);
+    const handEvidence = clampUnit(point.contact * 0.44 + point.closure * 0.28 + point.enclosure * 0.18 + point.thumb * 0.1);
+    const repairedObjectMatch = Math.max(point.objectMatch, continuityScore * 0.46, proximityScore * 0.42);
+    const repairedLock = Math.max(point.lock, repairedObjectMatch * 0.9, continuityScore * 0.34);
+    const contactDrivenGrip =
+      repairedObjectMatch > 0.2 && handEvidence > 0.32
+        ? Math.round(clampUnit(handEvidence * 0.62 + repairedObjectMatch * 0.38) * 86)
+        : point.grip;
+    const slip = Math.max(point.slip, offlineMotionDivergence(smoothed, index));
+    const grip = Math.max(point.grip, contactDrivenGrip);
+    const weak = grip < 42 || repairedLock < 0.2 || slip > 0.62;
+    const guidance =
+      repairedLock < 0.18
+        ? 'Object uncertain'
+        : slip > 0.62
+          ? 'Improve grip'
+          : grip > 68
+            ? 'Strong grip'
+            : grip > 36
+              ? 'Improve grip'
+              : point.guidance;
+    return {
+      ...point,
+      grip,
+      confidence: Math.max(point.confidence, Math.min(0.88, repairedLock * 0.56 + handEvidence * 0.44)),
+      objectMatch: repairedObjectMatch,
+      lock: repairedLock,
+      slip,
+      weak,
+      guidance,
+      state: repairedLock > 0.22 ? (grip > 68 ? 'Strong hold' : 'Grip detected') : point.state,
+      object: point.object || (repairedObjectMatch > 0.22 ? 'tracked object' : '')
+    };
+  });
+}
+
+function buildOfflineReport(points: OfflineTimelinePoint[], videoName: string, duration: number): OfflineReport {
+  if (!points.length) return null;
+  const averageGrip = Math.round(average(points.map((point) => point.grip)));
+  const peakGrip = Math.max(...points.map((point) => point.grip));
+  const averageObjectMatch = Math.round(average(points.map((point) => point.objectMatch)) * 100);
+  const averageLock = Math.round(average(points.map((point) => point.lock)) * 100);
+  const weakSegments = collectOfflineSegments(points, (point) => point.weak, 'weak grip');
+  const slipEvents = collectOfflineSegments(points, (point) => point.slip > 0.55, 'slip risk');
+  const summary =
+    averageLock < 25
+      ? 'Object evidence is weak; use V2 offline or tighter object framing.'
+      : averageGrip >= 68
+        ? 'Strong visual grip for most of the video.'
+        : averageGrip >= 42
+          ? 'Mixed grip quality with improvement windows.'
+          : 'Low visual grip stability in this run.';
+  return {
+    generatedAt: new Date().toISOString(),
+    videoName,
+    duration,
+    points: points.length,
+    averageGrip,
+    peakGrip,
+    averageObjectMatch,
+    averageLock,
+    weakSegments,
+    slipEvents,
+    summary
+  };
+}
+
+function collectOfflineSegments(points: OfflineTimelinePoint[], predicate: (point: OfflineTimelinePoint) => boolean, reason: string) {
+  const segments: OfflineSegment[] = [];
+  let start: number | null = null;
+  let end = 0;
+  points.forEach((point) => {
+    if (predicate(point)) {
+      if (start === null) start = point.time;
+      end = point.time;
+      return;
+    }
+    if (start !== null && end - start >= 0.25) {
+      segments.push({ start, end, reason });
+    }
+    start = null;
+  });
+  if (start !== null && end - start >= 0.25) segments.push({ start, end, reason });
+  return segments;
+}
+
+function offlinePointHandObjectProximity(point: OfflineTimelinePoint) {
+  if (point.objectX === null || point.objectY === null || point.palmX === null || point.palmY === null) return 0;
+  const distancePx = distance({ x: point.objectX, y: point.objectY }, { x: point.palmX, y: point.palmY });
+  return 1 - clampNumber(distancePx / 240, 0, 1);
+}
+
+function offlineMotionDivergence(points: OfflineTimelinePoint[], index: number) {
+  const previous = points[index - 1];
+  const current = points[index];
+  if (!previous || !current) return 0;
+  if (
+    previous.objectX === null ||
+    previous.objectY === null ||
+    previous.palmX === null ||
+    previous.palmY === null ||
+    current.objectX === null ||
+    current.objectY === null ||
+    current.palmX === null ||
+    current.palmY === null
+  ) {
+    return 0;
+  }
+  const objectMotion = distance({ x: previous.objectX, y: previous.objectY }, { x: current.objectX, y: current.objectY });
+  const palmMotion = distance({ x: previous.palmX, y: previous.palmY }, { x: current.palmX, y: current.palmY });
+  const relative = Math.abs(objectMotion - palmMotion);
+  if (objectMotion < 8 && palmMotion < 8) return 0;
+  return clampUnit((relative - 18) / 90);
+}
+
+function updateLiveIdentityMemory(
+  previous: LiveIdentityMemory,
+  candidate: ObjectProfileMatch,
+  hasBaseLock: boolean
+): LiveIdentityMemory {
+  if (candidate && (candidate.matched || candidate.score >= 0.4)) {
+    const same = previous?.profileId === candidate.profileId;
+    return {
+      profileId: candidate.profileId,
+      name: candidate.name,
+      score: clampUnit(same ? previous.score * 0.62 + candidate.score * 0.38 : candidate.score),
+      matched: candidate.matched || (same && previous.seenFrames >= 2 && candidate.score >= 0.36),
+      seenFrames: same ? previous.seenFrames + 1 : 1,
+      missedFrames: 0
+    };
+  }
+  if (previous && hasBaseLock && previous.missedFrames < 6) {
+    return {
+      ...previous,
+      score: clampUnit(previous.score * 0.88),
+      matched: previous.seenFrames >= 2 && previous.missedFrames < 3,
+      missedFrames: previous.missedFrames + 1
+    };
+  }
+  return null;
+}
+
+function liveIdentityMemoryToMatch(memory: LiveIdentityMemory): ObjectProfileMatch {
+  if (!memory) return null;
+  return {
+    profileId: memory.profileId,
+    name: memory.name,
+    score: memory.score,
+    matched: memory.matched
+  };
 }
 
 function weightedAverage(values: number[]) {
