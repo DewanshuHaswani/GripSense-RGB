@@ -236,19 +236,40 @@ export function analyzeGrip(
       )
   );
   const v5ContactGate = contactGateScore(evidence);
+  const v6OcclusionContactGate = clamp(
+    v5ContactGate * 0.36 +
+      Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.occlusionResilienceScore) * 0.24 +
+      evidence.palmObjectContainmentScore * 0.18 +
+      evidence.fingerCurlScore * 0.1 +
+      enclosureScore * 0.08 +
+      closureScore * 0.04
+  );
+  const activeContactGate = fallbackAlgorithmVersion === 'v6' ? Math.max(v5ContactGate, v6OcclusionContactGate) : v5ContactGate;
   const v5NoContact =
-    (fallbackAlgorithmVersion === 'v5' || fallbackAlgorithmVersion === 'v6') &&
+    fallbackAlgorithmVersion === 'v5' &&
     evidence.objectLockQuality >= 0.38 &&
     v5ContactGate < 0.28;
-  if (v5NoContact) {
-    gripPercentage = Math.min(gripPercentage, Math.round(v5ContactGate * 45));
+  const v6NoContact =
+    fallbackAlgorithmVersion === 'v6' &&
+    evidence.objectLockQuality >= 0.38 &&
+    activeContactGate < 0.2 &&
+    evidence.palmObjectContainmentScore < 0.22 &&
+    evidence.fingerCurlScore < 0.58;
+  const noVisibleContact = v5NoContact || v6NoContact;
+  if (noVisibleContact) {
+    gripPercentage = Math.min(gripPercentage, Math.round(activeContactGate * (fallbackAlgorithmVersion === 'v6' ? 62 : 45)));
   }
   let calibratedGripPercentage =
     calibration.similarToBaseline && options.calibrationBaseline
       ? Math.max(gripPercentage, Math.round(options.calibrationBaseline.gripPercentage * 0.88))
       : gripPercentage;
-  if (v5NoContact) {
-    calibratedGripPercentage = Math.min(calibratedGripPercentage, Math.round(v5ContactGate * 45));
+  if (noVisibleContact) {
+    calibratedGripPercentage = Math.min(calibratedGripPercentage, Math.round(activeContactGate * (fallbackAlgorithmVersion === 'v6' ? 62 : 45)));
+  } else if (fallbackAlgorithmVersion === 'v6' && evidence.objectLockQuality > 0.5 && closureScore > 0.72 && activeContactGate > 0.22) {
+    const occlusionAwareGrip = Math.round(
+      clamp(activeContactGate * 0.42 + enclosureScore * 0.2 + evidence.objectLockQuality * 0.18 + motionCoupling * 0.12 + identityFactor * 0.08) * 100
+    );
+    calibratedGripPercentage = Math.max(calibratedGripPercentage, Math.min(82, occlusionAwareGrip));
   }
   const confidence = computeConfidence({
     evidence,
@@ -262,13 +283,13 @@ export function analyzeGrip(
     scoringConfig
   });
   const motionState = !moving ? 'idle' : slipRisk > 0.45 ? 'slipping' : motionCoupling > 0.58 ? 'moving-with-hand' : 'uncertain';
-  const state = v5NoContact
+  const state = noVisibleContact
     ? 'Object uncertain'
     : computeGripState(hand, object, evidence, calibratedGripPercentage, motionState, objectIdentity, fallbackAlgorithmVersion);
   const objectUncertainGuidance =
     evidence.objectLockQuality < 0.38 || identityBlocksStrongGrip(objectIdentity, fallbackAlgorithmVersion);
   const guidance =
-    v5NoContact
+    noVisibleContact
       ? 'Reposition'
       : objectUncertainGuidance
       ? 'Object uncertain'
@@ -287,7 +308,7 @@ export function analyzeGrip(
     weakCalibration.similarToWeak,
     fallbackAlgorithmVersion,
     objectIdentity,
-    v5NoContact
+    noVisibleContact
   );
 
   return {
@@ -417,6 +438,20 @@ function scoreByMode(evidence: GripEvidence, mode: GripMode, algorithmVersion: A
     algorithmVersion === 'v2'
       ? clamp(evidence.independentObjectScore * 0.54 + evidence.objectLockQuality * 0.28 + evidence.temporalLockScore * 0.18, 0.58, 1)
       : 1;
+  if (algorithmVersion === 'v6') {
+    const v6ObjectFactor = clamp(evidence.independentObjectScore * 0.34 + evidence.objectLockQuality * 0.34 + evidence.temporalLockScore * 0.2 + 0.12, 0.62, 1);
+    const occlusionAwareWrap = clamp(
+      Math.max(evidence.phoneSideGripScore, evidence.powerGripScore, evidence.occlusionResilienceScore) * 0.34 +
+        evidence.palmObjectContainmentScore * 0.22 +
+        evidence.fingerCurlScore * 0.18 +
+        evidence.thumbSupportScore * 0.1 +
+        evidence.motionStabilityScore * 0.1 +
+        evidence.fingerSegmentContactScore * 0.06
+    );
+    if (mode === 'phone-side grip' || mode === 'power grip' || mode === 'hook grip') {
+      return Math.max(weightedScore(evidence, scoringConfig.modeWeights[mode]) * v6ObjectFactor, occlusionAwareWrap * v6ObjectFactor);
+    }
+  }
   if (mode === 'phone-side grip' || mode === 'pinch grip' || mode === 'power grip' || mode === 'hook grip') {
     return weightedScore(evidence, scoringConfig.modeWeights[mode]) * v2ObjectFactor;
   }

@@ -757,7 +757,7 @@ export default function App() {
         const profileFirstAlgorithm =
           activeAlgorithmVersion === 'v3' || activeAlgorithmVersion === 'v4' || targetDetectorAlgorithm;
         const fallbackAlgorithmVersion: AlgorithmVersion =
-          activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion === 'v6' ? 'v5' : activeAlgorithmVersion;
+          activeAlgorithmVersion === 'v3' ? 'v2' : activeAlgorithmVersion;
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
@@ -1044,6 +1044,24 @@ export default function App() {
         setAnalysis(frameAnalysis);
       }
 
+      const overlayBaseCandidates =
+        algorithmVersionRef.current === 'v6'
+          ? targetBaseIdRef.current
+            ? baseObjectCandidatesRef.current.filter((candidate) => candidate.candidateId === targetBaseIdRef.current)
+            : []
+          : algorithmVersionRef.current === 'v5'
+            ? baseObjectCandidatesRef.current
+            : [];
+      const overlayProfileCandidates =
+        algorithmVersionRef.current === 'v6'
+          ? targetProfileIdRef.current
+            ? v3ProfileCandidatesRef.current.filter((candidate) => candidate.profileId === targetProfileIdRef.current)
+            : []
+          : algorithmVersionRef.current === 'v5'
+            ? v3ProfileCandidatesRef.current
+            : algorithmVersionRef.current === 'v3' || algorithmVersionRef.current === 'v4'
+              ? v3ProfileCandidatesRef.current
+              : [];
       drawTrackingOverlay(
         context,
         canvas.width,
@@ -1052,9 +1070,9 @@ export default function App() {
         hand,
         object,
         frameAnalysis,
-        algorithmVersionRef.current === 'v5' || algorithmVersionRef.current === 'v6' ? v3ProfileCandidatesRef.current : [],
+        overlayProfileCandidates,
         targetProfileIdRef.current,
-        algorithmVersionRef.current === 'v5' || algorithmVersionRef.current === 'v6' ? baseObjectCandidatesRef.current : [],
+        overlayBaseCandidates,
         targetBaseIdRef.current,
         showObjectLabelsRef.current
       );
@@ -3097,6 +3115,7 @@ function updateOfflineV2Track(
     if (!isOfflineV2CandidateSizeValid(candidate, video.videoWidth, video.videoHeight)) continue;
     const handAffinity = hand ? offlineV2HandAffinity(candidate, hand) : 0.35;
     const previousAffinity = previousObject ? offlineV2PreviousAffinity(candidate, previousObject) : 0;
+    if (hand && handAffinity < 0.18 && previousAffinity < 0.42) continue;
     const continuity =
       previousTrack.candidate && previousTrack.candidate.candidateId === candidate.candidateId
         ? Math.max(0.12, 0.28 - candidate.missedFrames * 0.04)
