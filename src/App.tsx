@@ -1723,7 +1723,7 @@ export default function App() {
     setOfflineAnalysisPhase('complete');
   }, [offlineVideoName]);
 
-  const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm') => {
+  const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm', layout: 'full' | 'compact' = 'full') => {
     const video = videoRef.current;
     const overlay = canvasRef.current;
     if (mediaModeRef.current !== 'offline' || !video || !overlay || !video.duration || Number.isNaN(video.duration)) {
@@ -1773,9 +1773,10 @@ export default function App() {
 
     recorder.onstop = () => {
       const blob = new Blob(chunks, { type: supportedType });
-      downloadBlobFile(`${fileBase}-annotated.${format}`, blob);
+      const suffix = layout === 'compact' ? 'annotated-compact' : 'annotated';
+      downloadBlobFile(`${fileBase}-${suffix}.${format}`, blob);
       setOfflineVideoExporting(false);
-      setOfflineVideoExportStatus(`Downloaded ${fileBase}-annotated.${format}`);
+      setOfflineVideoExportStatus(`Downloaded ${fileBase}-${suffix}.${format}`);
       video.currentTime = Math.min(previousTime, video.duration || previousTime);
       if (wasPaused) video.pause();
     };
@@ -1787,7 +1788,11 @@ export default function App() {
       const refinedPoint =
         offlineReviewVersionRef.current === 'v2' ? nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime) : null;
       const exportAnalysis = refinedPoint ? analysisFromOfflineTimelinePoint(analysisRef.current, refinedPoint) : analysisRef.current;
-      drawOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+      if (layout === 'compact') {
+        drawCompactOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+      } else {
+        drawOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+      }
       if (!video.ended && video.currentTime < video.duration - 0.04) {
         raf = requestAnimationFrame(drawFrame);
       } else {
@@ -1797,7 +1802,7 @@ export default function App() {
 
     try {
       setOfflineVideoExporting(true);
-      setOfflineVideoExportStatus('Rendering annotated video...');
+      setOfflineVideoExportStatus(layout === 'compact' ? 'Rendering compact annotated video...' : 'Rendering annotated video...');
       if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
         const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
         offlineTimelineRef.current = smoothed;
@@ -2068,6 +2073,9 @@ export default function App() {
                 </button>
                 <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting || offlineBatchProcessing}>
                   {offlineVideoExporting ? 'Rendering' : 'MP4'}
+                </button>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4', 'compact')} disabled={offlineVideoExporting || offlineBatchProcessing}>
+                  MP4 Compact
                 </button>
                 <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting || offlineBatchProcessing}>
                   WebM
@@ -2992,6 +3000,57 @@ function drawOfflineExportOverlay(
   drawExportTimeline(ctx, rightX + 22, rightY + 324, rightWidth - 44, 30, timeline);
 }
 
+function drawCompactOfflineExportOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  analysis: GripAnalysis,
+  timeline: OfflineTimelinePoint[],
+  videoName: string,
+  report: OfflineReport
+) {
+  const margin = Math.max(14, Math.round(width * 0.014));
+  const topWidth = Math.min(560, Math.max(390, width * 0.34));
+  const topHeight = 92;
+  const metricWidth = Math.min(360, Math.max(260, width * 0.2));
+  const metricHeight = 150;
+  const metricX = width - margin - metricWidth;
+  const metricY = height - margin - metricHeight;
+
+  drawExportGlassPanel(ctx, margin, margin, topWidth, topHeight);
+  drawExportText(ctx, 'OFFLINE V2 COMPACT', margin + 18, margin + 28, 13, 800, '#67e8f9');
+  drawExportText(ctx, `${analysis.gripPercentage}%`, margin + 18, margin + 76, 48, 900, '#f8fafc');
+  drawExportText(ctx, analysis.guidance, margin + 150, margin + 48, 24, 850, '#f8fafc');
+  const compactSource = videoName || 'Uploaded video';
+  drawExportText(
+    ctx,
+    `${analysis.diagnostics.state} · ${analysis.diagnostics.mode} · ${compactSource.slice(0, 24)}${compactSource.length > 24 ? '...' : ''}`,
+    margin + 150,
+    margin + 75,
+    13,
+    700,
+    'rgba(226, 232, 240, 0.82)'
+  );
+
+  drawExportGlassPanel(ctx, metricX, metricY, metricWidth, metricHeight);
+  drawExportText(ctx, 'GRIP METRICS', metricX + 16, metricY + 28, 13, 800, '#67e8f9');
+  drawCompactMetric(ctx, metricX + 16, metricY + 48, metricWidth - 32, 'Lock', analysis.objectLockQuality);
+  drawCompactMetric(ctx, metricX + 16, metricY + 72, metricWidth - 32, 'Contact', analysis.evidence.fingerSegmentContactScore);
+  drawCompactMetric(ctx, metricX + 16, metricY + 96, metricWidth - 32, 'Thumb', analysis.thumbOpposition);
+  drawCompactMetric(ctx, metricX + 16, metricY + 120, metricWidth - 32, 'Slip', analysis.slipRisk, true);
+  if (report) {
+    drawExportText(ctx, `Avg ${report.averageGrip}% · Peak ${report.peakGrip}%`, metricX + 16, metricY + 140, 12, 800, 'rgba(240, 253, 250, 0.9)');
+  }
+
+  const timelineWidth = Math.min(420, Math.max(250, width * 0.24));
+  const timelineHeight = 26;
+  const timelineX = width - margin - timelineWidth;
+  const timelineY = margin + 12;
+  drawExportGlassPanel(ctx, timelineX, timelineY, timelineWidth, 56);
+  drawExportText(ctx, `${timeline.length} pts`, timelineX + 14, timelineY + 22, 12, 800, '#e0f2fe');
+  drawExportTimeline(ctx, timelineX + 14, timelineY + 24, timelineWidth - 28, timelineHeight, timeline);
+}
+
 function drawExportGlassPanel(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
   ctx.save();
   const gradient = ctx.createLinearGradient(x, y, x + width, y + height);
@@ -3059,6 +3118,34 @@ function drawExportMetric(
   const fill = Math.max(4, width * clampNumber(value, 0, 1));
   ctx.fillStyle = danger ? 'rgba(248, 113, 113, 0.92)' : 'rgba(103, 232, 249, 0.92)';
   roundRect(ctx, x, y + 13, fill, 8, 4);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawCompactMetric(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  label: string,
+  value: number,
+  danger = false
+) {
+  const percent = Math.round(value * 100);
+  drawExportText(ctx, label, x, y, 12, 750, 'rgba(226, 232, 240, 0.78)');
+  ctx.save();
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 12px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(`${percent}%`, x + width, y);
+  const barX = x + 74;
+  const barWidth = Math.max(70, width - 124);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+  roundRect(ctx, barX, y - 9, barWidth, 6, 3);
+  ctx.fill();
+  const fill = Math.max(3, barWidth * clampNumber(value, 0, 1));
+  ctx.fillStyle = danger ? 'rgba(248, 113, 113, 0.9)' : 'rgba(103, 232, 249, 0.9)';
+  roundRect(ctx, barX, y - 9, fill, 6, 3);
   ctx.fill();
   ctx.restore();
 }

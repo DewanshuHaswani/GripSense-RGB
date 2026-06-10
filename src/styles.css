@@ -584,7 +584,7 @@ button {
 
 .offline-export-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
   gap: 8px;
 }
 
@@ -597,6 +597,11 @@ button {
   background: rgba(15, 23, 42, 0.72);
   font-weight: 800;
   cursor: pointer;
+}
+
+.offline-export-row button {
+  white-space: normal;
+  line-height: 1.05;
 }
 
 .offline-export-row button:disabled {
