@@ -3467,10 +3467,13 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
   const smoothed = smoothOfflineTimeline(points);
   if (smoothed.length < 3) return smoothed;
   return smoothed.map((point, index) => {
-    const context = smoothed.slice(Math.max(0, index - 4), Math.min(smoothed.length, index + 5));
+    const context = offlineTemporalContext(smoothed, point.time, 0.95);
     const futurePastObject = context.filter((item) => item.objectMatch > 0.22 || item.lock > 0.24);
     const continuityScore = futurePastObject.length / Math.max(1, context.length);
+    const bridgeScore = offlineObjectBridgeScore(smoothed, index);
     const proximityScore = offlinePointHandObjectProximity(point);
+    const contextObjectMatch = average(context.map((item) => item.objectMatch));
+    const contextLock = average(context.map((item) => item.lock));
     const contextContact = average(context.map((item) => item.contact));
     const contextThumb = average(context.map((item) => item.thumb));
     const contextClosure = average(context.map((item) => item.closure));
@@ -3481,51 +3484,59 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
         Math.max(point.enclosure, contextEnclosure) * 0.16 +
         Math.max(point.thumb, contextThumb) * 0.22
     );
-    const repairedObjectMatch = Math.max(point.objectMatch, continuityScore * 0.46, proximityScore * 0.42);
-    const repairedLock = Math.max(point.lock, repairedObjectMatch * 0.9, continuityScore * 0.34);
+    const repairedObjectMatch = Math.max(
+      point.objectMatch,
+      contextObjectMatch * 0.9,
+      continuityScore * 0.52,
+      bridgeScore * 0.58,
+      proximityScore * 0.46
+    );
+    const repairedLock = Math.max(point.lock, contextLock * 0.92, repairedObjectMatch * 0.92, continuityScore * 0.38, bridgeScore * 0.52);
     const occlusionAwareHold =
       repairedLock > 0.42 &&
       repairedObjectMatch > 0.28 &&
-      proximityScore > 0.28 &&
-      (Math.max(point.contact, contextContact) > 0.18 || Math.max(point.thumb, contextThumb) > 0.34 || Math.max(point.enclosure, contextEnclosure) > 0.28);
+      (proximityScore > 0.24 || bridgeScore > 0.55) &&
+      (Math.max(point.contact, contextContact) > 0.16 || Math.max(point.thumb, contextThumb) > 0.3 || Math.max(point.enclosure, contextEnclosure) > 0.24);
     const wrapHoldScore = clampUnit(
-      repairedLock * 0.3 +
+      repairedLock * 0.28 +
         repairedObjectMatch * 0.2 +
-        proximityScore * 0.18 +
+        Math.max(proximityScore, bridgeScore * 0.86) * 0.18 +
         Math.max(point.contact, contextContact) * 0.16 +
         Math.max(point.thumb, contextThumb) * 0.1 +
-        continuityScore * 0.06
+        continuityScore * 0.08
     );
     const contactDrivenGrip =
       repairedObjectMatch > 0.2 && handEvidence > 0.32
         ? Math.round(clampUnit(handEvidence * 0.62 + repairedObjectMatch * 0.38) * 86)
         : point.grip;
     const occlusionDrivenGrip = occlusionAwareHold
-      ? Math.round(Math.max(wrapHoldScore * 92, Math.min(76, repairedLock * 82 + continuityScore * 12)))
+      ? Math.round(Math.max(wrapHoldScore * 94, Math.min(82, repairedLock * 84 + continuityScore * 10 + bridgeScore * 8)))
       : point.grip;
     const slip = Math.max(point.slip, offlineMotionDivergence(smoothed, index));
+    const gripCeiling = slip > 0.62 ? 68 : 100;
     const grip = Math.max(point.grip, contactDrivenGrip, occlusionDrivenGrip);
-    const weak = grip < 42 || repairedLock < 0.2 || slip > 0.62;
+    const correctedGrip = Math.min(grip, gripCeiling);
+    const weak = correctedGrip < 42 || repairedLock < 0.2 || slip > 0.62;
     const guidance =
       repairedLock < 0.18
         ? 'Object uncertain'
         : slip > 0.62
           ? 'Improve grip'
-          : grip > 68
+          : correctedGrip > 68
             ? 'Strong grip'
-            : grip > 36
+            : correctedGrip > 36
               ? 'Improve grip'
               : point.guidance;
     return {
       ...point,
-      grip,
-      confidence: Math.max(point.confidence, Math.min(0.88, repairedLock * 0.56 + handEvidence * 0.44)),
+      grip: correctedGrip,
+      confidence: Math.max(point.confidence, Math.min(0.92, repairedLock * 0.54 + handEvidence * 0.36 + bridgeScore * 0.1)),
       objectMatch: repairedObjectMatch,
       lock: repairedLock,
       slip,
       weak,
       guidance,
-      state: repairedLock > 0.22 ? (grip > 68 ? 'Strong hold' : 'Grip detected') : point.state,
+      state: repairedLock > 0.22 ? (correctedGrip > 68 ? 'Strong hold' : 'Grip detected') : point.state,
       mode: occlusionAwareHold && point.mode === 'open hand' ? 'power grip' : point.mode,
       contact: Math.max(point.contact, occlusionAwareHold ? Math.min(0.82, Math.max(contextContact, repairedLock * 0.58)) : point.contact),
       thumb: Math.max(point.thumb, occlusionAwareHold ? Math.min(0.78, contextThumb + repairedLock * 0.18) : point.thumb),
@@ -3582,6 +3593,35 @@ function collectOfflineSegments(points: OfflineTimelinePoint[], predicate: (poin
   });
   if (start !== null && end - start >= 0.25) segments.push({ start, end, reason });
   return segments;
+}
+
+function offlineTemporalContext(points: OfflineTimelinePoint[], time: number, radiusSeconds: number) {
+  const context = points.filter((point) => Math.abs(point.time - time) <= radiusSeconds);
+  return context.length ? context : points;
+}
+
+function offlineObjectBridgeScore(points: OfflineTimelinePoint[], index: number) {
+  const current = points[index];
+  if (!current) return 0;
+  const previous = findNearestObjectEvidence(points, index, -1);
+  const next = findNearestObjectEvidence(points, index, 1);
+  if (!previous || !next) return 0;
+  const gap = next.time - previous.time;
+  if (gap <= 0 || gap > 2.4) return 0;
+  const timeBalance = 1 - clampNumber(Math.abs(current.time - (previous.time + gap / 2)) / (gap / 2 + 0.001), 0, 1);
+  const previousStrength = Math.max(previous.objectMatch, previous.lock);
+  const nextStrength = Math.max(next.objectMatch, next.lock);
+  const proximity = offlinePointHandObjectProximity(current);
+  return clampUnit(Math.min(previousStrength, nextStrength) * 0.58 + timeBalance * 0.16 + proximity * 0.26);
+}
+
+function findNearestObjectEvidence(points: OfflineTimelinePoint[], startIndex: number, direction: -1 | 1) {
+  for (let index = startIndex + direction; index >= 0 && index < points.length; index += direction) {
+    const point = points[index];
+    if (Math.abs(point.time - points[startIndex].time) > 1.4) return null;
+    if (point.objectMatch > 0.24 || point.lock > 0.32) return point;
+  }
+  return null;
 }
 
 function offlinePointHandObjectProximity(point: OfflineTimelinePoint) {
