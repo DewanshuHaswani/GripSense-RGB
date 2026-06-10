@@ -770,7 +770,9 @@ export default function App() {
         const offlineReview = mediaModeRef.current === 'offline';
         const offlineV2Review = offlineReview && offlineReviewVersionRef.current === 'v2';
         const activeAlgorithmVersion = algorithmVersionRef.current;
-        const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6';
+        const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
+        const offlineV1StyleReview = offlineReview || liveOfflineV1Review;
+        const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6' || liveOfflineV1Review;
         const liveV6Review = activeAlgorithmVersion === 'v6' && !offlineReview;
         const trackFirstReview = offlineV2Review || liveV6Review;
         const profileFirstAlgorithm =
@@ -853,7 +855,7 @@ export default function App() {
           else offlineV2TrackRef.current = nextTrack;
         }
         const offlineBaseCandidate =
-          targetDetectorAlgorithm && (offlineReview || liveV6Review) && !selectedProfileTargetId
+          targetDetectorAlgorithm && (offlineV1StyleReview || liveV6Review) && !selectedProfileTargetId
             ? trackFirstReview
               ? stickyTrack?.candidate ?? null
               : selectOfflineHandObjectCandidate(baseObjectCandidatesRef.current, hand) ??
@@ -885,13 +887,13 @@ export default function App() {
         const selectedTemporalCandidate =
           bestProfileCandidate ?? (activeBaseCandidate ? baseCandidateToTemporalCandidate(activeBaseCandidate, activeBaseConfidence) : null);
         const v5TargetRequested =
-          targetDetectorAlgorithm && (offlineReview || liveV6Review || Boolean(targetBaseIdRef.current || targetProfileIdRef.current));
+          targetDetectorAlgorithm && (offlineV1StyleReview || liveV6Review || Boolean(targetBaseIdRef.current || targetProfileIdRef.current));
         const v5TargetActive = !targetDetectorAlgorithm || Boolean(bestProfileCandidate || activeBaseCandidate);
-        const baseThreshold = offlineReview ? OFFLINE_BASE_TARGET_THRESHOLD : liveV6Review ? V6_LIVE_TARGET_THRESHOLD : V5_BASE_TARGET_THRESHOLD;
+        const baseThreshold = offlineV1StyleReview ? OFFLINE_BASE_TARGET_THRESHOLD : liveV6Review ? V6_LIVE_TARGET_THRESHOLD : V5_BASE_TARGET_THRESHOLD;
         const v5TargetLockReady = !targetDetectorAlgorithm || Boolean(bestProfileCandidate || (activeBaseCandidate && activeBaseConfidence >= baseThreshold));
         const requiresEnabledProfileMatch =
           targetDetectorAlgorithm
-            ? !offlineReview && !manualPointRef.current && !activeBaseCandidate && !bestProfileCandidate
+            ? !offlineV1StyleReview && !manualPointRef.current && !activeBaseCandidate && !bestProfileCandidate
             : profileFirstAlgorithm && enabledProfiles.length > 0 && !manualPointRef.current;
         const heuristicObject =
           activeBaseCandidate && v5TargetLockReady
@@ -906,7 +908,7 @@ export default function App() {
                 manualScale: manualScaleRef.current,
                 locked: lockObjectRef.current,
                 detectorBox: activeBaseCandidate ?? detectorBoxRef.current,
-                algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion
+                algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion
               });
         let rawObject: ObjectRegion | null = heuristicObject;
         if (bestProfileCandidate) {
@@ -938,7 +940,7 @@ export default function App() {
           const baseMatch = activeBaseCandidate
             ? {
                 profileId: activeBaseCandidate.candidateId,
-                name: offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current),
+                name: offlineV1StyleReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current),
                 score: activeBaseConfidence,
                 matched: activeBaseConfidence >= baseThreshold
               }
@@ -963,7 +965,7 @@ export default function App() {
               temporalIdentityRef.current,
               selectedTemporalCandidate,
               activeBaseCandidate
-                ? { stableFrames: offlineReview ? 1 : 2, decay: 0.72, threshold: baseThreshold }
+                ? { stableFrames: offlineV1StyleReview ? 1 : 2, decay: 0.72, threshold: baseThreshold }
                 : { stableFrames: 3, decay: 0.72, threshold: 0.62 }
             );
             temporalIdentityRef.current = nextTemporal;
@@ -987,7 +989,7 @@ export default function App() {
         const identityName =
           objectDetectionRef.current?.name ??
           (activeBaseCandidate
-            ? offlineReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
+            ? offlineV1StyleReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
             : null);
         const objectIdentity: ObjectIdentitySignal = {
           hasProfiles: enabledProfiles.length > 0 || Boolean(activeBaseCandidate),
@@ -1001,14 +1003,14 @@ export default function App() {
         const persistentSlipScore = stabilizerRef.current.updatePersistentSlip(handVelocityForSlip, object);
         const rawFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
-          algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion,
+          algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
         const baseFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
           calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
           weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
-          algorithmVersion: offlineReview ? 'v2' : fallbackAlgorithmVersion,
+          algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
         if (activeAlgorithmVersion === 'v3') {
@@ -1252,6 +1254,8 @@ export default function App() {
           ? 'V5 selected. Select a target object ID, then grip scoring only follows that object.'
           : version === 'v6'
           ? 'V6 selected. Live mode auto-follows the hand-near object using Offline V2 sticky tracking.'
+          : version === 'v7'
+          ? 'V7 selected. It mirrors Offline Review V1 auto-search logic on the live camera.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       setLocked(false);
@@ -1271,6 +1275,8 @@ export default function App() {
             ? 'V5 selected. It scans enabled object IDs, waits for target selection, and requires contact before grip can score high.'
             : version === 'v6'
             ? 'V6 selected. It applies Offline V2 track-first logic to live video, then uses V5 contact-gated grip scoring.'
+            : version === 'v7'
+            ? 'V7 selected. It uses the same auto-search implementation as Offline Review V1, without sticky tracking or trained target gating.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -1872,6 +1878,7 @@ export default function App() {
                 <option value="v4">V4 · trained identity</option>
                 <option value="v5">V5 · target detector</option>
                 <option value="v6">V6 · sticky live detector</option>
+                <option value="v7">V7 · offline V1 live copy</option>
               </select>
             </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -4299,9 +4306,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6'
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7'
     ? fromStorage
     : 'v5';
 }
