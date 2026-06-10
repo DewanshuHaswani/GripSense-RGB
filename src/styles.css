@@ -343,6 +343,17 @@ button {
   color: #06131f;
 }
 
+.tool-button.recording-active {
+  color: #fee2e2;
+  background: rgba(248, 113, 113, 0.22);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.22), 0 0 22px rgba(248, 113, 113, 0.18);
+}
+
+.tool-button.recorded-ready {
+  color: #dcfce7;
+  background: rgba(74, 222, 128, 0.18);
+}
+
 .permission-panel {
   position: absolute;
   z-index: 5;
@@ -353,6 +364,86 @@ button {
   padding: 28px;
   border-radius: 8px;
   text-align: center;
+}
+
+.recording-review-panel {
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  bottom: 32px;
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(260px, 430px);
+  gap: 16px;
+  width: min(720px, calc(100% - 40px));
+  padding: 14px;
+  border: 1px solid rgba(167, 243, 208, 0.26);
+  border-radius: 10px;
+  color: #e5eef8;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.86), rgba(8, 13, 20, 0.7)),
+    rgba(14, 21, 30, 0.82);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(22px) saturate(1.2);
+  transform: translateX(-50%);
+}
+
+.recording-preview {
+  overflow: hidden;
+  min-height: 150px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.54);
+}
+
+.recording-preview video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 150px;
+  object-fit: cover;
+}
+
+.recording-review-copy {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+}
+
+.recording-review-copy h2,
+.recording-review-copy p {
+  margin: 0;
+}
+
+.recording-review-copy p {
+  color: #b9c5d4;
+  line-height: 1.45;
+}
+
+.recording-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.recording-meta span {
+  color: #94a3b8;
+  font-weight: 800;
+}
+
+.recording-meta strong {
+  color: #f8fafc;
+  font-variant-numeric: tabular-nums;
+}
+
+.recording-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .offline-review-overlay {
@@ -1771,6 +1862,29 @@ h2 {
   .permission-panel {
     top: 58%;
     padding: 26px;
+  }
+
+  .recording-review-panel {
+    grid-template-columns: 1fr;
+    bottom: 12px;
+    width: calc(100% - 24px);
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+  }
+
+  .recording-preview,
+  .recording-preview video {
+    min-height: 120px;
+  }
+
+  .recording-actions .tool-button {
+    width: auto;
+    min-width: 104px;
+    padding: 0 12px;
+  }
+
+  .recording-actions .tool-button span {
+    display: inline;
   }
 
   .analysis-rail {

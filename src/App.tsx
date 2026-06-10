@@ -18,8 +18,10 @@ import {
   RotateCcw,
   ShieldCheck,
   Sparkles,
+  Square,
   Target,
   Upload,
+  Video,
   X
 } from 'lucide-react';
 import { analyzeGrip, createEmptyAnalysis } from './vision/gripAnalysis';
@@ -172,6 +174,12 @@ type OfflineTimelinePoint = {
 
 type OfflineReviewVersion = 'v1' | 'v2';
 
+type RecordedClip = {
+  file: File;
+  url: string;
+  durationMs: number;
+};
+
 type OfflineSegment = {
   start: number;
   end: number;
@@ -304,6 +312,10 @@ export default function App() {
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<BlobPart[]>([]);
+  const recordingStartedAtRef = useRef(0);
+  const recordedClipUrlRef = useRef<string | null>(null);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -362,6 +374,9 @@ export default function App() {
   const [baseClassSummary, setBaseClassSummary] = useState<BaseClassSummary[]>([]);
   const [offlineTimeline, setOfflineTimeline] = useState<OfflineTimelinePoint[]>([]);
   const [offlineReport, setOfflineReport] = useState<OfflineReport>(null);
+  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'ready' | 'unsupported'>('idle');
+  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
+  const [recordedClip, setRecordedClip] = useState<RecordedClip | null>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
@@ -431,11 +446,21 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
       engineRef.current?.dispose();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
+      if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (recordingState !== 'recording') return;
+    const interval = window.setInterval(() => {
+      setRecordingElapsedMs(Date.now() - recordingStartedAtRef.current);
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [recordingState]);
 
   const modelSummary = useMemo(() => {
     const ready = Object.values(modelStatus).filter((state) => state === 'ready').length;
@@ -634,6 +659,93 @@ export default function App() {
     event.target.value = '';
     if (file) void startOfflineVideo(file);
   }, [startOfflineVideo]);
+
+  const clearRecordedClip = useCallback(() => {
+    if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
+    recordedClipUrlRef.current = null;
+    setRecordedClip(null);
+    setRecordingElapsedMs(0);
+    setRecordingState('idle');
+  }, []);
+
+  const startLiveRecording = useCallback(async () => {
+    if (recordingState === 'recording') return;
+    if (typeof MediaRecorder === 'undefined') {
+      setRecordingState('unsupported');
+      setAnalysis(createEmptyAnalysis('This browser cannot record camera clips for offline review.'));
+      return;
+    }
+
+    if (!streamRef.current || mediaModeRef.current !== 'live') {
+      await startCamera();
+    }
+
+    const stream = streamRef.current;
+    if (!stream) {
+      setAnalysis(createEmptyAnalysis('Start the camera before recording an offline clip.'));
+      return;
+    }
+
+    const mimeType = mediaRecorderTypeFor('webm');
+    if (!mimeType) {
+      setRecordingState('unsupported');
+      setAnalysis(createEmptyAnalysis('This browser cannot record WebM clips for offline review.'));
+      return;
+    }
+
+    if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
+    recordedClipUrlRef.current = null;
+    setRecordedClip(null);
+    recordedChunksRef.current = [];
+    recordingStartedAtRef.current = Date.now();
+    setRecordingElapsedMs(0);
+
+    const recorder = new MediaRecorder(stream, { mimeType });
+    recorderRef.current = recorder;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+    };
+    recorder.onstop = () => {
+      const durationMs = Math.max(0, Date.now() - recordingStartedAtRef.current);
+      const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+      recordedChunksRef.current = [];
+      recorderRef.current = null;
+      if (!blob.size) {
+        setRecordingState('idle');
+        setAnalysis(createEmptyAnalysis('Recording did not capture video. Try recording again.'));
+        return;
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const file = new File([blob], `gripsense-recording-${stamp}.webm`, { type: mimeType, lastModified: Date.now() });
+      const url = URL.createObjectURL(blob);
+      recordedClipUrlRef.current = url;
+      setRecordedClip({ file, url, durationMs });
+      setRecordingElapsedMs(durationMs);
+      setRecordingState('ready');
+      setAnalysis(createEmptyAnalysis('Recording captured. Choose Offline V1 or Offline V2 to process it.'));
+    };
+    recorder.start(250);
+    setRecordingState('recording');
+    setAnalysis(createEmptyAnalysis('Recording live camera. Stop recording to process this clip offline.'));
+  }, [recordingState, startCamera]);
+
+  const stopLiveRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state !== 'recording') return;
+    recorder.stop();
+  }, []);
+
+  const processRecordedClip = useCallback((version: OfflineReviewVersion) => {
+    if (!recordedClip) return;
+    offlineReviewVersionRef.current = version;
+    setOfflineReviewVersion(version);
+    const file = recordedClip.file;
+    if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
+    recordedClipUrlRef.current = null;
+    setRecordedClip(null);
+    setRecordingState('idle');
+    void startOfflineVideo(file);
+  }, [recordedClip, startOfflineVideo]);
 
   const updateCalibrationCapture = useCallback((frameAnalysis: GripAnalysis, timestamp: number) => {
     const capture = calibrationCaptureRef.current;
@@ -1910,6 +2022,22 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineVideoUpload}
             />
+            {recordingState === 'recording' ? (
+              <button className="tool-button recording-active" onClick={stopLiveRecording} aria-label="Stop recording offline review clip">
+                <Square size={16} />
+                <span>Stop {formatRecordingDuration(recordingElapsedMs)}</span>
+              </button>
+            ) : (
+              <button
+                className={recordedClip ? 'tool-button recorded-ready' : 'tool-button'}
+                onClick={startLiveRecording}
+                disabled={mediaMode === 'offline' || recordingState === 'unsupported'}
+                aria-label="Record camera clip for offline review"
+              >
+                <Video size={17} />
+                <span>{recordedClip ? 'Recorded' : 'Record'}</span>
+              </button>
+            )}
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume tracking' : 'Pause tracking'}>
               {paused ? <Play size={18} /> : <Pause size={18} />}
             </button>
@@ -1976,6 +2104,39 @@ export default function App() {
               <Camera size={20} />
               <span>Start camera</span>
             </button>
+          </div>
+        )}
+
+        {recordedClip && mediaMode === 'live' && !trainerOpen && (
+          <div className="recording-review-panel" role="dialog" aria-label="Process recorded clip">
+            <div className="recording-preview">
+              <video src={recordedClip.url} muted playsInline controls />
+            </div>
+            <div className="recording-review-copy">
+              <p className="eyebrow">Recorded offline clip</p>
+              <h2>Process recording</h2>
+              <p>
+                Choose the offline engine for this camera recording. V1 starts review quickly; V2 scans the whole clip and then unlocks CSV, JSON, MP4, compact MP4, and WebM export.
+              </p>
+              <div className="recording-meta">
+                <span>Duration</span>
+                <strong>{formatRecordingDuration(recordedClip.durationMs)}</strong>
+              </div>
+              <div className="recording-actions">
+                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v1')}>
+                  <Upload size={17} />
+                  <span>Process V1</span>
+                </button>
+                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v2')}>
+                  <Sparkles size={17} />
+                  <span>Process V2</span>
+                </button>
+                <button type="button" className="tool-button" onClick={clearRecordedClip}>
+                  <X size={17} />
+                  <span>Discard</span>
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -2878,6 +3039,13 @@ function formatTrainingRole(role: TrainingViewRole) {
 
 function csvEscape(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
+}
+
+function formatRecordingDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 function downloadTextFile(filename: string, text: string, type: string) {
