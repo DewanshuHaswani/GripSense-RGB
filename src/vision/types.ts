@@ -12,7 +12,7 @@ export type MotionState = 'idle' | 'moving-with-hand' | 'slipping' | 'uncertain'
 
 export type GripGuidance = 'Strong grip' | 'Improve grip' | 'Reposition' | 'Object not locked' | 'Object uncertain';
 
-export type AlgorithmVersion = 'v1' | 'v2' | 'v3' | 'v4' | 'v5' | 'v6' | 'v7';
+export type AlgorithmVersion = 'v1' | 'v2' | 'v3' | 'v4' | 'v5' | 'v6' | 'v7' | 'v8';
 
 export type GripMode = 'phone-side grip' | 'pinch grip' | 'power grip' | 'hook grip' | 'open hand' | 'uncertain';
 
@@ -55,6 +55,7 @@ export type ObjectRegion = {
   relativeDriftScore?: number;
   detectorLabel?: string;
   detectorScore?: number;
+  rfdetr?: RfdetrObjectEvidence;
 };
 
 export type DetectedObjectBox = {
@@ -192,6 +193,30 @@ export type V3AnalysisDetails = {
   uncertainty: number;
   subScores: V3SubScores;
   diagnostics: V3DiagnosticCode[];
+};
+
+export type RfdetrDetection = {
+  id: string;
+  label: string;
+  score: number;
+  bbox: [number, number, number, number];
+  maskPolygon: Point[];
+  maskArea: number;
+  center: Point;
+  latencyMs: number;
+};
+
+export type RfdetrObjectEvidence = {
+  detectionId: string;
+  label: string;
+  score: number;
+  maskArea: number;
+  handProximity: number;
+  maskOverlap: number;
+  boundaryContact: number;
+  continuity: number;
+  contact: number;
+  rejectedPerson: boolean;
 };
 
 export type ObjectIdentitySignal = {

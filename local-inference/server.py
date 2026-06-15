@@ -1,8 +1,14 @@
-from typing import Literal
+import json
+import os
+import time
+from io import BytesIO
+from typing import Any, Literal
 
-from fastapi import FastAPI
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from PIL import Image
 
 
 DiagnosticCode = Literal[
@@ -136,7 +142,46 @@ class AnalyzeFrameResponse(BaseModel):
     diagnostics: list[DiagnosticCode]
 
 
-app = FastAPI(title="GripSense V3 Local Inference", version="0.1.0")
+class RfdetrPoint(BaseModel):
+    x: float
+    y: float
+
+
+class RfdetrBBox(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class RfdetrDetectionResponse(BaseModel):
+    id: str
+    label: str
+    score: float
+    bbox: RfdetrBBox
+    maskPolygon: list[RfdetrPoint]
+    maskArea: float
+    center: RfdetrPoint
+    latencyMs: float
+
+
+class RfdetrAnalyzeResponse(BaseModel):
+    detections: list[RfdetrDetectionResponse]
+    latencyMs: float
+    model: str
+    device: str
+
+
+_RFDETR_MODEL: Any | None = None
+_RFDETR_CLASSES: dict[int, str] | list[str] | None = None
+_RFDETR_MODEL_NAME = "RF-DETR-Seg Nano"
+_RFDETR_DEVICE = os.environ.get("GRIPSENSE_RFDETR_DEVICE", "cpu").lower()
+
+if _RFDETR_DEVICE == "cpu":
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+
+app = FastAPI(title="GripSense Local Inference", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
@@ -219,5 +264,135 @@ async def analyze_frame(request: AnalyzeFrameRequest) -> AnalyzeFrameResponse:
     )
 
 
+@app.post("/api/rfdetr/analyze", response_model=RfdetrAnalyzeResponse)
+async def analyze_rfdetr_frame(
+    frame: UploadFile = File(...),
+    width: int | None = Form(default=None),
+    height: int | None = Form(default=None),
+    mirrored: bool = Form(default=False),
+    handLandmarks: str | None = Form(default=None),
+    threshold: float = Form(default=0.35),
+) -> RfdetrAnalyzeResponse:
+    """Run RF-DETR-Seg Nano on a JPEG frame.
+
+    The browser sends optional hand landmarks so future model adapters can use
+    them server-side. V8 grip scoring still treats labels as diagnostics only.
+    """
+
+    del width, height, mirrored
+    if handLandmarks:
+        try:
+            json.loads(handLandmarks)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="handLandmarks must be JSON when provided")
+
+    model, classes = get_rfdetr_model()
+    start = time.perf_counter()
+    image_bytes = await frame.read()
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+    try:
+        raw_detections = model.predict(image, threshold=float(threshold))
+    except Exception as exc:  # pragma: no cover - depends on local model install/runtime.
+        raise HTTPException(status_code=500, detail=f"RF-DETR inference failed: {exc}") from exc
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    detections = normalize_rfdetr_detections(raw_detections, classes, latency_ms)
+    return RfdetrAnalyzeResponse(
+        detections=detections,
+        latencyMs=latency_ms,
+        model=_RFDETR_MODEL_NAME,
+        device=_RFDETR_DEVICE,
+    )
+
+
 def clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def get_rfdetr_model() -> tuple[Any, dict[int, str] | list[str] | None]:
+    global _RFDETR_MODEL, _RFDETR_CLASSES
+    if _RFDETR_MODEL is not None:
+        return _RFDETR_MODEL, _RFDETR_CLASSES
+    try:
+        from rfdetr import RFDETRSegNano
+        from rfdetr.assets.coco_classes import COCO_CLASSES
+    except Exception as exc:  # pragma: no cover - depends on optional local dependency.
+        raise HTTPException(
+            status_code=503,
+            detail="RF-DETR is not installed. Run `pip install -r local-inference/requirements.txt`.",
+        ) from exc
+    try:
+        _RFDETR_MODEL = RFDETRSegNano()
+    except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
+        raise HTTPException(status_code=503, detail=f"RF-DETR model could not load: {exc}") from exc
+    _RFDETR_CLASSES = COCO_CLASSES
+    return _RFDETR_MODEL, _RFDETR_CLASSES
+
+
+def normalize_rfdetr_detections(raw_detections: Any, classes: dict[int, str] | list[str] | None, latency_ms: float) -> list[RfdetrDetectionResponse]:
+    xyxy = np.asarray(getattr(raw_detections, "xyxy", []), dtype=float)
+    confidence = np.asarray(getattr(raw_detections, "confidence", []), dtype=float)
+    class_ids = np.asarray(getattr(raw_detections, "class_id", []), dtype=int)
+    masks = getattr(raw_detections, "mask", None)
+    responses: list[RfdetrDetectionResponse] = []
+
+    for index, box in enumerate(xyxy):
+        if box.shape[0] < 4:
+            continue
+        x1, y1, x2, y2 = [float(value) for value in box[:4]]
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        score = clamp(float(confidence[index])) if index < len(confidence) else 0.0
+        class_id = int(class_ids[index]) if index < len(class_ids) else -1
+        label = class_label(classes, class_id)
+        mask = masks[index] if masks is not None and index < len(masks) else None
+        polygon = mask_polygon(mask, (x1, y1, x2, y2))
+        mask_area = float(np.asarray(mask, dtype=bool).sum()) if mask is not None else width * height
+        responses.append(
+            RfdetrDetectionResponse(
+                id=f"rfdetr-{index}-{class_id}",
+                label=label,
+                score=score,
+                bbox=RfdetrBBox(x=x1, y=y1, width=width, height=height),
+                maskPolygon=[RfdetrPoint(x=point[0], y=point[1]) for point in polygon],
+                maskArea=mask_area,
+                center=RfdetrPoint(x=x1 + width / 2, y=y1 + height / 2),
+                latencyMs=latency_ms,
+            )
+        )
+    return responses
+
+
+def class_label(classes: dict[int, str] | list[str] | None, class_id: int) -> str:
+    if isinstance(classes, dict):
+        return classes.get(class_id, "object")
+    if isinstance(classes, list) and 0 <= class_id < len(classes):
+        return classes[class_id]
+    return "object"
+
+
+def mask_polygon(mask: Any, box: tuple[float, float, float, float]) -> list[tuple[float, float]]:
+    if mask is None:
+        return bbox_polygon(box)
+    mask_array = np.asarray(mask, dtype=bool)
+    if mask_array.ndim != 2 or not mask_array.any():
+        return bbox_polygon(box)
+    ys, xs = np.where(mask_array)
+    min_x = float(xs.min())
+    max_x = float(xs.max())
+    min_y = float(ys.min())
+    max_y = float(ys.max())
+    mid_x = (min_x + max_x) / 2
+    mid_y = (min_y + max_y) / 2
+    return [
+        (mid_x, min_y),
+        (max_x, mid_y),
+        (mid_x, max_y),
+        (min_x, mid_y),
+    ]
+
+
+def bbox_polygon(box: tuple[float, float, float, float]) -> list[tuple[float, float]]:
+    x1, y1, x2, y2 = box
+    return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]

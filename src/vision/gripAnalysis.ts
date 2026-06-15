@@ -111,7 +111,8 @@ export function analyzeGrip(
   } = {}
 ): GripAnalysis {
   const algorithmVersion = options.algorithmVersion ?? 'v1';
-  const fallbackAlgorithmVersion: AlgorithmVersion = algorithmVersion === 'v3' || algorithmVersion === 'v7' ? 'v2' : algorithmVersion;
+  const fallbackAlgorithmVersion: AlgorithmVersion =
+    algorithmVersion === 'v3' || algorithmVersion === 'v7' ? 'v2' : algorithmVersion === 'v8' ? 'v6' : algorithmVersion;
   const scoringConfig = options.scoringConfig ?? DEFAULT_GRIP_SCORING_CONFIG;
   const objectIdentity = options.objectIdentity ?? { hasProfiles: false, score: 0, matched: false, name: null };
   if (!hand || hand.length < 21) {

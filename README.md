@@ -35,8 +35,30 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v4`
 - `http://127.0.0.1:5173/?version=v5`
 - `http://127.0.0.1:5173/?version=v6`
+- `http://127.0.0.1:5173/?version=v7`
+- `http://127.0.0.1:5173/?version=v8`
 
-The toolbar also has a `V1` / `V2` / `V3` / `V4` / `V5` / `V6` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` through `V8` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+
+### Optional RF-DETR CPU Server
+
+V8 live mode and Offline V2 RF-DETR enhancement use a local Python server. It runs on CPU by default and keeps frames on your machine.
+
+```bash
+cd local-inference
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+uvicorn server:app --host 127.0.0.1 --port 7867
+```
+
+Then start the frontend in another terminal:
+
+```bash
+npm run dev
+```
+
+The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. The default server model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
 
 ## Offline Video Review
 
@@ -47,10 +69,15 @@ Offline mode adds liquid-glass overlays directly on top of the video:
 - Left overlay: grip percentage, guidance, tracking state, grip mode, and matched object.
 - Right overlay: confidence, object lock, closure, contact, thumb support, and slip risk.
 - Timeline overlay: grip percentage over time, object match over time, slip-risk bars, and weak-grip segments.
-- Export buttons: download the offline analysis as CSV or JSON.
+- Export buttons: download CSV, JSON, MP4, MP4 Compact, or WebM.
 - The video remains visible behind the transparent panels, while the text and bars stay readable.
 
 You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
+
+Offline Review has two algorithms:
+
+- **Offline V1**: the original offline review path. It is unchanged and starts quickly.
+- **Offline V2**: scans the full clip before review, uses RF-DETR object masks when the local server is available, and then applies future/past smoothing. Its timeline includes grip score, object score, contact evidence, weak segments, and slip events. If RF-DETR is unavailable, Offline V2 keeps using the existing local review path and reports the server status in the overlay.
 
 ## Object Profile V2 Training
 
@@ -138,6 +165,25 @@ V6 is useful when the generic detector label is unstable or wrong. Instead of tr
 - **Same safety gate as V5**: grip percentage still requires visible contact, so an object that moves away from the hand should not keep a high score.
 
 Use V5 when you want explicit target selection and stricter behavior. Use V6 when you want the live camera to behave more like the improved offline review.
+
+## Version 8: RF-DETR Live Masks
+
+V8 adds local RF-DETR-Seg Nano object evidence to live grip analysis:
+
+```text
+webcam frame -> local RF-DETR mask/box -> best non-person hand-near object -> mask-contact grip score
+```
+
+V8 does not trust object labels for grip quality. Labels are only diagnostic text. A `person` detection is rejected as a grip object by default. The selected object is scored by hand proximity, RF-DETR mask overlap with the hand corridor, and temporal continuity.
+
+Important V8 behavior:
+
+- A closed hand alone cannot produce a high grip score.
+- Strong grip is capped unless the RF-DETR mask overlaps the hand corridor.
+- If the object drops away from the hand, object confidence and grip decay quickly.
+- If the RF-DETR server is unavailable, V8 shows `RF-DETR unavailable` and does not fake confidence or fall back to a high heuristic score.
+
+Limitations: RF-DETR-Seg Nano on CPU can be slower than the webcam frame rate, especially on large frames. Lighting, blur, occlusion, and unusual objects can still reduce mask quality. The app estimates visual grip stability only; it does not measure real force.
 
 ## Version 3: Trained Object Focus
 

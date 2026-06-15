@@ -50,6 +50,19 @@ import { drawTrackingOverlay } from './vision/drawing';
 import { createVisionEngine, type VisionEngine, type VisionModelStatus } from './vision/visionEngine';
 import { TrackingStabilizer } from './vision/stabilization';
 import { createV3AnalyzeFrameRequest, DEFAULT_V3_ENDPOINT, requestV3FrameAnalysis } from './vision/v3Inference';
+import {
+  analyzeGripWithRfdetr,
+  createInitialRfdetrRuntime,
+  DEFAULT_RFDETR_ENDPOINT,
+  EMPTY_RFDETR_TRACK,
+  isRfdetrResultFresh,
+  refineRfdetrOfflineTimeline,
+  requestRfdetrFrameAnalysis,
+  RFDETR_OFFLINE_INTERVAL_MS,
+  RFDETR_REQUEST_INTERVAL_MS,
+  type RfdetrRuntime,
+  type RfdetrTrackState
+} from './vision/rfdetr';
 import { EMPTY_TEMPORAL_IDENTITY, temporalIdentityToMatch, updateTemporalIdentity, type TemporalIdentityState } from './vision/temporalIdentity';
 import type {
   AlgorithmVersion,
@@ -76,6 +89,7 @@ const ALGORITHM_VERSION_STORAGE_KEY = 'grip-lab-algorithm-version';
 const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
 const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
+const RFDETR_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_ENDPOINT ?? DEFAULT_RFDETR_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
 const OFFLINE_TIMELINE_INTERVAL_MS = 180;
@@ -170,6 +184,9 @@ type OfflineTimelinePoint = {
   objectY: number | null;
   palmX: number | null;
   palmY: number | null;
+  rfdetrObjectScore?: number;
+  rfdetrContact?: number;
+  rfdetrLatencyMs?: number | null;
 };
 
 type OfflineReviewVersion = 'v1' | 'v2';
@@ -232,7 +249,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, or V6 for offline-style sticky live tracking.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, or V8 for RF-DETR live masks.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -311,6 +328,7 @@ export default function App() {
   const offlineBatchProcessingRef = useRef(false);
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
+  const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -325,6 +343,7 @@ export default function App() {
     lastRequestAt: 0,
     latencyMs: null
   });
+  const rfdetrRuntimeRef = useRef<RfdetrRuntime>(createInitialRfdetrRuntime(RFDETR_ENDPOINT));
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const profileDirectoryRef = useRef<LocalDirectoryHandle | null>(null);
   const cropDragRef = useRef<{
@@ -378,6 +397,7 @@ export default function App() {
   const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
   const [recordedClip, setRecordedClip] = useState<RecordedClip | null>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
+  const [rfdetrRuntime, setRfdetrRuntime] = useState<RfdetrRuntime>(() => rfdetrRuntimeRef.current);
   const [trainingStatus, setTrainingStatus] = useState('Open the object portal to capture or upload training images.');
   const [trainerOpen, setTrainerOpen] = useState(false);
   const [namePromptOpen, setNamePromptOpen] = useState(false);
@@ -521,6 +541,24 @@ export default function App() {
     });
   }, [updateV3Runtime]);
 
+  const updateRfdetrRuntime = useCallback((next: RfdetrRuntime) => {
+    rfdetrRuntimeRef.current = next;
+    setRfdetrRuntime(next);
+  }, []);
+
+  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8 or Offline V2 to begin RF-DETR analysis.') => {
+    updateRfdetrRuntime({
+      status: 'idle',
+      message,
+      endpoint: RFDETR_ENDPOINT,
+      result: null,
+      receivedAt: null,
+      lastRequestAt: 0,
+      latencyMs: null
+    });
+    rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
+  }, [updateRfdetrRuntime]);
+
   const resetTrackingRefs = useCallback(() => {
     manualPointRef.current = null;
     manualScaleRef.current = 1;
@@ -532,6 +570,7 @@ export default function App() {
     baseObjectCandidatesRef.current = [];
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
     liveIdentityMemoryRef.current = null;
     objectDetectionRef.current = null;
     v3ProfileCandidatesRef.current = [];
@@ -540,13 +579,14 @@ export default function App() {
     targetBaseIdRef.current = null;
     lastProfileSearchRef.current = 0;
     resetV3Runtime();
+    resetRfdetrRuntime();
     stabilizerRef.current.reset();
     setLocked(false);
     setObjectDetection(null);
     setV3ProfileCandidates([]);
     setBaseObjectCandidates([]);
     setTemporalIdentity(EMPTY_TEMPORAL_IDENTITY);
-  }, [resetV3Runtime]);
+  }, [resetRfdetrRuntime, resetV3Runtime]);
 
   const startCamera = useCallback(async () => {
     if (cameraState === 'requesting' || (cameraState === 'live' && mediaMode === 'live')) return;
@@ -854,6 +894,53 @@ export default function App() {
     });
   }, [updateV3Runtime]);
 
+  const scheduleRfdetrInference = useCallback((video: HTMLVideoElement, hand: Landmark[] | null, timestamp: number, offline = false) => {
+    const current = rfdetrRuntimeRef.current;
+    const interval = offline ? RFDETR_OFFLINE_INTERVAL_MS : RFDETR_REQUEST_INTERVAL_MS;
+    if (current.status === 'pending' || timestamp - current.lastRequestAt < interval) return;
+
+    updateRfdetrRuntime({
+      ...current,
+      status: 'pending',
+      message: offline ? 'RF-DETR scanning offline frame.' : 'RF-DETR analyzing live frame.',
+      lastRequestAt: timestamp
+    });
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), offline ? 2400 : 1800);
+    void requestRfdetrFrameAnalysis({
+      video,
+      hand,
+      endpoint: current.endpoint,
+      mirrored: mirroredRef.current,
+      signal: controller.signal
+    }).then((result) => {
+      window.clearTimeout(timeout);
+      const latest = rfdetrRuntimeRef.current;
+      const stillRelevant = algorithmVersionRef.current === 'v8' || (mediaModeRef.current === 'offline' && offlineReviewVersionRef.current === 'v2');
+      if (!stillRelevant) return;
+      if (result.ok) {
+        updateRfdetrRuntime({
+          ...latest,
+          status: 'ready',
+          message: `RF-DETR active (${result.response.detections.length} detection${result.response.detections.length === 1 ? '' : 's'}).`,
+          result: result.response,
+          receivedAt: result.receivedAt,
+          latencyMs: result.response.latencyMs ?? result.response.detections[0]?.latencyMs ?? null
+        });
+        return;
+      }
+      updateRfdetrRuntime({
+        ...latest,
+        status: 'unavailable',
+        message: `RF-DETR unavailable: ${result.status}.`,
+        result: null,
+        receivedAt: result.receivedAt,
+        latencyMs: null
+      });
+    });
+  }, [updateRfdetrRuntime]);
+
   const runLoop = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -883,6 +970,7 @@ export default function App() {
         const offlineV2Review = offlineReview && offlineReviewVersionRef.current === 'v2';
         const activeAlgorithmVersion = algorithmVersionRef.current;
         const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
+        const liveRfdetrReview = activeAlgorithmVersion === 'v8' && !offlineReview;
         const offlineV1StyleReview = offlineReview || liveOfflineV1Review;
         const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6' || liveOfflineV1Review;
         const liveV6Review = activeAlgorithmVersion === 'v6' && !offlineReview;
@@ -894,6 +982,10 @@ export default function App() {
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
+        const usesRfdetr = liveRfdetrReview || offlineV2Review;
+        if (usesRfdetr) {
+          scheduleRfdetrInference(video, hand, timestamp, offlineV2Review);
+        }
         if (timestamp - lastDetectorRunRef.current > 650) {
           const detectorBoxes = engine.detectObjectBoxes(video, timestamp);
           const nextBaseTracker = updateBaseObjectTracks(
@@ -1103,7 +1195,7 @@ export default function App() {
           (activeBaseCandidate
             ? offlineV1StyleReview ? baseObjectName(activeBaseCandidate, false) : baseObjectName(activeBaseCandidate, showObjectLabelsRef.current)
             : null);
-        const objectIdentity: ObjectIdentitySignal = {
+        let objectIdentity: ObjectIdentitySignal = {
           hasProfiles: enabledProfiles.length > 0 || Boolean(activeBaseCandidate),
           score: identityScore,
           matched: identityMatched,
@@ -1118,13 +1210,53 @@ export default function App() {
           algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
-        const baseFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
+        let baseFrameAnalysis = analyzeGrip(hand, object, previousPalmRef.current, {
           persistentSlipScore,
           calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
           weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
           algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
+        let rfdetrSelectionMetrics: { objectScore: number; contact: number; latencyMs: number | null } | null = null;
+        if (liveRfdetrReview || offlineV2Review) {
+          const latestRfdetr = rfdetrRuntimeRef.current;
+          const freshRfdetr = isRfdetrResultFresh(latestRfdetr, timestamp, offlineV2Review ? 2600 : 1500);
+          if (liveRfdetrReview || freshRfdetr) {
+            const rfdetrGrip = analyzeGripWithRfdetr({
+              hand,
+              detections: freshRfdetr ? latestRfdetr.result?.detections ?? [] : [],
+              previousPalm: previousPalmRef.current,
+              previousObject: previousObjectRef.current,
+              previousTrack: rfdetrTrackRef.current,
+              now: timestamp,
+              persistentSlipScore,
+              calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
+              weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
+              serverAvailable: freshRfdetr,
+              unavailableMessage: latestRfdetr.message || 'RF-DETR unavailable. Start the local RF-DETR server to use V8 live analysis.'
+            });
+            rfdetrTrackRef.current = rfdetrGrip.track;
+            if (liveRfdetrReview || rfdetrGrip.object) {
+              object = rfdetrGrip.object;
+              objectIdentity = rfdetrGrip.objectIdentity;
+              objectDetectionRef.current = rfdetrGrip.objectIdentity.name
+                ? {
+                    profileId: rfdetrGrip.object?.detectorLabel ?? 'rfdetr-object',
+                    name: rfdetrGrip.objectIdentity.name,
+                    score: rfdetrGrip.objectIdentity.score,
+                    matched: rfdetrGrip.objectIdentity.matched
+                  }
+                : null;
+              setObjectDetection(objectDetectionRef.current);
+              baseFrameAnalysis = rfdetrGrip.analysis;
+              rfdetrSelectionMetrics = {
+                objectScore: rfdetrGrip.selection.objectScore,
+                contact: rfdetrGrip.selection.contact,
+                latencyMs: latestRfdetr.latencyMs
+              };
+            }
+          }
+        }
         if (activeAlgorithmVersion === 'v3') {
           scheduleV3Inference(video, hand, object, baseFrameAnalysis, objectIdentity, timestamp);
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(
@@ -1139,6 +1271,8 @@ export default function App() {
             }),
             timestamp
           );
+        } else if (liveRfdetrReview) {
+          frameAnalysis = baseFrameAnalysis;
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
@@ -1181,7 +1315,10 @@ export default function App() {
             objectX: object?.center.x ?? null,
             objectY: object?.center.y ?? null,
             palmX: frameAnalysis.palmCenter?.x ?? null,
-            palmY: frameAnalysis.palmCenter?.y ?? null
+            palmY: frameAnalysis.palmCenter?.y ?? null,
+            rfdetrObjectScore: rfdetrSelectionMetrics?.objectScore,
+            rfdetrContact: rfdetrSelectionMetrics?.contact,
+            rfdetrLatencyMs: rfdetrSelectionMetrics?.latencyMs
           };
           offlineTimelineRef.current =
             offlineReviewVersionRef.current === 'v2'
@@ -1232,7 +1369,7 @@ export default function App() {
 
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     animationRef.current = requestAnimationFrame(tick);
-  }, [analysis, mediaMode, scheduleV3Inference, updateCalibrationCapture]);
+  }, [analysis, mediaMode, scheduleRfdetrInference, scheduleV3Inference, updateCalibrationCapture]);
 
   const resetObject = useCallback(() => {
     manualPointRef.current = null;
@@ -1246,9 +1383,11 @@ export default function App() {
     temporalIdentityRef.current = EMPTY_TEMPORAL_IDENTITY;
     targetBaseIdRef.current = null;
     lastProfileSearchRef.current = 0;
+    rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
     stabilizerRef.current.reset();
     calibrationCaptureRef.current = { active: false, kind: calibrationKind, start: 0, samples: [] };
     resetV3Runtime();
+    resetRfdetrRuntime();
     setLocked(false);
     setCalibrating(false);
     setV3ProfileCandidates([]);
@@ -1257,7 +1396,7 @@ export default function App() {
     setTargetProfileId(null);
     setTargetBaseId(null);
     setAnalysis(createEmptyAnalysis('Object reset. Place it between your thumb and fingers to relock.'));
-  }, [calibrationKind, resetV3Runtime]);
+  }, [calibrationKind, resetRfdetrRuntime, resetV3Runtime]);
 
   const startCalibration = useCallback((kind: 'strong' | 'weak' = 'strong') => {
     calibrationCaptureRef.current = {
@@ -1354,6 +1493,7 @@ export default function App() {
       baseTrackerRef.current = { nextId: 1, tracks: [] };
       baseObjectCandidatesRef.current = [];
       liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+      rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
       targetProfileIdRef.current = null;
       targetBaseIdRef.current = null;
       stabilizerRef.current.reset();
@@ -1368,7 +1508,14 @@ export default function App() {
           ? 'V6 selected. Live mode auto-follows the hand-near object using Offline V2 sticky tracking.'
           : version === 'v7'
           ? 'V7 selected. It mirrors Offline Review V1 auto-search logic on the live camera.'
+          : version === 'v8'
+          ? 'V8 selected. Start the local RF-DETR server to use live mask/box object evidence.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
+      );
+      resetRfdetrRuntime(
+        version === 'v8'
+          ? 'V8 selected. Start tracking to connect to the local RF-DETR server.'
+          : 'RF-DETR server idle. Select V8 or Offline V2 to begin RF-DETR analysis.'
       );
       setLocked(false);
       setCalibrating(false);
@@ -1389,13 +1536,15 @@ export default function App() {
             ? 'V6 selected. It applies Offline V2 track-first logic to live video, then uses V5 contact-gated grip scoring.'
             : version === 'v7'
             ? 'V7 selected. It uses the same auto-search implementation as Offline Review V1, without sticky tracking or trained target gating.'
+            : version === 'v8'
+            ? 'V8 selected. It uses RF-DETR segmentation masks from the local CPU server and will not score grip when RF-DETR is unavailable.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
         )
       );
     },
-    [algorithmVersion, resetV3Runtime]
+    [algorithmVersion, resetRfdetrRuntime, resetV3Runtime]
   );
 
   const openTrainerPortal = useCallback(() => {
@@ -1760,6 +1909,8 @@ export default function App() {
     offlineTimelineRef.current = [];
     offlineReportRef.current = null;
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
+    resetRfdetrRuntime('Offline V2 selected. RF-DETR will run when the local server is available.');
     lastOfflineTimelineRef.current = 0;
     setOfflineTimeline([]);
     setOfflineReport(null);
@@ -1772,7 +1923,7 @@ export default function App() {
       setOfflineAnalysisPhase('reviewing');
       setAnalysis(createEmptyAnalysis('Offline video loaded. Press play once to let V2 process the full video.'));
     });
-  }, [runLoop]);
+  }, [resetRfdetrRuntime, runLoop]);
 
   const deleteTrainingSample = useCallback((id: string) => {
     setTrainingSamples((current) => {
@@ -1798,7 +1949,7 @@ export default function App() {
         : [
             `# ${report?.summary ?? 'GripSense offline report'}`,
             `# averageGrip=${report?.averageGrip ?? 0},averageObjectMatch=${report?.averageObjectMatch ?? 0},weakSegments=${report?.weakSegments.length ?? 0},slipEvents=${report?.slipEvents.length ?? 0}`,
-            'time,grip,confidence,objectMatch,lock,contact,closure,thumb,enclosure,slip,weak,guidance,object,mode,state,objectX,objectY,palmX,palmY',
+            'time,grip,confidence,objectMatch,lock,contact,closure,thumb,enclosure,slip,weak,guidance,object,mode,state,objectX,objectY,palmX,palmY,rfdetrObjectScore,rfdetrContact,rfdetrLatencyMs',
             ...offlineTimelineRef.current.map((point) =>
               [
                 point.time.toFixed(2),
@@ -1819,7 +1970,10 @@ export default function App() {
                 point.objectX?.toFixed(1) ?? '',
                 point.objectY?.toFixed(1) ?? '',
                 point.palmX?.toFixed(1) ?? '',
-                point.palmY?.toFixed(1) ?? ''
+                point.palmY?.toFixed(1) ?? '',
+                point.rfdetrObjectScore === undefined ? '' : Math.round(point.rfdetrObjectScore * 100),
+                point.rfdetrContact === undefined ? '' : Math.round(point.rfdetrContact * 100),
+                point.rfdetrLatencyMs === null || point.rfdetrLatencyMs === undefined ? '' : Math.round(point.rfdetrLatencyMs)
               ].join(',')
             )
           ].join('\n');
@@ -1831,7 +1985,7 @@ export default function App() {
     offlineBatchProcessingRef.current = false;
     if (videoRef.current) videoRef.current.playbackRate = 1;
     if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
-      const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
+      const smoothed = refineOfflineTimeline(refineRfdetrOfflineTimeline(offlineTimelineRef.current));
       offlineTimelineRef.current = smoothed;
       setOfflineTimeline(smoothed);
     }
@@ -1922,7 +2076,7 @@ export default function App() {
       setOfflineVideoExporting(true);
       setOfflineVideoExportStatus(layout === 'compact' ? 'Rendering compact annotated video...' : 'Rendering annotated video...');
       if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
-        const smoothed = refineOfflineTimeline(offlineTimelineRef.current);
+        const smoothed = refineOfflineTimeline(refineRfdetrOfflineTimeline(offlineTimelineRef.current));
         offlineTimelineRef.current = smoothed;
         setOfflineTimeline(smoothed);
         const report = buildOfflineReport(smoothed, offlineVideoName, video.duration);
@@ -1991,6 +2145,7 @@ export default function App() {
                 <option value="v5">V5 · target detector</option>
                 <option value="v6">V6 · sticky live detector</option>
                 <option value="v7">V7 · offline V1 live copy</option>
+                <option value="v8">V8 · RF-DETR live</option>
               </select>
             </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -2189,6 +2344,12 @@ export default function App() {
                 <span>Timeline</span>
                 <strong>{offlineTimeline.length} pts</strong>
               </div>
+              {offlineReviewVersion === 'v2' && (
+                <div className="offline-mini-row">
+                  <span>RF-DETR</span>
+                  <strong>{formatRfdetrRuntimeStatus(rfdetrRuntime)}</strong>
+                </div>
+              )}
               {offlineReport && (
                 <div className="offline-report-summary">
                   <span>Report</span>
@@ -2202,6 +2363,12 @@ export default function App() {
               <GlassMetric label="Lock" value={analysis.objectLockQuality} />
               <GlassMetric label="Closure" value={analysis.closureScore} />
               <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
+              {offlineReviewVersion === 'v2' && (
+                <>
+                  <GlassMetric label="RF object" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrObjectScore ?? 0} />
+                  <GlassMetric label="RF contact" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrContact ?? 0} />
+                </>
+              )}
               <GlassMetric label="Thumb" value={analysis.thumbOpposition} />
               <GlassMetric label="Slip" value={analysis.slipRisk} danger />
               {offlineAnalysisPhase === 'processing' && (
@@ -2209,7 +2376,7 @@ export default function App() {
                   <span />
                   <strong>
                     {offlineReviewVersion === 'v2'
-                      ? `Scanning full video for V2 correction... ${offlineTimeline.length} pts`
+                      ? `Scanning full video for V2 RF-DETR correction... ${offlineTimeline.length} pts`
                       : 'Preparing frame analysis...'}
                   </strong>
                 </div>
@@ -2590,6 +2757,30 @@ export default function App() {
             <div className={analysis.v3.reason === 'strong_hold' ? 'diagnostic-row positive' : 'diagnostic-row neutral'}>
               <span>V3 diagnostic</span>
               <strong>{formatIssueCategory(analysis.v3.reason ?? 'none')}</strong>
+            </div>
+          </div>
+        )}
+
+        {algorithmVersion === 'v8' && (
+          <div className="v3-panel">
+            <div className="motion-header">
+              <Activity size={18} />
+              <span>V8 RF-DETR</span>
+            </div>
+            <div className={rfdetrRuntime.status === 'ready' ? 'v3-status ready' : 'v3-status fallback'}>
+              <span>{formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
+              <strong>{rfdetrRuntime.status === 'ready' ? `${rfdetrRuntime.result?.detections.length ?? 0} obj` : '--'}</strong>
+            </div>
+            <p className={rfdetrRuntime.status === 'ready' ? 'diagnostic-copy' : 'diagnostic-copy warn'}>{rfdetrRuntime.message}</p>
+            <div className="v3-score-grid">
+              <V3Score label="RF object" value={objectDetection?.score ?? 0} />
+              <V3Score label="Contact" value={analysis.evidence.visibleContactScore} />
+              <V3Score label="Lock" value={analysis.objectLockQuality} />
+              <V3Score label="Confidence" value={analysis.confidence} />
+            </div>
+            <div className="diagnostic-row neutral">
+              <span>Latency</span>
+              <strong>{rfdetrRuntime.latencyMs === null ? '--' : `${Math.round(rfdetrRuntime.latencyMs)} ms`}</strong>
             </div>
           </div>
         )}
@@ -4424,6 +4615,13 @@ function formatV3ClientStatus(status: 'timeout' | 'network_error' | 'http_error'
   return 'V3 frame unavailable';
 }
 
+function formatRfdetrRuntimeStatus(runtime: RfdetrRuntime) {
+  if (runtime.status === 'ready') return 'ready';
+  if (runtime.status === 'pending') return 'pending';
+  if (runtime.status === 'unavailable') return 'unavailable';
+  return 'idle';
+}
+
 function explainSuggestedPoint(label: string) {
   const normalized = label.toLowerCase();
   if (normalized.includes('thumb')) return 'A suggested place for the thumb to oppose the fingers and stabilize the object.';
@@ -4474,9 +4672,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7'
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8'
     ? fromStorage
     : 'v5';
 }
