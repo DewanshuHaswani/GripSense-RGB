@@ -53,6 +53,23 @@ describe('RF-DETR grip analysis', () => {
     expect(selection.rejectedPerson).toBe(true);
   });
 
+  it('does not lock a high-confidence RF-DETR object without mask contact', () => {
+    const result = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [objectDetection({ label: 'laptop', score: 0.98, x: 500, y: 520, width: 260, height: 180 })],
+      previousPalm: null,
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      serverAvailable: true
+    });
+
+    expect(result.selection.contact).toBe(0);
+    expect(result.selection.objectScore).toBeLessThan(0.18);
+    expect(result.object).toBeNull();
+    expect(result.analysis.objectLockQuality).toBe(0);
+  });
+
   it('lowers contact and grip quickly when the object drops away', () => {
     const first = analyzeGripWithRfdetr({
       hand: phoneGripHand(),

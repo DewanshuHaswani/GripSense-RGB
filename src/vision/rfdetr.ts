@@ -147,7 +147,7 @@ export function analyzeGripWithRfdetr(options: {
         palmCenter: palmCenter(options.hand),
         diagnostics: {
           ...analysis.diagnostics,
-          state: 'Hand only',
+          state: selection.detection ? 'Object uncertain' : 'Hand only',
           recommendation: analysis.message,
           objectIssue: analysis.message,
           issueCategory: 'object_problem'
@@ -192,7 +192,8 @@ export function selectRfdetrGripObject(
     const contact = hand ? rfdetrMaskContactScore(detection, hand) : 0;
     const proximity = hand ? rfdetrHandProximityScore(detection, hand) : 0.2;
     const continuity = rfdetrTemporalContinuity(detection, previousTrack);
-    const objectScore = clamp(detection.score * 0.26 + contact * 0.42 + proximity * 0.2 + continuity * 0.12);
+    const rawObjectScore = clamp(detection.score * 0.22 + contact * 0.5 + proximity * 0.18 + continuity * 0.1);
+    const objectScore = contact < 0.08 && continuity < 0.32 ? Math.min(rawObjectScore, 0.16) : rawObjectScore;
     if (!best || objectScore > best.objectScore) {
       best = {
         detection,
