@@ -193,9 +193,10 @@ export function selectRfdetrGripObject(
   for (const detection of nonPerson) {
     const contact = hand ? rfdetrMaskContactScore(detection, hand) : 0;
     const proximity = hand ? rfdetrHandProximityScore(detection, hand) : 0.2;
+    const spatial = hand ? rfdetrSpatialPlausibilityScore(detection, hand) : 1;
     const continuity = rfdetrTemporalContinuity(detection, previousTrack);
-    const rawObjectScore = clamp(detection.score * 0.22 + contact * 0.5 + proximity * 0.18 + continuity * 0.1);
-    const objectScore = contact < 0.08 && continuity < 0.32 ? Math.min(rawObjectScore, 0.16) : rawObjectScore;
+    const rawObjectScore = clamp((detection.score * 0.22 + contact * 0.5 + proximity * 0.18 + continuity * 0.1) * spatial);
+    const objectScore = contact < 0.12 && continuity < 0.42 ? Math.min(rawObjectScore, 0.16) : rawObjectScore;
     if (!best || objectScore > best.objectScore) {
       best = {
         detection,
@@ -574,6 +575,19 @@ function rfdetrHandProximityScore(detection: RfdetrDetection, hand: Landmark[]) 
   const nearest = Math.min(...points.map((point) => pointToRectDistance(point, detection.bbox)));
   const centerDistance = distance(detection.center, palmCenter(hand));
   return clamp((1 - nearest / Math.max(22, size * 0.74)) * 0.68 + (1 - centerDistance / Math.max(30, size * 1.8)) * 0.32);
+}
+
+function rfdetrSpatialPlausibilityScore(detection: RfdetrDetection, hand: Landmark[]) {
+  const size = handSize(hand);
+  const maxSide = Math.max(detection.bbox.width, detection.bbox.height);
+  const minSide = Math.max(1, Math.min(detection.bbox.width, detection.bbox.height));
+  const centerDistance = distance(detection.center, palmCenter(hand));
+  const areaRatio = (detection.bbox.width * detection.bbox.height) / Math.max(1, size * size);
+  const sidePenalty = maxSide > size * 4.4 ? clamp(1 - (maxSide - size * 4.4) / Math.max(size * 2.8, 1)) : 1;
+  const areaPenalty = areaRatio > 14 ? clamp(1 - (areaRatio - 14) / 18) : 1;
+  const centerPenalty = centerDistance > size * 2.9 ? clamp(1 - (centerDistance - size * 2.9) / Math.max(size * 2.2, 1)) : 1;
+  const thinObjectBonus = maxSide / minSide > 1.55 && maxSide < size * 5.2 ? 0.12 : 0;
+  return clamp(Math.min(sidePenalty, areaPenalty, centerPenalty) + thinObjectBonus);
 }
 
 function rfdetrTemporalContinuity(detection: RfdetrDetection, previousTrack: RfdetrTrackState) {

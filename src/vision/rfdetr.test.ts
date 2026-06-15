@@ -72,6 +72,22 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.objectLockQuality).toBe(0);
   });
 
+  it('does not lock oversized background masks that drift through the hand area', () => {
+    const result = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [objectDetection({ label: 'dining table', score: 0.96, x: 250, y: 300, width: 780, height: 260 })],
+      previousPalm: null,
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      serverAvailable: true
+    });
+
+    expect(result.selection.objectScore).toBeLessThan(0.18);
+    expect(result.object).toBeNull();
+    expect(result.analysis.gripPercentage).toBe(0);
+  });
+
   it('lowers contact and grip quickly when the object drops away', () => {
     const first = analyzeGripWithRfdetr({
       hand: phoneGripHand(),
