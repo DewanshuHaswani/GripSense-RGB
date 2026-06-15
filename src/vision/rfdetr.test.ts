@@ -72,6 +72,32 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.objectLockQuality).toBe(0);
   });
 
+  it('does not draw a weak offset RF-DETR mask as a locked object', () => {
+    const detection = objectDetection({ label: 'cup', score: 0.94, x: 178, y: 250, width: 104, height: 172 });
+    const result = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [detection],
+      previousPalm: null,
+      previousObject: null,
+      previousTrack: {
+        detectionKey: detection.id,
+        center: detection.center,
+        confidence: 0.52,
+        continuity: 0.9,
+        missedFrames: 0,
+        lastSeenAt: 940
+      },
+      now: 1000,
+      serverAvailable: true
+    });
+
+    expect(result.selection.objectScore).toBeGreaterThan(0.18);
+    expect(result.selection.contact).toBeLessThan(0.16);
+    expect(result.object).toBeNull();
+    expect(result.analysis.gripPercentage).toBe(0);
+    expect(result.analysis.diagnostics.state).toBe('Object uncertain');
+  });
+
   it('does not lock oversized background masks that drift through the hand area', () => {
     const result = analyzeGripWithRfdetr({
       hand: phoneGripHand(),

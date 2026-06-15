@@ -136,7 +136,7 @@ export function analyzeGripWithRfdetr(options: {
 
   const selection = selectRfdetrGripObject(options.detections, options.hand, options.previousTrack);
   const track = updateRfdetrTrack(options.previousTrack, selection, options.now);
-  if (!selection.detection || selection.objectScore < 0.18) {
+  if (!selection.detection || !rfdetrObjectLockReady(selection)) {
     const analysis = createEmptyAnalysis(
       selection.rejectedPerson
         ? 'RF-DETR rejected person detection as a grip object.'
@@ -235,7 +235,7 @@ export function rfdetrMaskContactScore(detection: RfdetrDetection, hand: Landmar
 export function rfdetrDetectionToObjectRegion(
   detection: RfdetrDetection,
   previous: ObjectRegion | null,
-  selection: Pick<RfdetrSelection, 'objectScore' | 'contact' | 'continuity'>,
+  selection: Pick<RfdetrSelection, 'objectScore' | 'contact' | 'proximity' | 'continuity'>,
   track: RfdetrTrackState
 ): ObjectRegion {
   const same = previous?.detectorLabel === `rfdetr:${detection.id}`;
@@ -249,14 +249,14 @@ export function rfdetrDetectionToObjectRegion(
     radiusY: Math.max(12, detection.bbox.height / 2),
     angle: 0,
     confidence,
-    locked: selection.objectScore >= 0.18,
+    locked: rfdetrObjectLockReady(selection),
     source: 'segmenter',
     velocity: same && previous ? subtract(center, previous.center) : { x: 0, y: 0 },
     contour,
     shape: aspectRatio > 1.35 ? 'phone-like' : aspectRatio > 1.12 ? 'ellipse' : 'unknown',
     aspectRatio,
     tightness: clamp(0.52 + selection.contact * 0.34 + detection.score * 0.14),
-    lockAgeFrames: selection.objectScore >= 0.18 ? Math.max(track.continuity * 18, same ? (previous?.lockAgeFrames ?? 0) + 1 : 1) : 0,
+    lockAgeFrames: rfdetrObjectLockReady(selection) ? Math.max(track.continuity * 18, same ? (previous?.lockAgeFrames ?? 0) + 1 : 1) : 0,
     manuallyAdjusted: false,
     visualEdgeScore: clamp(0.34 + detection.score * 0.42),
     visualTextureScore: clamp(0.24 + detection.score * 0.32),
@@ -265,6 +265,12 @@ export function rfdetrDetectionToObjectRegion(
     detectorLabel: `rfdetr:${detection.id}`,
     detectorScore: detection.score
   };
+}
+
+function rfdetrObjectLockReady(selection: Pick<RfdetrSelection, 'objectScore' | 'contact' | 'proximity' | 'continuity'>) {
+  if (selection.objectScore < 0.22 || selection.proximity < 0.2) return false;
+  if (selection.contact >= 0.16) return true;
+  return selection.contact >= 0.1 && selection.proximity >= 0.42 && selection.continuity >= 0.7;
 }
 
 export function applyRfdetrContactGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState): GripAnalysis {
