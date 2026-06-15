@@ -1301,6 +1301,7 @@ export default function App() {
         }
         if (
           mediaModeRef.current === 'offline' &&
+          !(offlineReviewVersionRef.current === 'v2' && offlineReportRef.current) &&
           (timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS || offlineTimelineRef.current.length === 0)
         ) {
           lastOfflineTimelineRef.current = timestamp;
@@ -2001,6 +2002,11 @@ export default function App() {
     offlineReportRef.current = report;
     setOfflineReport(report);
     setOfflineAnalysisPhase('complete');
+    if (offlineReviewVersionRef.current === 'v2' && videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.playbackRate = 1;
+      videoRef.current.currentTime = 0;
+    }
   }, [offlineVideoName]);
 
   const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm', layout: 'full' | 'compact' = 'full') => {
@@ -2008,6 +2014,10 @@ export default function App() {
     const overlay = canvasRef.current;
     if (mediaModeRef.current !== 'offline' || !video || !overlay || !video.duration || Number.isNaN(video.duration)) {
       setOfflineVideoExportStatus('Upload an offline video first.');
+      return;
+    }
+    if (offlineReviewVersionRef.current === 'v2' && offlineAnalysisPhase !== 'complete') {
+      setOfflineVideoExportStatus('Offline V2 must finish full-video processing before export.');
       return;
     }
 
@@ -2082,16 +2092,11 @@ export default function App() {
 
     try {
       setOfflineVideoExporting(true);
-      setOfflineVideoExportStatus(layout === 'compact' ? 'Rendering compact annotated video...' : 'Rendering annotated video...');
-      if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
-        const smoothed = refineOfflineTimeline(refineRfdetrOfflineTimeline(offlineTimelineRef.current));
-        offlineTimelineRef.current = smoothed;
-        setOfflineTimeline(smoothed);
-        const report = buildOfflineReport(smoothed, offlineVideoName, video.duration);
-        offlineReportRef.current = report;
-        setOfflineReport(report);
-      }
-      setOfflineAnalysisPhase('reviewing');
+      setOfflineVideoExportStatus(
+        layout === 'compact'
+          ? 'Encoding compact annotated video from finalized timeline...'
+          : 'Encoding annotated video from finalized timeline...'
+      );
       video.currentTime = 0;
       await video.play();
       recorder.start(500);
@@ -2102,9 +2107,10 @@ export default function App() {
       setOfflineVideoExporting(false);
       setOfflineVideoExportStatus('Video export could not start. Try pressing play once, then export again.');
     }
-  }, [offlineVideoName]);
+  }, [offlineAnalysisPhase, offlineVideoName]);
 
   const offlineBatchProcessing = mediaMode === 'offline' && offlineReviewVersion === 'v2' && offlineAnalysisPhase === 'processing';
+  const offlineV2ExportLocked = offlineReviewVersion === 'v2' && offlineAnalysisPhase !== 'complete';
 
   return (
     <main className={['app-shell', mediaMode === 'offline' ? 'offline-shell' : '', offlineBatchProcessing ? 'offline-batch-processing' : ''].filter(Boolean).join(' ')}>
@@ -2384,7 +2390,7 @@ export default function App() {
                   <span />
                   <strong>
                     {offlineReviewVersion === 'v2'
-                      ? `Scanning full video for V2 RF-DETR correction... ${offlineTimeline.length} pts`
+                      ? `Scanning full video for V2 RF-DETR correction before preview/export... ${offlineTimeline.length} pts`
                       : 'Preparing frame analysis...'}
                   </strong>
                 </div>
@@ -2414,13 +2420,13 @@ export default function App() {
                 <button type="button" onClick={() => exportOfflineTimeline('json')} disabled={!offlineTimeline.length || offlineBatchProcessing}>
                   JSON
                 </button>
-                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting || offlineBatchProcessing}>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4')} disabled={offlineVideoExporting || offlineBatchProcessing || offlineV2ExportLocked}>
                   {offlineVideoExporting ? 'Rendering' : 'MP4'}
                 </button>
-                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4', 'compact')} disabled={offlineVideoExporting || offlineBatchProcessing}>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('mp4', 'compact')} disabled={offlineVideoExporting || offlineBatchProcessing || offlineV2ExportLocked}>
                   MP4 Compact
                 </button>
-                <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting || offlineBatchProcessing}>
+                <button type="button" onClick={() => exportOfflineAnnotatedVideo('webm')} disabled={offlineVideoExporting || offlineBatchProcessing || offlineV2ExportLocked}>
                   WebM
                 </button>
               </div>

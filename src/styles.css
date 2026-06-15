@@ -84,8 +84,8 @@ button {
 
 .offline-batch-processing .camera-feed,
 .offline-batch-processing .tracking-canvas {
-  opacity: 0.38;
-  filter: blur(1.5px) saturate(0.82);
+  opacity: 0.16;
+  filter: blur(3px) saturate(0.55);
 }
 
 .offline-batch-processing .offline-review-overlay {
