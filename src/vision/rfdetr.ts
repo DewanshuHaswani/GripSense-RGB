@@ -367,7 +367,7 @@ export async function requestRfdetrFrameAnalysis(options: {
     if (!response.ok) return { ok: false, status: `HTTP ${response.status}`, receivedAt };
     const parsed = parseRfdetrAnalyzeResponse(await response.json());
     if (!parsed.ok) return { ok: false, status: parsed.error, receivedAt };
-    return { ok: true, response: parsed.response, receivedAt };
+    return { ok: true, response: scaleRfdetrResponseToVideo(parsed.response, frame), receivedAt };
   } catch (error) {
     return { ok: false, status: error instanceof Error ? error.message : 'request_failed', receivedAt: performance.now() };
   }
@@ -450,7 +450,34 @@ async function captureVideoJpeg(video: HTMLVideoElement) {
   if (!context) return null;
   context.drawImage(video, 0, 0, width, height);
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.72));
-  return blob ? { blob, width, height } : null;
+  return blob ? { blob, width, height, sourceWidth: video.videoWidth, sourceHeight: video.videoHeight } : null;
+}
+
+export function scaleRfdetrResponseToVideo(
+  response: RfdetrAnalyzeResponse,
+  frame: { width: number; height: number; sourceWidth: number; sourceHeight: number }
+): RfdetrAnalyzeResponse {
+  const scaleX = frame.sourceWidth / Math.max(1, frame.width);
+  const scaleY = frame.sourceHeight / Math.max(1, frame.height);
+  if (Math.abs(scaleX - 1) < 0.001 && Math.abs(scaleY - 1) < 0.001) return response;
+  return {
+    ...response,
+    detections: response.detections.map((detection) => ({
+      ...detection,
+      bbox: {
+        x: detection.bbox.x * scaleX,
+        y: detection.bbox.y * scaleY,
+        width: detection.bbox.width * scaleX,
+        height: detection.bbox.height * scaleY
+      },
+      maskPolygon: detection.maskPolygon.map((point) => ({ x: point.x * scaleX, y: point.y * scaleY })),
+      maskArea: detection.maskArea * scaleX * scaleY,
+      center: {
+        x: detection.center.x * scaleX,
+        y: detection.center.y * scaleY
+      }
+    }))
+  };
 }
 
 function updateRfdetrTrack(previous: RfdetrTrackState, selection: RfdetrSelection, now: number): RfdetrTrackState {

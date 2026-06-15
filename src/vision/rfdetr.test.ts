@@ -3,6 +3,7 @@ import {
   EMPTY_RFDETR_TRACK,
   analyzeGripWithRfdetr,
   refineRfdetrOfflineTimeline,
+  scaleRfdetrResponseToVideo,
   selectRfdetrGripObject,
   type RfdetrDetection,
   type RfdetrTimelinePoint
@@ -105,6 +106,22 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.confidence).toBe(0);
     expect(result.analysis.message).toContain('RF-DETR unavailable');
     expect(result.analysis.diagnostics.issueCategory).toBe('server_unavailable');
+  });
+
+  it('rescales RF-DETR detections from request frame size to video coordinates', () => {
+    const scaled = scaleRfdetrResponseToVideo(
+      {
+        detections: [objectDetection({ x: 180, y: 90, width: 120, height: 240 })],
+        latencyMs: 18,
+        model: 'RF-DETR-Seg Nano',
+        device: 'cpu'
+      },
+      { width: 720, height: 405, sourceWidth: 1440, sourceHeight: 810 }
+    );
+
+    expect(scaled.detections[0].bbox).toEqual({ x: 360, y: 180, width: 240, height: 480 });
+    expect(scaled.detections[0].center).toEqual({ x: 480, y: 420 });
+    expect(scaled.detections[0].maskPolygon[2]).toEqual({ x: 600, y: 660 });
   });
 });
 
