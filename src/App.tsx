@@ -52,6 +52,7 @@ import { TrackingStabilizer } from './vision/stabilization';
 import { createV3AnalyzeFrameRequest, DEFAULT_V3_ENDPOINT, requestV3FrameAnalysis } from './vision/v3Inference';
 import {
   analyzeGripWithRfdetr,
+  compensateRfdetrResponseForHandMotion,
   createInitialRfdetrRuntime,
   DEFAULT_RFDETR_ENDPOINT,
   EMPTY_RFDETR_TRACK,
@@ -898,6 +899,7 @@ export default function App() {
     const current = rfdetrRuntimeRef.current;
     const interval = offline ? RFDETR_OFFLINE_INTERVAL_MS : RFDETR_REQUEST_INTERVAL_MS;
     if (current.status === 'pending' || timestamp - current.lastRequestAt < interval) return;
+    const requestPalm = hand ? palmCenter(hand) : null;
 
     updateRfdetrRuntime({
       ...current,
@@ -925,6 +927,7 @@ export default function App() {
           status: 'ready',
           message: `RF-DETR active (${result.response.detections.length} detection${result.response.detections.length === 1 ? '' : 's'}).`,
           result: result.response,
+          resultPalm: requestPalm,
           receivedAt: result.receivedAt,
           latencyMs: result.response.latencyMs ?? result.response.detections[0]?.latencyMs ?? null
         });
@@ -935,6 +938,7 @@ export default function App() {
         status: 'unavailable',
         message: `RF-DETR unavailable: ${result.status}.`,
         result: null,
+        resultPalm: null,
         receivedAt: result.receivedAt,
         latencyMs: null
       });
@@ -1222,9 +1226,13 @@ export default function App() {
           const latestRfdetr = rfdetrRuntimeRef.current;
           const freshRfdetr = isRfdetrResultFresh(latestRfdetr, timestamp, offlineV2Review ? 2600 : 1500);
           if (liveRfdetrReview || freshRfdetr) {
+            const compensatedRfdetr =
+              freshRfdetr && latestRfdetr.result
+                ? compensateRfdetrResponseForHandMotion(latestRfdetr.result, latestRfdetr.resultPalm, hand)
+                : null;
             const rfdetrGrip = analyzeGripWithRfdetr({
               hand,
-              detections: freshRfdetr ? latestRfdetr.result?.detections ?? [] : [],
+              detections: compensatedRfdetr?.detections ?? [],
               previousPalm: previousPalmRef.current,
               previousObject: previousObjectRef.current,
               previousTrack: rfdetrTrackRef.current,

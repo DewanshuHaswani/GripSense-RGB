@@ -29,6 +29,7 @@ export type RfdetrRuntime = {
   message: string;
   endpoint: string;
   result: RfdetrAnalyzeResponse | null;
+  resultPalm?: Point | null;
   receivedAt: number | null;
   lastRequestAt: number;
   latencyMs: number | null;
@@ -90,6 +91,7 @@ export function createInitialRfdetrRuntime(endpoint = DEFAULT_RFDETR_ENDPOINT): 
     message: 'RF-DETR server idle. Select V8 or Offline V2 to begin RF-DETR analysis.',
     endpoint,
     result: null,
+    resultPalm: null,
     receivedAt: null,
     lastRequestAt: 0,
     latencyMs: null
@@ -398,6 +400,24 @@ export function isRfdetrResultFresh(runtime: RfdetrRuntime, now: number, maxAgeM
   return Boolean(runtime.result && runtime.receivedAt !== null && now - runtime.receivedAt <= maxAgeMs);
 }
 
+export function compensateRfdetrResponseForHandMotion(
+  response: RfdetrAnalyzeResponse,
+  sourcePalm: Point | null | undefined,
+  currentHand: Landmark[] | null
+): RfdetrAnalyzeResponse {
+  if (!sourcePalm || !currentHand?.length) return response;
+  const currentPalm = palmCenter(currentHand);
+  const shift = subtract(currentPalm, sourcePalm);
+  const maxShift = Math.max(26, handSize(currentHand) * 1.35);
+  const shiftDistance = distance({ x: 0, y: 0 }, shift);
+  if (shiftDistance < 1) return response;
+  if (shiftDistance > maxShift) return response;
+  return {
+    ...response,
+    detections: response.detections.map((detection) => translateRfdetrDetection(detection, shift))
+  };
+}
+
 function normalizeRfdetrDetection(value: unknown): RfdetrDetection | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -478,6 +498,22 @@ export function scaleRfdetrResponseToVideo(
         y: detection.center.y * scaleY
       }
     }))
+  };
+}
+
+function translateRfdetrDetection(detection: RfdetrDetection, offset: Point): RfdetrDetection {
+  return {
+    ...detection,
+    bbox: {
+      ...detection.bbox,
+      x: detection.bbox.x + offset.x,
+      y: detection.bbox.y + offset.y
+    },
+    maskPolygon: detection.maskPolygon.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y })),
+    center: {
+      x: detection.center.x + offset.x,
+      y: detection.center.y + offset.y
+    }
   };
 }
 

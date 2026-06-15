@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EMPTY_RFDETR_TRACK,
   analyzeGripWithRfdetr,
+  compensateRfdetrResponseForHandMotion,
   isRfdetrResultFresh,
   refineRfdetrOfflineTimeline,
   scaleRfdetrResponseToVideo,
@@ -9,6 +10,7 @@ import {
   type RfdetrDetection,
   type RfdetrTimelinePoint
 } from './rfdetr';
+import { palmCenter } from './geometry';
 import type { Landmark } from './types';
 
 describe('RF-DETR grip analysis', () => {
@@ -150,6 +152,7 @@ describe('RF-DETR grip analysis', () => {
           message: 'RF-DETR analyzing live frame.',
           endpoint: 'http://127.0.0.1:7867/api/rfdetr/analyze',
           result: { detections: [objectDetection()], latencyMs: 132 },
+          resultPalm: { x: 320, y: 342 },
           receivedAt: 1200,
           lastRequestAt: 1400,
           latencyMs: 132
@@ -158,6 +161,29 @@ describe('RF-DETR grip analysis', () => {
         1500
       )
     ).toBe(true);
+  });
+
+  it('motion-compensates recent RF-DETR masks using palm movement', () => {
+    const hand = phoneGripHand().map((point) => ({ ...point, x: point.x + 38, y: point.y - 24 }));
+    const response = {
+      detections: [objectDetection()],
+      latencyMs: 132
+    };
+    const shifted = compensateRfdetrResponseForHandMotion(response, palmCenter(phoneGripHand()), hand);
+
+    expect(shifted.detections[0].center.x).toBeCloseTo(response.detections[0].center.x + 38, 5);
+    expect(shifted.detections[0].center.y).toBeCloseTo(response.detections[0].center.y - 24, 5);
+  });
+
+  it('does not motion-compensate stale RF-DETR masks after very large hand jumps', () => {
+    const hand = phoneGripHand().map((point) => ({ ...point, x: point.x + 500, y: point.y + 40 }));
+    const response = {
+      detections: [objectDetection()],
+      latencyMs: 132
+    };
+    const shifted = compensateRfdetrResponseForHandMotion(response, palmCenter(phoneGripHand()), hand);
+
+    expect(shifted.detections[0].center).toEqual(response.detections[0].center);
   });
 });
 
