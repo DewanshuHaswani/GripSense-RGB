@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EMPTY_RFDETR_TRACK,
   analyzeGripWithRfdetr,
+  isRfdetrResultFresh,
   refineRfdetrOfflineTimeline,
   scaleRfdetrResponseToVideo,
   selectRfdetrGripObject,
@@ -122,6 +123,24 @@ describe('RF-DETR grip analysis', () => {
     expect(scaled.detections[0].bbox).toEqual({ x: 360, y: 180, width: 240, height: 480 });
     expect(scaled.detections[0].center).toEqual({ x: 480, y: 420 });
     expect(scaled.detections[0].maskPolygon[2]).toEqual({ x: 600, y: 660 });
+  });
+
+  it('keeps recent RF-DETR detections fresh while the next request is pending', () => {
+    expect(
+      isRfdetrResultFresh(
+        {
+          status: 'pending',
+          message: 'RF-DETR analyzing live frame.',
+          endpoint: 'http://127.0.0.1:7867/api/rfdetr/analyze',
+          result: { detections: [objectDetection()], latencyMs: 132 },
+          receivedAt: 1200,
+          lastRequestAt: 1400,
+          latencyMs: 132
+        },
+        1600,
+        1500
+      )
+    ).toBe(true);
   });
 });
 

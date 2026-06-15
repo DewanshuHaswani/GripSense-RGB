@@ -394,7 +394,7 @@ export function parseRfdetrAnalyzeResponse(value: unknown): { ok: true; response
 }
 
 export function isRfdetrResultFresh(runtime: RfdetrRuntime, now: number, maxAgeMs: number) {
-  return Boolean(runtime.status === 'ready' && runtime.result && runtime.receivedAt !== null && now - runtime.receivedAt <= maxAgeMs);
+  return Boolean(runtime.result && runtime.receivedAt !== null && now - runtime.receivedAt <= maxAgeMs);
 }
 
 function normalizeRfdetrDetection(value: unknown): RfdetrDetection | null {
