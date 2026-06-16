@@ -183,6 +183,9 @@ type OfflineTimelinePoint = {
   state: string;
   objectX: number | null;
   objectY: number | null;
+  objectRadiusX?: number | null;
+  objectRadiusY?: number | null;
+  objectAngle?: number | null;
   palmX: number | null;
   palmY: number | null;
   rfdetrObjectScore?: number;
@@ -1323,6 +1326,9 @@ export default function App() {
             state: frameAnalysis.diagnostics.state,
             objectX: object?.center.x ?? null,
             objectY: object?.center.y ?? null,
+            objectRadiusX: object?.radiusX ?? null,
+            objectRadiusY: object?.radiusY ?? null,
+            objectAngle: object?.angle ?? null,
             palmX: frameAnalysis.palmCenter?.x ?? null,
             palmY: frameAnalysis.palmCenter?.y ?? null,
             rfdetrObjectScore: rfdetrSelectionMetrics?.objectScore,
@@ -1958,7 +1964,7 @@ export default function App() {
         : [
             `# ${report?.summary ?? 'GripSense offline report'}`,
             `# averageGrip=${report?.averageGrip ?? 0},averageObjectMatch=${report?.averageObjectMatch ?? 0},weakSegments=${report?.weakSegments.length ?? 0},slipEvents=${report?.slipEvents.length ?? 0}`,
-            'time,grip,confidence,objectMatch,lock,contact,closure,thumb,enclosure,slip,weak,guidance,object,mode,state,objectX,objectY,palmX,palmY,rfdetrObjectScore,rfdetrContact,rfdetrLatencyMs',
+            'time,grip,confidence,objectMatch,lock,contact,closure,thumb,enclosure,slip,weak,guidance,object,mode,state,objectX,objectY,objectRadiusX,objectRadiusY,objectAngle,palmX,palmY,rfdetrObjectScore,rfdetrContact,rfdetrLatencyMs',
             ...offlineTimelineRef.current.map((point) =>
               [
                 point.time.toFixed(2),
@@ -1978,6 +1984,9 @@ export default function App() {
                 csvEscape(point.state),
                 point.objectX?.toFixed(1) ?? '',
                 point.objectY?.toFixed(1) ?? '',
+                point.objectRadiusX?.toFixed(1) ?? '',
+                point.objectRadiusY?.toFixed(1) ?? '',
+                point.objectAngle?.toFixed(3) ?? '',
                 point.palmX?.toFixed(1) ?? '',
                 point.palmY?.toFixed(1) ?? '',
                 point.rfdetrObjectScore === undefined ? '' : Math.round(point.rfdetrObjectScore * 100),
@@ -1994,7 +2003,12 @@ export default function App() {
     offlineBatchProcessingRef.current = false;
     if (videoRef.current) videoRef.current.playbackRate = 1;
     if (offlineReviewVersionRef.current === 'v2' && offlineTimelineRef.current.length > 2) {
-      const smoothed = refineOfflineTimeline(refineRfdetrOfflineTimeline(offlineTimelineRef.current));
+      const sanitized = sanitizeOfflineV2TimelineGeometry(
+        offlineTimelineRef.current,
+        videoRef.current?.videoWidth ?? 0,
+        videoRef.current?.videoHeight ?? 0
+      );
+      const smoothed = refineOfflineTimeline(refineRfdetrOfflineTimeline(sanitized));
       offlineTimelineRef.current = smoothed;
       setOfflineTimeline(smoothed);
     }
@@ -2074,10 +2088,15 @@ export default function App() {
     const drawFrame = () => {
       ctx.clearRect(0, 0, composite.width, composite.height);
       drawExportVideoFrame(ctx, video, composite.width, composite.height, mirroredRef.current);
-      ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
       const refinedPoint =
         offlineReviewVersionRef.current === 'v2' ? nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime) : null;
       const exportAnalysis = refinedPoint ? analysisFromOfflineTimelinePoint(analysisRef.current, refinedPoint) : analysisRef.current;
+      if (offlineReviewVersionRef.current === 'v2' && refinedPoint) {
+        const timelineObject = objectRegionFromOfflineTimelinePoint(refinedPoint, composite.width, composite.height);
+        drawOfflineV2TimelineOverlay(ctx, composite.width, composite.height, mirroredRef.current, refinedPoint, timelineObject, exportAnalysis);
+      } else {
+        ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
+      }
       if (layout === 'compact') {
         drawCompactOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
       } else {
@@ -3331,6 +3350,116 @@ function analysisFromOfflineTimelinePoint(base: GripAnalysis, point: OfflineTime
   };
 }
 
+function objectRegionFromOfflineTimelinePoint(point: OfflineTimelinePoint, frameWidth: number, frameHeight: number): ObjectRegion | null {
+  if (point.objectX === null || point.objectY === null || point.lock < 0.22 || point.objectMatch < 0.2) return null;
+  const radiusX = point.objectRadiusX ?? 0;
+  const radiusY = point.objectRadiusY ?? 0;
+  if (!radiusX || !radiusY) return null;
+  const maxRadius = Math.max(radiusX, radiusY);
+  const minRadius = Math.min(radiusX, radiusY);
+  if (maxRadius < 10 || minRadius < 8) return null;
+  if (maxRadius > Math.min(frameWidth, frameHeight) * 0.28 || radiusX > frameWidth * 0.22 || radiusY > frameHeight * 0.34) return null;
+  if (point.palmX !== null && point.palmY !== null) {
+    const palmDistance = distance({ x: point.objectX, y: point.objectY }, { x: point.palmX, y: point.palmY });
+    if (palmDistance > Math.max(260, maxRadius * 2.35)) return null;
+  }
+  const x = clampNumber(point.objectX, 0, frameWidth);
+  const y = clampNumber(point.objectY, 0, frameHeight);
+  const contour = [
+    { x: x - radiusX, y: y - radiusY },
+    { x: x + radiusX, y: y - radiusY },
+    { x: x + radiusX, y: y + radiusY },
+    { x: x - radiusX, y: y + radiusY }
+  ];
+  return {
+    center: { x, y },
+    radiusX,
+    radiusY,
+    angle: point.objectAngle ?? 0,
+    confidence: point.objectMatch,
+    locked: point.lock >= 0.34,
+    source: 'segmenter',
+    velocity: { x: 0, y: 0 },
+    contour,
+    shape: maxRadius / Math.max(1, minRadius) > 1.35 ? 'phone-like' : 'ellipse',
+    aspectRatio: maxRadius / Math.max(1, minRadius),
+    tightness: point.contact,
+    lockAgeFrames: point.lock >= 0.34 ? 3 : 0,
+    manuallyAdjusted: false,
+    visualEdgeScore: point.objectMatch,
+    visualTextureScore: point.objectMatch,
+    independentEvidenceScore: point.objectMatch,
+    relativeDriftScore: point.slip
+  };
+}
+
+function drawOfflineV2TimelineOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  mirrored: boolean,
+  point: OfflineTimelinePoint,
+  object: ObjectRegion | null,
+  analysis: GripAnalysis
+) {
+  ctx.save();
+  if (mirrored) {
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+  }
+  if (object) drawOfflineV2Object(ctx, object, analysis);
+  if (point.palmX !== null && point.palmY !== null) drawOfflineV2Palm(ctx, point.palmX, point.palmY, analysis);
+  ctx.restore();
+}
+
+function drawOfflineV2Object(ctx: CanvasRenderingContext2D, object: ObjectRegion, analysis: GripAnalysis) {
+  const stateColor =
+    analysis.guidance === 'Strong grip'
+      ? '74, 222, 128'
+      : analysis.guidance === 'Improve grip'
+        ? '250, 204, 21'
+        : '248, 113, 113';
+  ctx.save();
+  ctx.translate(object.center.x, object.center.y);
+  ctx.rotate(object.angle);
+  ctx.strokeStyle = `rgba(${stateColor}, 0.88)`;
+  ctx.fillStyle = `rgba(${stateColor}, 0.07)`;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, object.radiusX, object.radiusY, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  if (object.contour.length >= 3) {
+    ctx.save();
+    ctx.setLineDash([8, 9]);
+    ctx.strokeStyle = `rgba(${stateColor}, 0.34)`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    object.contour.forEach((point, index) => {
+      if (index === 0) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawOfflineV2Palm(ctx: CanvasRenderingContext2D, x: number, y: number, analysis: GripAnalysis) {
+  const radius = 11 + analysis.closureScore * 4;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 209, 102, 0.92)';
+  ctx.strokeStyle = 'rgba(8, 13, 20, 0.85)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawOfflineExportOverlay(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -4010,6 +4139,49 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
       object: point.object || (repairedObjectMatch > 0.22 ? 'tracked object' : '')
     };
   });
+}
+
+function sanitizeOfflineV2TimelineGeometry(points: OfflineTimelinePoint[], frameWidth: number, frameHeight: number) {
+  return points.map((point) => {
+    if (offlineTimelinePointHasSafeObjectGeometry(point, frameWidth, frameHeight)) return point;
+    return {
+      ...point,
+      grip: Math.min(point.grip, 18),
+      confidence: Math.min(point.confidence, 0.24),
+      objectMatch: Math.min(point.objectMatch, 0.12),
+      lock: Math.min(point.lock, 0.12),
+      contact: Math.min(point.contact, 0.12),
+      weak: true,
+      guidance: 'Object uncertain',
+      state: 'Object uncertain',
+      object: '',
+      objectX: null,
+      objectY: null,
+      objectRadiusX: null,
+      objectRadiusY: null,
+      objectAngle: null,
+      rfdetrObjectScore: point.rfdetrObjectScore === undefined ? undefined : Math.min(point.rfdetrObjectScore, 0.12),
+      rfdetrContact: point.rfdetrContact === undefined ? undefined : Math.min(point.rfdetrContact, 0.12)
+    };
+  });
+}
+
+function offlineTimelinePointHasSafeObjectGeometry(point: OfflineTimelinePoint, frameWidth: number, frameHeight: number) {
+  if (point.objectX === null || point.objectY === null) return point.objectMatch < 0.18 && point.lock < 0.18;
+  const radiusX = point.objectRadiusX ?? 0;
+  const radiusY = point.objectRadiusY ?? 0;
+  if (!radiusX || !radiusY) return point.objectMatch < 0.18 && point.lock < 0.18;
+  const width = frameWidth || 1920;
+  const height = frameHeight || 1080;
+  const maxRadius = Math.max(radiusX, radiusY);
+  const minRadius = Math.min(radiusX, radiusY);
+  if (maxRadius < 10 || minRadius < 8) return false;
+  if (maxRadius > Math.min(width, height) * 0.28 || radiusX > width * 0.22 || radiusY > height * 0.34) return false;
+  if (point.palmX !== null && point.palmY !== null) {
+    const palmDistance = distance({ x: point.objectX, y: point.objectY }, { x: point.palmX, y: point.palmY });
+    if (palmDistance > Math.max(260, maxRadius * 2.35)) return false;
+  }
+  return true;
 }
 
 function buildOfflineReport(points: OfflineTimelinePoint[], videoName: string, duration: number): OfflineReport {
