@@ -1228,7 +1228,13 @@ export default function App() {
         if (liveRfdetrReview || offlineV2Review) {
           const latestRfdetr = rfdetrRuntimeRef.current;
           const freshRfdetr = isRfdetrResultFresh(latestRfdetr, timestamp, offlineV2Review ? 2600 : 1500);
-          if (liveRfdetrReview || freshRfdetr) {
+          const canHoldOfflineRfdetr =
+            offlineV2Review &&
+            !freshRfdetr &&
+            latestRfdetr.status === 'pending' &&
+            Boolean(previousObjectRef.current?.detectorLabel?.startsWith('rfdetr:')) &&
+            rfdetrTrackRef.current.missedFrames < 2;
+          if (liveRfdetrReview || freshRfdetr || canHoldOfflineRfdetr) {
             const compensatedRfdetr =
               freshRfdetr && latestRfdetr.result
                 ? compensateRfdetrResponseForHandMotion(latestRfdetr.result, latestRfdetr.resultPalm, hand)
@@ -1243,7 +1249,7 @@ export default function App() {
               persistentSlipScore,
               calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
               weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
-              serverAvailable: freshRfdetr,
+              serverAvailable: freshRfdetr || canHoldOfflineRfdetr,
               unavailableMessage: latestRfdetr.message || 'RF-DETR unavailable. Start the local RF-DETR server to use V8 live analysis.'
             });
             rfdetrTrackRef.current = rfdetrGrip.track;
