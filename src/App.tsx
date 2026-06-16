@@ -2029,6 +2029,18 @@ export default function App() {
     }
   }, [offlineVideoName]);
 
+  const playOfflineReview = useCallback(() => {
+    const video = videoRef.current;
+    if (mediaModeRef.current !== 'offline' || !video) return;
+    offlineBatchProcessingRef.current = false;
+    video.playbackRate = 1;
+    if (video.ended || video.currentTime >= Math.max(0, video.duration - 0.05)) {
+      video.currentTime = 0;
+    }
+    setPaused(false);
+    void video.play();
+  }, []);
+
   const exportOfflineAnnotatedVideo = useCallback(async (format: 'mp4' | 'webm', layout: 'full' | 'compact' = 'full') => {
     const video = videoRef.current;
     const overlay = canvasRef.current;
@@ -2149,6 +2161,7 @@ export default function App() {
           onPlay={() => {
             if (mediaMode !== 'offline') return;
             if (offlineReviewVersionRef.current === 'v2' && offlineBatchProcessingRef.current) return;
+            if (offlineReviewVersionRef.current === 'v2' && offlineAnalysisPhase === 'complete') return;
             setOfflineAnalysisPhase('reviewing');
           }}
           onEnded={finalizeOfflineReview}
@@ -2216,6 +2229,12 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineVideoUpload}
             />
+            {mediaMode === 'offline' && offlineReviewVersion === 'v2' && offlineAnalysisPhase === 'complete' && (
+              <button className="tool-button primary" onClick={playOfflineReview} aria-label="Play completed offline V2 review">
+                <Play size={17} />
+                <span>Play review</span>
+              </button>
+            )}
             {recordingState === 'recording' ? (
               <button className="tool-button recording-active" onClick={stopLiveRecording} aria-label="Stop recording offline review clip">
                 <Square size={16} />
