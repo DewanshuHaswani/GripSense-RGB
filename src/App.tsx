@@ -293,6 +293,7 @@ export default function App() {
   const trainingVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offlineVideoInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadV1InputRef = useRef<HTMLInputElement | null>(null);
   const engineRef = useRef<VisionEngine | null>(null);
   const animationRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -330,6 +331,7 @@ export default function App() {
   const lastOfflineTimelineRef = useRef(0);
   const offlineReviewVersionRef = useRef<OfflineReviewVersion>('v2');
   const offlineBatchProcessingRef = useRef(false);
+  const uploadOnlyExportStartedRef = useRef(false);
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
@@ -373,6 +375,8 @@ export default function App() {
   const [offlineReviewVersion, setOfflineReviewVersion] = useState<OfflineReviewVersion>('v2');
   const [offlineVideoExporting, setOfflineVideoExporting] = useState(false);
   const [offlineVideoExportStatus, setOfflineVideoExportStatus] = useState('');
+  const [uploadOnlyMode, setUploadOnlyMode] = useState(false);
+  const [uploadOnlyStatus, setUploadOnlyStatus] = useState('');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
   const [analysis, setAnalysis] = useState<GripAnalysis>(() => createEmptyAnalysis());
   const [mirrored, setMirrored] = useState(true);
@@ -701,7 +705,28 @@ export default function App() {
   const handleOfflineVideoUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
+    setUploadOnlyMode(false);
+    setUploadOnlyStatus('');
     if (file) void startOfflineVideo(file);
+  }, [startOfflineVideo]);
+
+  const handleUploadV1Video = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('video/')) {
+      setUploadOnlyMode(false);
+      setUploadOnlyStatus('');
+      setAnalysis(createEmptyAnalysis('Upload V1 needs a video file.'));
+      return;
+    }
+    offlineReviewVersionRef.current = 'v2';
+    setOfflineReviewVersion('v2');
+    uploadOnlyExportStartedRef.current = false;
+    setOfflineVideoExportStatus('');
+    setUploadOnlyMode(true);
+    setUploadOnlyStatus('Upload V1 is scanning the full clip before download.');
+    void startOfflineVideo(file);
   }, [startOfflineVideo]);
 
   const clearRecordedClip = useCallback(() => {
@@ -2146,11 +2171,37 @@ export default function App() {
     }
   }, [offlineAnalysisPhase, offlineVideoName]);
 
+  useEffect(() => {
+    if (!uploadOnlyMode) return;
+    if (offlineAnalysisPhase !== 'complete' || offlineVideoExporting || !offlineTimeline.length) return;
+    if (uploadOnlyExportStartedRef.current) return;
+    uploadOnlyExportStartedRef.current = true;
+    setUploadOnlyStatus('Upload V1 is encoding the MP4 download from the finalized timeline.');
+    void exportOfflineAnnotatedVideo('mp4', 'compact');
+  }, [exportOfflineAnnotatedVideo, offlineAnalysisPhase, offlineTimeline.length, offlineVideoExporting, uploadOnlyMode]);
+
+  useEffect(() => {
+    if (!uploadOnlyMode) return;
+    if (!offlineVideoExportStatus.startsWith('Downloaded')) return;
+    setUploadOnlyStatus('Upload V1 download is ready.');
+    const timer = window.setTimeout(() => setUploadOnlyMode(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, [offlineVideoExportStatus, uploadOnlyMode]);
+
   const offlineBatchProcessing = mediaMode === 'offline' && offlineReviewVersion === 'v2' && offlineAnalysisPhase === 'processing';
   const offlineV2ExportLocked = offlineReviewVersion === 'v2' && offlineAnalysisPhase !== 'complete';
 
   return (
-    <main className={['app-shell', mediaMode === 'offline' ? 'offline-shell' : '', offlineBatchProcessing ? 'offline-batch-processing' : ''].filter(Boolean).join(' ')}>
+    <main
+      className={[
+        'app-shell',
+        mediaMode === 'offline' ? 'offline-shell' : '',
+        offlineBatchProcessing ? 'offline-batch-processing' : '',
+        uploadOnlyMode ? 'upload-only-processing' : ''
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
       <section className="camera-workspace" aria-label="Live grip tracking workspace">
         <video
           ref={videoRef}
@@ -2228,6 +2279,17 @@ export default function App() {
               type="file"
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineVideoUpload}
+            />
+            <button className="tool-button" onClick={() => uploadV1InputRef.current?.click()} aria-label="Upload V1 process and download">
+              <Upload size={17} />
+              <span>Upload V1</span>
+            </button>
+            <input
+              ref={uploadV1InputRef}
+              className="hidden-file-input"
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,video/*"
+              onChange={handleUploadV1Video}
             />
             {mediaMode === 'offline' && offlineReviewVersion === 'v2' && offlineAnalysisPhase === 'complete' && (
               <button className="tool-button primary" onClick={playOfflineReview} aria-label="Play completed offline V2 review">
@@ -2408,6 +2470,12 @@ export default function App() {
                   <strong>{formatRfdetrRuntimeStatus(rfdetrRuntime)}</strong>
                 </div>
               )}
+              {uploadOnlyMode && uploadOnlyStatus && (
+                <div className="offline-report-summary">
+                  <span>Upload V1</span>
+                  <strong>{uploadOnlyStatus}</strong>
+                </div>
+              )}
               {offlineReport && (
                 <div className="offline-report-summary">
                   <span>Report</span>
@@ -2433,7 +2501,9 @@ export default function App() {
                 <div className="offline-processing">
                   <span />
                   <strong>
-                    {offlineReviewVersion === 'v2'
+                    {uploadOnlyMode
+                      ? `${uploadOnlyStatus} ${offlineTimeline.length} pts`
+                      : offlineReviewVersion === 'v2'
                       ? `Scanning full video for V2 RF-DETR correction before preview/export... ${offlineTimeline.length} pts`
                       : 'Preparing frame analysis...'}
                   </strong>
