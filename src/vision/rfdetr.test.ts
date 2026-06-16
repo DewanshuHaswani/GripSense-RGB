@@ -98,6 +98,35 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.diagnostics.state).toBe('Object uncertain');
   });
 
+  it('briefly holds the previous RF-DETR object visual across one missed live frame', () => {
+    const first = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [objectDetection()],
+      previousPalm: { x: 326, y: 346 },
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      serverAvailable: true
+    });
+    const held = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [],
+      previousPalm: { x: 326, y: 346 },
+      previousObject: first.object,
+      previousTrack: first.track,
+      now: 1160,
+      serverAvailable: true
+    });
+
+    expect(held.object).not.toBeNull();
+    expect(held.object?.locked).toBe(false);
+    expect(held.selection.objectScore).toBeGreaterThan(0.18);
+    expect(held.analysis.gripPercentage).toBeLessThanOrEqual(45);
+    expect(held.analysis.confidence).toBeLessThan(0.4);
+    expect(held.objectIdentity.matched).toBe(false);
+    expect(held.analysis.diagnostics.recommendation).toContain('holding the previous object boundary');
+  });
+
   it('does not lock oversized background masks that drift through the hand area', () => {
     const result = analyzeGripWithRfdetr({
       hand: phoneGripHand(),

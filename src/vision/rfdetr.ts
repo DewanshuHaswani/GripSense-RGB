@@ -137,6 +137,32 @@ export function analyzeGripWithRfdetr(options: {
   const selection = selectRfdetrGripObject(options.detections, options.hand, options.previousTrack);
   const track = updateRfdetrTrack(options.previousTrack, selection, options.now);
   if (!selection.detection || !rfdetrObjectLockReady(selection)) {
+    const held = createHeldRfdetrObject(options.previousObject, options.hand, track);
+    if (held) {
+      const holdSelection = {
+        ...selection,
+        objectScore: held.objectScore,
+        contact: held.contact,
+        proximity: held.proximity,
+        continuity: track.continuity
+      };
+      const objectIdentity = heldRfdetrIdentity(holdSelection.objectScore);
+      const baseAnalysis = analyzeGrip(options.hand, held.object, options.previousPalm, {
+        persistentSlipScore: options.persistentSlipScore ?? 0,
+        calibrationBaseline: options.calibrationBaseline,
+        weakCalibrationBaseline: options.weakCalibrationBaseline,
+        algorithmVersion: 'v6',
+        objectIdentity
+      });
+      return {
+        analysis: applyRfdetrHoldGate(baseAnalysis, holdSelection, track),
+        object: held.object,
+        objectIdentity,
+        track,
+        selection: holdSelection
+      };
+    }
+
     const analysis = createEmptyAnalysis(
       selection.rejectedPerson
         ? 'RF-DETR rejected person detection as a grip object.'
@@ -271,6 +297,58 @@ function rfdetrObjectLockReady(selection: Pick<RfdetrSelection, 'objectScore' | 
   if (selection.objectScore < 0.22 || selection.proximity < 0.2) return false;
   if (selection.contact >= 0.16) return true;
   return selection.contact >= 0.1 && selection.proximity >= 0.42 && selection.continuity >= 0.7;
+}
+
+function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[], track: RfdetrTrackState) {
+  if (!previous || !previous.detectorLabel?.startsWith('rfdetr:')) return null;
+  if (track.missedFrames < 1 || track.missedFrames > 2 || track.confidence < 0.16 || track.continuity < 0.08) return null;
+  const proximity = rfdetrObjectRegionProximityScore(previous, hand);
+  if (proximity < 0.34) return null;
+  const contact = rfdetrObjectRegionContactScore(previous, hand);
+  const objectScore = clamp(track.confidence * 0.62 + proximity * 0.22 + contact * 0.16);
+  if (objectScore < 0.18) return null;
+  const object: ObjectRegion = {
+    ...previous,
+    confidence: Math.min(previous.confidence, objectScore),
+    locked: false,
+    lockAgeFrames: 0,
+    tightness: Math.min(previous.tightness ?? 0.45, Math.max(0.18, contact)),
+    visualEdgeScore: Math.min(previous.visualEdgeScore ?? previous.confidence, objectScore),
+    visualTextureScore: Math.min(previous.visualTextureScore ?? previous.confidence, objectScore),
+    independentEvidenceScore: Math.min(previous.independentEvidenceScore ?? previous.confidence, objectScore),
+    relativeDriftScore: Math.max(previous.relativeDriftScore ?? 0, 0.42)
+  };
+  return { object, objectScore, contact, proximity };
+}
+
+function applyRfdetrHoldGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState): GripAnalysis {
+  const holdCap = Math.max(20, Math.round((selection.objectScore * 0.56 + selection.contact * 0.3 + track.continuity * 0.14) * 72));
+  const gripPercentage = Math.min(analysis.gripPercentage, holdCap);
+  const confidence = Math.min(analysis.confidence, clamp(selection.objectScore * 0.52 + selection.contact * 0.2 + track.continuity * 0.1));
+  return {
+    ...analysis,
+    gripPercentage,
+    confidence,
+    guidance: gripPercentage >= 34 ? 'Improve grip' : 'Object uncertain',
+    objectLockQuality: Math.min(analysis.objectLockQuality, selection.objectScore),
+    objectIdentityScore: selection.objectScore,
+    objectIdentityMatched: false,
+    slipRisk: Math.max(analysis.slipRisk, 0.42),
+    evidence: {
+      ...analysis.evidence,
+      visibleContactScore: Math.min(analysis.evidence.visibleContactScore, selection.contact),
+      fingerSegmentContactScore: Math.min(analysis.evidence.fingerSegmentContactScore, Math.max(selection.contact, 0.08)),
+      objectLockQuality: Math.min(analysis.evidence.objectLockQuality, selection.objectScore)
+    },
+    diagnostics: {
+      ...analysis.diagnostics,
+      state: gripPercentage >= 34 ? 'Grip detected' : 'Object uncertain',
+      recommendation: 'RF-DETR missed this frame; holding the previous object boundary briefly.',
+      objectIssue: 'RF-DETR did not refresh the object mask on this frame.',
+      gripIssue: 'Object boundary is a short temporal hold, so grip confidence is capped.',
+      issueCategory: 'object_problem'
+    }
+  };
 }
 
 export function applyRfdetrContactGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState): GripAnalysis {
@@ -560,6 +638,16 @@ function rfdetrIdentity(detection: RfdetrDetection | null, objectScore: number, 
   };
 }
 
+function heldRfdetrIdentity(objectScore: number): ObjectIdentitySignal {
+  return {
+    hasProfiles: true,
+    score: objectScore,
+    matched: false,
+    name: 'RF-DETR held object',
+    source: 'base'
+  };
+}
+
 function createRfdetrUnavailableAnalysis(message = 'RF-DETR unavailable. Start the local RF-DETR server to use V8 live analysis.'): GripAnalysis {
   const analysis = createEmptyAnalysis(message);
   return {
@@ -581,6 +669,36 @@ function rfdetrHandProximityScore(detection: RfdetrDetection, hand: Landmark[]) 
   const nearest = Math.min(...points.map((point) => pointToRectDistance(point, detection.bbox)));
   const centerDistance = distance(detection.center, palmCenter(hand));
   return clamp((1 - nearest / Math.max(22, size * 0.74)) * 0.68 + (1 - centerDistance / Math.max(30, size * 1.8)) * 0.32);
+}
+
+function rfdetrObjectRegionProximityScore(object: ObjectRegion, hand: Landmark[]) {
+  const size = handSize(hand);
+  const rect = objectRegionRect(object);
+  const points = [palmCenter(hand), ...FINGERTIP_INDICES.map((index) => hand[index]).filter(Boolean)];
+  const nearest = Math.min(...points.map((point) => pointToRectDistance(point, rect)));
+  const centerDistance = distance(object.center, palmCenter(hand));
+  return clamp((1 - nearest / Math.max(22, size * 0.82)) * 0.68 + (1 - centerDistance / Math.max(30, size * 2.05)) * 0.32);
+}
+
+function rfdetrObjectRegionContactScore(object: ObjectRegion, hand: Landmark[]) {
+  const size = handSize(hand);
+  const samples = handContactSamples(hand);
+  const polygon = object.contour.length >= 3 ? object.contour : bboxPolygon(objectRegionRect(object));
+  const inside = samples.filter((point) => pointInPolygon(point, polygon)).length / samples.length;
+  const nearBoundary = samples.filter((point) => pointToPolygonDistance(point, polygon) < Math.max(18, size * 0.18)).length / samples.length;
+  const bboxOverlap = rectIoU(rectFromPoints(handCorridorPoints(hand)), objectRegionRect(object));
+  const palmDistance = pointToRectDistance(palmCenter(hand), objectRegionRect(object));
+  const palmNear = clamp(1 - palmDistance / Math.max(32, size * 0.78));
+  return clamp(inside * 0.34 + nearBoundary * 0.26 + Math.min(1, bboxOverlap * 4.8) * 0.24 + palmNear * 0.16);
+}
+
+function objectRegionRect(object: ObjectRegion) {
+  return {
+    x: object.center.x - object.radiusX,
+    y: object.center.y - object.radiusY,
+    width: object.radiusX * 2,
+    height: object.radiusY * 2
+  };
 }
 
 function rfdetrSpatialPlausibilityScore(detection: RfdetrDetection, hand: Landmark[]) {
