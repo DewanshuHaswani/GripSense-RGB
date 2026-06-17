@@ -127,6 +127,45 @@ describe('RF-DETR grip analysis', () => {
     expect(held.analysis.diagnostics.recommendation).toContain('holding the previous object boundary');
   });
 
+  it('motion-compensates the held RF-DETR visual across short moving-hand misses', () => {
+    const firstHand = phoneGripHand();
+    const movedHand = firstHand.map((point) => ({ ...point, x: point.x + 24, y: point.y - 12 }));
+    const first = analyzeGripWithRfdetr({
+      hand: firstHand,
+      detections: [objectDetection()],
+      previousPalm: palmCenter(firstHand),
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      serverAvailable: true
+    });
+    const missedOnce = analyzeGripWithRfdetr({
+      hand: movedHand,
+      detections: [],
+      previousPalm: palmCenter(firstHand),
+      previousObject: first.object,
+      previousTrack: first.track,
+      now: 1160,
+      serverAvailable: true
+    });
+    const missedTwice = analyzeGripWithRfdetr({
+      hand: movedHand,
+      detections: [],
+      previousPalm: palmCenter(firstHand),
+      previousObject: first.object,
+      previousTrack: missedOnce.track,
+      now: 1320,
+      serverAvailable: true
+    });
+
+    expect(missedTwice.object).not.toBeNull();
+    expect(missedTwice.object?.center.x).toBeCloseTo((first.object?.center.x ?? 0) + 24, 5);
+    expect(missedTwice.object?.center.y).toBeCloseTo((first.object?.center.y ?? 0) - 12, 5);
+    expect(missedTwice.object?.locked).toBe(false);
+    expect(missedTwice.analysis.confidence).toBeLessThan(0.45);
+    expect(missedTwice.analysis.gripPercentage).toBeLessThan(55);
+  });
+
   it('does not lock oversized background masks that drift through the hand area', () => {
     const result = analyzeGripWithRfdetr({
       hand: phoneGripHand(),

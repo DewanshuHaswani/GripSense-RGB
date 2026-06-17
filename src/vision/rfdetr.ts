@@ -137,7 +137,7 @@ export function analyzeGripWithRfdetr(options: {
   const selection = selectRfdetrGripObject(options.detections, options.hand, options.previousTrack);
   const track = updateRfdetrTrack(options.previousTrack, selection, options.now);
   if (!selection.detection || !rfdetrObjectLockReady(selection)) {
-    const held = createHeldRfdetrObject(options.previousObject, options.hand, track);
+    const held = createHeldRfdetrObject(options.previousObject, options.hand, options.previousPalm, track);
     if (held) {
       const holdSelection = {
         ...selection,
@@ -299,24 +299,30 @@ function rfdetrObjectLockReady(selection: Pick<RfdetrSelection, 'objectScore' | 
   return selection.contact >= 0.1 && selection.proximity >= 0.42 && selection.continuity >= 0.7;
 }
 
-function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[], track: RfdetrTrackState) {
+function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[], previousPalm: Point | null, track: RfdetrTrackState) {
   if (!previous || !previous.detectorLabel?.startsWith('rfdetr:')) return null;
-  if (track.missedFrames < 1 || track.missedFrames > 2 || track.confidence < 0.16 || track.continuity < 0.08) return null;
-  const proximity = rfdetrObjectRegionProximityScore(previous, hand);
-  if (proximity < 0.34) return null;
-  const contact = rfdetrObjectRegionContactScore(previous, hand);
-  const objectScore = clamp(track.confidence * 0.62 + proximity * 0.22 + contact * 0.16);
-  if (objectScore < 0.18) return null;
+  if (track.missedFrames < 1 || track.missedFrames > 4 || track.confidence < 0.08 || track.continuity < 0.04) return null;
+  const currentPalm = palmCenter(hand);
+  const palmShift = previousPalm ? subtract(currentPalm, previousPalm) : { x: 0, y: 0 };
+  const maxShift = Math.max(30, handSize(hand) * 1.18);
+  const compensated = distance({ x: 0, y: 0 }, palmShift) <= maxShift ? translateObjectRegion(previous, palmShift) : previous;
+  const proximity = rfdetrObjectRegionProximityScore(compensated, hand);
+  if (proximity < 0.28) return null;
+  const contact = rfdetrObjectRegionContactScore(compensated, hand);
+  const ageDecay = Math.max(0.32, 1 - track.missedFrames * 0.16);
+  const objectScore = clamp((track.confidence * 0.5 + proximity * 0.26 + contact * 0.24) * ageDecay);
+  if (objectScore < 0.12) return null;
   const object: ObjectRegion = {
-    ...previous,
-    confidence: Math.min(previous.confidence, objectScore),
+    ...compensated,
+    confidence: Math.min(compensated.confidence, objectScore),
     locked: false,
     lockAgeFrames: 0,
-    tightness: Math.min(previous.tightness ?? 0.45, Math.max(0.18, contact)),
-    visualEdgeScore: Math.min(previous.visualEdgeScore ?? previous.confidence, objectScore),
-    visualTextureScore: Math.min(previous.visualTextureScore ?? previous.confidence, objectScore),
-    independentEvidenceScore: Math.min(previous.independentEvidenceScore ?? previous.confidence, objectScore),
-    relativeDriftScore: Math.max(previous.relativeDriftScore ?? 0, 0.42)
+    velocity: palmShift,
+    tightness: Math.min(compensated.tightness ?? 0.45, Math.max(0.16, contact)),
+    visualEdgeScore: Math.min(compensated.visualEdgeScore ?? compensated.confidence, objectScore),
+    visualTextureScore: Math.min(compensated.visualTextureScore ?? compensated.confidence, objectScore),
+    independentEvidenceScore: Math.min(compensated.independentEvidenceScore ?? compensated.confidence, objectScore),
+    relativeDriftScore: Math.max(compensated.relativeDriftScore ?? 0, 0.42 + track.missedFrames * 0.08)
   };
   return { object, objectScore, contact, proximity };
 }
@@ -621,10 +627,19 @@ function decayRfdetrTrack(previous: RfdetrTrackState, now: number): RfdetrTrackS
   if (!previous.detectionKey) return { ...EMPTY_RFDETR_TRACK, lastSeenAt: previous.lastSeenAt };
   return {
     ...previous,
-    confidence: clamp(previous.confidence * 0.42),
-    continuity: clamp(previous.continuity * 0.55),
+    confidence: clamp(previous.confidence * 0.64),
+    continuity: clamp(previous.continuity * 0.68),
     missedFrames: previous.missedFrames + 1,
     lastSeenAt: previous.lastSeenAt || now
+  };
+}
+
+function translateObjectRegion(object: ObjectRegion, offset: Point): ObjectRegion {
+  if (Math.abs(offset.x) < 0.001 && Math.abs(offset.y) < 0.001) return object;
+  return {
+    ...object,
+    center: { x: object.center.x + offset.x, y: object.center.y + offset.y },
+    contour: object.contour.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y }))
   };
 }
 
