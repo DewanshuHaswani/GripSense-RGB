@@ -20,6 +20,77 @@ See [LICENSE](LICENSE), [ADDITIONAL-TERMS.md](ADDITIONAL-TERMS.md), [NOTICE](NOT
 
 ## How to Run
 
+### Fresh Machine Setup
+
+Use these steps when pulling the GitHub repo onto another computer.
+
+Requirements:
+
+- Node.js 20.19 or newer. Vite 8 requires a recent Node 20+ runtime.
+- Python 3.10 or newer for the local inference server.
+- A webcam for V1-V8 live modes.
+- Optional: an Intel RealSense camera plus `pyrealsense2` for V9 live and Offline V3 depth.
+
+Clone and install the frontend:
+
+```bash
+git clone https://github.com/DewanshuHaswani/GripSense-RGB.git
+cd GripSense-RGB
+node -v
+npm install
+```
+
+Run the frontend:
+
+```bash
+npm run dev
+```
+
+Open `http://127.0.0.1:5173/` in Chrome or another modern browser and allow camera access.
+
+For **V8 live**, **V9 live**, **Offline V2**, and **Offline V3**, also start the local Python inference server in a second terminal:
+
+```bash
+cd GripSense-RGB/local-inference
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+uvicorn server:app --host 127.0.0.1 --port 7867
+```
+
+Optional RealSense setup for **V9 · RealSense live** and **Offline V3 · RealSense**:
+
+```bash
+cd GripSense-RGB/local-inference
+. .venv/bin/activate
+pip install pyrealsense2
+uvicorn server:app --host 127.0.0.1 --port 7867
+```
+
+Keep both terminals open:
+
+- Frontend: `npm run dev`, usually at `http://127.0.0.1:5173/`
+- Local inference: `uvicorn server:app --host 127.0.0.1 --port 7867`
+
+Quick health checks:
+
+```bash
+curl -I http://127.0.0.1:5173/
+curl -I http://127.0.0.1:7867/docs
+```
+
+If V8 shows **server unavailable**, it means the browser cannot get a usable RF-DETR response from `http://127.0.0.1:7867/api/rfdetr/analyze`. Check that the Python server is running, dependencies installed correctly, port `7867` is not blocked, and the server terminal did not show an RF-DETR model load error. The first RF-DETR request can be slow because model weights may load or download.
+
+If V9 or Offline V3 shows **RealSense unavailable**, RF-DETR can still run, but depth evidence is missing. Check that the RealSense camera is connected to the same machine, `pyrealsense2` is installed in the local inference virtualenv, and the browser camera view is aligned with the RealSense RGB stream.
+
+Useful verification commands:
+
+```bash
+npm run test
+npm run build
+npm audit --audit-level=moderate
+```
+
 ```bash
 npm install
 npm run dev

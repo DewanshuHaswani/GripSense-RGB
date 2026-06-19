@@ -27,6 +27,19 @@ pip install pyrealsense2
 uvicorn server:app --host 127.0.0.1 --port 7867
 ```
 
+On a fresh machine, keep this server running in one terminal and run the frontend from the repo root in another terminal:
+
+```bash
+npm install
+npm run dev
+```
+
+Health check:
+
+```bash
+curl -I http://127.0.0.1:7867/docs
+```
+
 The browser calls:
 
 - `POST http://127.0.0.1:7867/v3/analyze-frame` for V3. Override with `VITE_GRIPSENSE_V3_ENDPOINT`.
@@ -36,3 +49,10 @@ The browser calls:
 RF-DETR runs on CPU by default. You can set `GRIPSENSE_RFDETR_DEVICE=cpu` explicitly before launching the server. V8 reports `RF-DETR unavailable` rather than inventing confidence if this server is not reachable.
 
 RealSense depth is optional and hardware-dependent. Use a RealSense RGB-D camera as the browser camera source, keep it connected to the same machine running this server, and install `pyrealsense2` separately. V9/Offline V3 use depth only as contact evidence; RF-DETR masks still provide the object evidence.
+
+Troubleshooting:
+
+- `server unavailable` in V8 means the frontend could not get a valid RF-DETR response from this server.
+- If `curl -I http://127.0.0.1:7867/docs` fails, the server is not reachable.
+- If `/docs` works but V8 is unavailable, inspect the server terminal for missing `rfdetr`, model load/download failure, or CPU inference errors.
+- If V9/Offline V3 show RealSense unavailable, install `pyrealsense2`, connect the RealSense camera, and restart this server.
