@@ -172,10 +172,42 @@ class RfdetrAnalyzeResponse(BaseModel):
     device: str
 
 
+class RealSenseObjectRequest(BaseModel):
+    center: dict[str, float] | None = None
+    radiusX: float | None = None
+    radiusY: float | None = None
+    angle: float | None = None
+    contour: list[dict[str, float]] = Field(default_factory=list)
+
+
+class RealSenseDepthRequest(BaseModel):
+    timestamp: float
+    hand: list[Landmark] | None = None
+    object: RealSenseObjectRequest | None = None
+
+
+class RealSenseDepthResponse(BaseModel):
+    available: bool
+    frameTimestamp: float
+    latencyMs: float
+    handDepthM: float | None = None
+    objectDepthM: float | None = None
+    depthDeltaM: float | None = None
+    contactDepthScore: float
+    depthSeparationScore: float
+    stereoConfidence: float
+    occlusionScore: float
+    surfaceContinuity: float
+    source: str
+
+
 _RFDETR_MODEL: Any | None = None
 _RFDETR_CLASSES: dict[int, str] | list[str] | None = None
 _RFDETR_MODEL_NAME = "RF-DETR-Seg Nano"
 _RFDETR_DEVICE = os.environ.get("GRIPSENSE_RFDETR_DEVICE", "cpu").lower()
+_REALSENSE_PIPELINE: Any | None = None
+_REALSENSE_ALIGN: Any | None = None
+_REALSENSE_RS: Any | None = None
 
 if _RFDETR_DEVICE == "cpu":
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -306,8 +338,160 @@ async def analyze_rfdetr_frame(
     )
 
 
+@app.post("/api/realsense/depth-signal", response_model=RealSenseDepthResponse)
+async def analyze_realsense_depth(request: RealSenseDepthRequest) -> RealSenseDepthResponse:
+    """Sample aligned Intel RealSense depth for the current hand/object geometry.
+
+    The browser still owns RGB hand tracking and RF-DETR object masks. This
+    endpoint only contributes stereo depth contact evidence when pyrealsense2
+    and a connected RealSense device are available.
+    """
+
+    start = time.perf_counter()
+    try:
+        depth_frame = get_realsense_depth_frame()
+    except Exception as exc:  # pragma: no cover - depends on optional camera hardware.
+        return unavailable_realsense_response(request.timestamp, start, f"realsense-unavailable:{type(exc).__name__}")
+
+    if depth_frame is None:
+        return unavailable_realsense_response(request.timestamp, start, "realsense-no-frame")
+
+    width = int(depth_frame.get_width())
+    height = int(depth_frame.get_height())
+    hand_points = landmark_sample_points(request.hand, width, height)
+    object_points = object_sample_points(request.object, width, height)
+    hand_depths = sample_depths(depth_frame, hand_points)
+    object_depths = sample_depths(depth_frame, object_points)
+
+    if not hand_depths or not object_depths:
+        return unavailable_realsense_response(request.timestamp, start, "realsense-depth-missing")
+
+    hand_depth = robust_depth(hand_depths)
+    object_depth = robust_depth(object_depths)
+    delta = abs(hand_depth - object_depth)
+    contact_score = clamp(1.0 - max(0.0, delta - 0.025) / 0.135)
+    separation_score = clamp(max(0.0, delta - 0.035) / 0.18)
+    object_continuity = depth_continuity(object_depths)
+    valid_ratio = clamp((len(hand_depths) + len(object_depths)) / max(1, len(hand_points) + len(object_points)))
+    stereo_confidence = clamp(valid_ratio * 0.58 + object_continuity * 0.32 + contact_score * 0.1)
+    occlusion_score = clamp(1.0 - valid_ratio)
+
+    return RealSenseDepthResponse(
+        available=True,
+        frameTimestamp=request.timestamp,
+        latencyMs=(time.perf_counter() - start) * 1000,
+        handDepthM=hand_depth,
+        objectDepthM=object_depth,
+        depthDeltaM=delta,
+        contactDepthScore=contact_score,
+        depthSeparationScore=separation_score,
+        stereoConfidence=stereo_confidence,
+        occlusionScore=occlusion_score,
+        surfaceContinuity=object_continuity,
+        source="intel-realsense-depth",
+    )
+
+
 def clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def unavailable_realsense_response(timestamp: float, start: float, source: str) -> RealSenseDepthResponse:
+    return RealSenseDepthResponse(
+        available=False,
+        frameTimestamp=timestamp,
+        latencyMs=(time.perf_counter() - start) * 1000,
+        handDepthM=None,
+        objectDepthM=None,
+        depthDeltaM=None,
+        contactDepthScore=0.0,
+        depthSeparationScore=1.0,
+        stereoConfidence=0.0,
+        occlusionScore=1.0,
+        surfaceContinuity=0.0,
+        source=source,
+    )
+
+
+def get_realsense_depth_frame() -> Any | None:
+    global _REALSENSE_ALIGN, _REALSENSE_PIPELINE, _REALSENSE_RS
+    if _REALSENSE_RS is None:
+        try:
+            import pyrealsense2 as rs  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency.
+            raise RuntimeError("pyrealsense2 is not installed") from exc
+        _REALSENSE_RS = rs
+
+    if _REALSENSE_PIPELINE is None:
+        pipeline = _REALSENSE_RS.pipeline()
+        config = _REALSENSE_RS.config()
+        config.enable_stream(_REALSENSE_RS.stream.depth, 640, 480, _REALSENSE_RS.format.z16, 30)
+        try:
+            config.enable_stream(_REALSENSE_RS.stream.color, 640, 480, _REALSENSE_RS.format.bgr8, 30)
+            _REALSENSE_ALIGN = _REALSENSE_RS.align(_REALSENSE_RS.stream.color)
+        except Exception:
+            _REALSENSE_ALIGN = None
+        pipeline.start(config)
+        _REALSENSE_PIPELINE = pipeline
+
+    frames = _REALSENSE_PIPELINE.wait_for_frames(400)
+    if _REALSENSE_ALIGN is not None:
+        frames = _REALSENSE_ALIGN.process(frames)
+    return frames.get_depth_frame()
+
+
+def landmark_sample_points(hand: list[Landmark] | None, width: int, height: int) -> list[tuple[int, int]]:
+    if not hand:
+        return []
+    priority = [0, 4, 5, 8, 9, 12, 13, 16, 17, 20]
+    points = [hand[index] for index in priority if index < len(hand)]
+    return [coerce_point({"x": point.x, "y": point.y}, width, height) for point in points]
+
+
+def object_sample_points(object_request: RealSenseObjectRequest | None, width: int, height: int) -> list[tuple[int, int]]:
+    if object_request is None:
+        return []
+    raw_points: list[dict[str, float]] = []
+    if object_request.center:
+        raw_points.append(object_request.center)
+    raw_points.extend(object_request.contour[:12])
+    center = object_request.center
+    radius_x = object_request.radiusX or 0
+    radius_y = object_request.radiusY or 0
+    if center and radius_x > 0 and radius_y > 0:
+        cx = float(center.get("x", 0))
+        cy = float(center.get("y", 0))
+        for dx, dy in ((0.45, 0), (-0.45, 0), (0, 0.45), (0, -0.45)):
+            raw_points.append({"x": cx + radius_x * dx, "y": cy + radius_y * dy})
+    return [coerce_point(point, width, height) for point in raw_points]
+
+
+def coerce_point(point: dict[str, float], width: int, height: int) -> tuple[int, int]:
+    raw_x = float(point.get("x", 0))
+    raw_y = float(point.get("y", 0))
+    x = raw_x * width if 0 <= raw_x <= 1 else raw_x
+    y = raw_y * height if 0 <= raw_y <= 1 else raw_y
+    return (int(max(0, min(width - 1, round(x)))), int(max(0, min(height - 1, round(y)))))
+
+
+def sample_depths(depth_frame: Any, points: list[tuple[int, int]]) -> list[float]:
+    depths: list[float] = []
+    for x, y in points:
+        depth = float(depth_frame.get_distance(x, y))
+        if 0.08 <= depth <= 4.0:
+            depths.append(depth)
+    return depths
+
+
+def robust_depth(depths: list[float]) -> float:
+    return float(np.median(np.asarray(depths, dtype=float)))
+
+
+def depth_continuity(depths: list[float]) -> float:
+    if len(depths) < 2:
+        return 0.4 if depths else 0.0
+    spread = float(np.percentile(depths, 75) - np.percentile(depths, 25))
+    return clamp(1.0 - spread / 0.12)
 
 
 def get_rfdetr_model() -> tuple[Any, dict[int, str] | list[str] | None]:

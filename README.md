@@ -37,18 +37,21 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v6`
 - `http://127.0.0.1:5173/?version=v7`
 - `http://127.0.0.1:5173/?version=v8`
+- `http://127.0.0.1:5173/?version=v9`
 
-The toolbar also has a `V1` through `V8` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` through `V9` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ### Optional RF-DETR CPU Server
 
-V8 live mode and Offline V2 RF-DETR enhancement use a local Python server. It runs on CPU by default and keeps frames on your machine.
+V8/V9 live mode and Offline V2/V3 enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9 and Offline V3 can also sample Intel RealSense depth when `pyrealsense2` and a connected RealSense camera are available.
 
 ```bash
 cd local-inference
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+# Optional, only for RealSense V9 / Offline V3 depth:
+pip install pyrealsense2
 uvicorn server:app --host 127.0.0.1 --port 7867
 ```
 
@@ -58,7 +61,7 @@ Then start the frontend in another terminal:
 npm run dev
 ```
 
-The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. The default server model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
+The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. RealSense V9 and Offline V3 call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
 
 ## Offline Video Review
 
@@ -74,10 +77,11 @@ Offline mode adds liquid-glass overlays directly on top of the video:
 
 You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
 
-Offline Review has two algorithms:
+Offline Review has three algorithms:
 
 - **Offline V1**: the original offline review path. It is unchanged and starts quickly.
 - **Offline V2**: scans the full clip before review, uses RF-DETR object masks when the local server is available, and then applies future/past smoothing. Its timeline includes grip score, object score, contact evidence, weak segments, and slip events. If RF-DETR is unavailable, Offline V2 keeps using the existing local review path and reports the server status in the overlay.
+- **Offline V3 · RealSense**: adds aligned RealSense stereo depth contact on top of Offline V2's RF-DETR mask pipeline. It still scans the full clip before preview/export, then applies future/past smoothing with depth contact, depth separation, stereo confidence, object score, weak segments, and slip events. If RealSense depth is unavailable, Offline V3 reports that state and falls back to RF-DETR/RGB evidence rather than inventing depth confidence.
 
 ## Object Profile V2 Training
 
@@ -184,6 +188,23 @@ Important V8 behavior:
 - If the RF-DETR server is unavailable, V8 shows `RF-DETR unavailable` and does not fake confidence or fall back to a high heuristic score.
 
 Limitations: RF-DETR-Seg Nano on CPU can be slower than the webcam frame rate, especially on large frames. Lighting, blur, occlusion, and unusual objects can still reduce mask quality. The app estimates visual grip stability only; it does not measure real force.
+
+## Version 9: RealSense RGB-D Live
+
+V9 is an additive RealSense live mode. It keeps V8's RF-DETR mask/box object evidence, then asks the local RealSense endpoint for stereo depth around the current hand and selected object:
+
+```text
+webcam frame -> RF-DETR non-person object mask -> RealSense depth contact/separation -> RGB-D grip score
+```
+
+V9 is labelled `V9 · RealSense live` in the version picker. It still ignores object labels for grip quality and rejects `person` as the grip object. RealSense depth is used only for physical contact evidence:
+
+- Depth contact can raise confidence when the object surface and hand corridor are at compatible depth.
+- Depth separation caps grip quickly when RGB hand geometry looks closed but the object is away from the hand.
+- Stereo confidence and surface continuity help decide whether to trust the depth sample.
+- If the RealSense endpoint is unavailable, V9 reports `RealSense unavailable` and keeps depth contact at zero rather than faking confidence.
+
+Limitations: the browser must use the RealSense RGB stream or another camera view aligned closely enough with the RealSense depth stream. Poor alignment, reflective objects, very close objects, blur, and hand occlusion can reduce depth quality. V9 improves visual contact evidence; it still does not measure actual grip force.
 
 ## Version 3: Trained Object Focus
 
