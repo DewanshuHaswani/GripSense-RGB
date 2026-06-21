@@ -91,6 +91,85 @@ npm run build
 npm audit --audit-level=moderate
 ```
 
+### Windows Setup With RF-DETR And RealSense D445
+
+Use this section for a Windows machine that needs V8 RF-DETR, Offline V2, V9 RealSense, or Offline V3.
+
+Install first:
+
+- Git for Windows.
+- Node.js 20.19 or newer.
+- Python 3.10 or newer. During install, enable **Add python.exe to PATH**.
+- Optional for D445: Intel RealSense SDK 2.0 for Windows, including **Intel RealSense Viewer**.
+- Optional for D445: connect the D445 directly to a USB 3.x port. Avoid unpowered hubs.
+
+Clone and run the one-time setup from **PowerShell**:
+
+```powershell
+git clone https://github.com/DewanshuHaswani/GripSense-RGB.git
+cd GripSense-RGB
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_windows.ps1
+```
+
+For RealSense D445 support, run setup with:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_windows.ps1 -WithRealSense
+```
+
+The setup script installs npm packages, creates `local-inference\.venv`, installs Python inference dependencies, and warms up RF-DETR-Seg Nano. The warmup step is where model weights are downloaded/cached on that Windows machine. This can take several minutes the first time.
+
+Run the app after setup:
+
+```powershell
+# Terminal 1
+npm run dev
+```
+
+```powershell
+# Terminal 2
+.\scripts\start_windows_inference.ps1
+```
+
+Open:
+
+- V8 RF-DETR live: `http://127.0.0.1:5173/?version=v8`
+- V9 RealSense live: `http://127.0.0.1:5173/?version=v9`
+- Local server docs: `http://127.0.0.1:7867/docs`
+
+RF-DETR model files are intentionally not committed to GitHub. They are large runtime artifacts and may have their own distribution constraints. The supported setup path is to download/cache them on each machine using:
+
+```powershell
+.\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model rfdetr
+```
+
+For RealSense D445:
+
+1. Install Intel RealSense SDK 2.0 and open **Intel RealSense Viewer**.
+2. Confirm the D445 streams both RGB/color and depth in RealSense Viewer.
+3. Close RealSense Viewer before running GripSense so the camera is not locked by another app.
+4. Start `.\scripts\start_windows_inference.ps1`.
+5. In the browser camera permission prompt, choose the RealSense RGB/color camera if available.
+6. Use `?version=v9` for live RealSense mode or Offline V3 inside offline review.
+
+If V8 shows **server unavailable** on Windows:
+
+- Confirm Terminal 2 is running `uvicorn server:app --host 127.0.0.1 --port 7867`.
+- Open `http://127.0.0.1:7867/docs`.
+- Run the RF-DETR warmup command above and read any Python error.
+- Check Windows Firewall did not block Python on localhost.
+- Make sure the frontend is calling `127.0.0.1:7867`, not another machine or port.
+
+If V9/Offline V3 shows **RealSense unavailable**:
+
+- Confirm D445 works in RealSense Viewer.
+- Confirm `pyrealsense2` is installed inside `local-inference\.venv`.
+- Close any other app using the camera.
+- Restart the inference server after connecting the D445.
+- RealSense depth only helps when the browser RGB image and the D445 depth stream are physically aligned.
+
 ```bash
 npm install
 npm run dev

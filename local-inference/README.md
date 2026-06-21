@@ -40,6 +40,35 @@ Health check:
 curl -I http://127.0.0.1:7867/docs
 ```
 
+Windows setup:
+
+```powershell
+cd GripSense-RGB
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_windows.ps1
+```
+
+Windows setup with Intel RealSense D445 support:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_windows.ps1 -WithRealSense
+```
+
+Start the Windows inference server:
+
+```powershell
+.\scripts\start_windows_inference.ps1
+```
+
+The setup script warms up RF-DETR-Seg Nano so the model weights download/cache on the Windows machine before V8 is used. If setup was run with `-SkipWarmup`, warm it up later:
+
+```powershell
+.\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model rfdetr
+```
+
+Model weights are not stored in this Git repository. They are runtime artifacts resolved by the installed inference packages and should be downloaded on each target machine.
+
 The browser calls:
 
 - `POST http://127.0.0.1:7867/v3/analyze-frame` for V3. Override with `VITE_GRIPSENSE_V3_ENDPOINT`.
@@ -56,3 +85,4 @@ Troubleshooting:
 - If `curl -I http://127.0.0.1:7867/docs` fails, the server is not reachable.
 - If `/docs` works but V8 is unavailable, inspect the server terminal for missing `rfdetr`, model load/download failure, or CPU inference errors.
 - If V9/Offline V3 show RealSense unavailable, install `pyrealsense2`, connect the RealSense camera, and restart this server.
+- For RealSense D445 on Windows, install Intel RealSense SDK 2.0, verify color/depth in RealSense Viewer, close RealSense Viewer, then start this server.
