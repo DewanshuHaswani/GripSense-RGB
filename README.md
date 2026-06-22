@@ -29,7 +29,7 @@ Requirements:
 - Node.js 20.19 or newer. Vite 8 requires a recent Node 20+ runtime.
 - Python 3.10 or newer for the local inference server.
 - A webcam for V1-V8 and V10 live modes.
-- Optional: an Intel RealSense camera plus `pyrealsense2` for V9 live and Offline V3 depth.
+- Optional: an Intel RealSense D455/D445 camera plus `pyrealsense2` for V9 live, Offline V3 depth, and Offline Max RGB-D evidence.
 
 Clone and install the frontend:
 
@@ -48,7 +48,7 @@ npm run dev
 
 Open `http://127.0.0.1:5173/` in Chrome or another modern browser and allow camera access.
 
-For **V8 live**, **V9 live**, **Offline V2**, and **Offline V3**, also start the local Python inference server in a second terminal:
+For **V8 live**, **V9 live**, **Offline V2**, **Offline V3**, and **Offline Max**, also start the local Python inference server in a second terminal:
 
 ```bash
 cd GripSense-RGB/local-inference
@@ -58,7 +58,7 @@ pip install -r requirements.txt
 uvicorn server:app --host 127.0.0.1 --port 7867
 ```
 
-Optional RealSense setup for **V9 · RealSense live** and **Offline V3 · RealSense**:
+Optional RealSense setup for **V9 · RealSense live**, **Offline V3 · RealSense**, and **Offline Max**:
 
 ```bash
 cd GripSense-RGB/local-inference
@@ -83,7 +83,7 @@ If V8 shows **server unavailable**, it means the browser cannot get a usable RF-
 
 If this happens on a locked-down Windows or office network but `http://127.0.0.1:7867/docs` works, use **V10 · RF-DETR proxy live** at `?version=v10`. V10 runs the same grip analysis as V8, but the browser calls the frontend dev server first and Vite proxies the request to Python. This helps with browser-side localhost, CORS, proxy, and SSL inspection policies. It cannot fix a Python-side model download failure; run the RF-DETR warmup command on a network where Python can download the model or configure the machine's corporate CA certificate for Python.
 
-If V9 or Offline V3 shows **RealSense unavailable**, RF-DETR can still run, but depth evidence is missing. Check that the RealSense camera is connected to the same machine, `pyrealsense2` is installed in the local inference virtualenv, and the browser camera view is aligned with the RealSense RGB stream.
+If V9, Offline V3, or Offline Max shows **RealSense unavailable**, RF-DETR can still run, but depth evidence is missing. Check that the RealSense D455/D445 is connected to the same machine, `pyrealsense2` is installed in the local inference virtualenv, and the browser camera view is aligned with the RealSense RGB stream.
 
 Useful verification commands:
 
@@ -129,17 +129,17 @@ Open:
 - V9 RealSense live: `http://127.0.0.1:7676/?version=v9`
 - Local server docs: `http://127.0.0.1:7867/docs`
 
-### Windows Setup With RF-DETR And RealSense D445
+### Windows Setup With RF-DETR And RealSense D455/D445
 
-Use this section for a Windows machine that needs V8/V10 RF-DETR, Offline V2, V9 RealSense, or Offline V3.
+Use this section for a Windows machine that needs V8/V10 RF-DETR, Offline V2, V9 RealSense, Offline V3, or Offline Max.
 
 Install first:
 
 - Git for Windows.
 - Node.js 20.19 or newer.
 - Python 3.10 or newer. During install, enable **Add python.exe to PATH**.
-- Optional for D445: Intel RealSense SDK 2.0 for Windows, including **Intel RealSense Viewer**.
-- Optional for D445: connect the D445 directly to a USB 3.x port. Avoid unpowered hubs.
+- Optional for D455/D445: Intel RealSense SDK 2.0 for Windows, including **Intel RealSense Viewer**.
+- Optional for D455/D445: connect the camera directly to a USB 3.x port. Avoid unpowered hubs.
 
 Clone and run the one-time setup from **PowerShell**:
 
@@ -150,7 +150,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\scripts\setup_windows.ps1
 ```
 
-For RealSense D445 support, run setup with:
+For RealSense D455/D445 support, run setup with:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -184,14 +184,14 @@ RF-DETR model files are intentionally not committed to GitHub. They are large ru
 .\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model rfdetr
 ```
 
-For RealSense D445:
+For RealSense D455/D445:
 
 1. Install Intel RealSense SDK 2.0 and open **Intel RealSense Viewer**.
-2. Confirm the D445 streams both RGB/color and depth in RealSense Viewer.
+2. Confirm the D455/D445 streams both RGB/color and depth in RealSense Viewer.
 3. Close RealSense Viewer before running GripSense so the camera is not locked by another app.
 4. Start `.\scripts\start_windows_inference.ps1`.
 5. In the browser camera permission prompt, choose the RealSense RGB/color camera if available.
-6. Use `?version=v9` for live RealSense mode or Offline V3 inside offline review.
+6. Use `?version=v9` for live RealSense mode, Offline V3 inside offline review, or the **Offline Max** upload button for automatic RGB-vs-RGB-D selection.
 
 If V8 shows **server unavailable** on Windows:
 
@@ -202,13 +202,13 @@ If V8 shows **server unavailable** on Windows:
 - Make sure the frontend is calling `127.0.0.1:7867`, not another machine or port.
 - Try V10 at `http://127.0.0.1:7676/?version=v10` if `/docs` works but the browser blocks direct RF-DETR calls. V10 uses the frontend proxy route `/api/gripsense/rfdetr/analyze`.
 
-If V9/Offline V3 shows **RealSense unavailable**:
+If V9/Offline V3/Offline Max shows **RealSense unavailable**:
 
-- Confirm D445 works in RealSense Viewer.
+- Confirm the D455/D445 works in RealSense Viewer.
 - Confirm `pyrealsense2` is installed inside `local-inference\.venv`.
 - Close any other app using the camera.
-- Restart the inference server after connecting the D445.
-- RealSense depth only helps when the browser RGB image and the D445 depth stream are physically aligned.
+- Restart the inference server after connecting the D455/D445.
+- RealSense depth only helps when the browser RGB image and the D455/D445 depth stream are physically aligned.
 
 ```bash
 npm install
@@ -234,14 +234,14 @@ The toolbar also has a `V1` through `V10` switch. Changing versions clears the o
 
 ### Optional RF-DETR CPU Server
 
-V8/V9/V10 live mode and Offline V2/V3 enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9 and Offline V3 can also sample Intel RealSense depth when `pyrealsense2` and a connected RealSense camera are available.
+V8/V9/V10 live mode and Offline V2/V3/Max enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9, Offline V3, and Offline Max can also sample Intel RealSense depth when `pyrealsense2` and a connected D455/D445 camera are available.
 
 ```bash
 cd local-inference
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-# Optional, only for RealSense V9 / Offline V3 depth:
+# Optional, only for RealSense V9 / Offline V3 / Offline Max depth:
 pip install pyrealsense2
 uvicorn server:app --host 127.0.0.1 --port 7867
 ```
@@ -252,7 +252,7 @@ Then start the frontend in another terminal:
 npm run dev
 ```
 
-The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for V8 RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. V10 calls same-origin `POST /api/gripsense/rfdetr/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`. RealSense V9 and Offline V3 call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
+The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for V8 RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. V10 calls same-origin `POST /api/gripsense/rfdetr/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`. RealSense V9, Offline V3, and Offline Max call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
 
 ## Offline Video Review
 
@@ -268,11 +268,12 @@ Offline mode adds liquid-glass overlays directly on top of the video:
 
 You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
 
-Offline Review has three algorithms:
+Offline Review has four algorithms plus a one-click Max upload:
 
 - **Offline V1**: the original offline review path. It is unchanged and starts quickly.
 - **Offline V2**: scans the full clip before review, uses RF-DETR object masks when the local server is available, and then applies future/past smoothing. Its timeline includes grip score, object score, contact evidence, weak segments, and slip events. If RF-DETR is unavailable, Offline V2 keeps using the existing local review path and reports the server status in the overlay.
 - **Offline V3 · RealSense**: adds aligned RealSense stereo depth contact on top of Offline V2's RF-DETR mask pipeline. It still scans the full clip before preview/export, then applies future/past smoothing with depth contact, depth separation, stereo confidence, object score, weak segments, and slip events. If RealSense depth is unavailable, Offline V3 reports that state and falls back to RF-DETR/RGB evidence rather than inventing depth confidence.
+- **Offline Max**: the best-available offline path for both RGB webcams and RealSense D455/D445. Click **Offline Max**, upload a video, and the app scans the full clip first. If enough reliable D455/D445 depth frames are present, Max uses the RGB-D path; otherwise it automatically falls back to the RF-DETR RGB path. The preview and exports use the finalized smoothed timeline, not a first-pass preview.
 
 ## Object Profile V2 Training
 

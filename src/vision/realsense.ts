@@ -41,7 +41,7 @@ export type RealSenseTimelinePoint = RfdetrTimelinePoint & {
 export function createInitialRealSenseRuntime(endpoint = DEFAULT_REALSENSE_ENDPOINT): RealSenseRuntime {
   return {
     status: 'idle',
-    message: 'RealSense depth idle. Select V9 live or Offline V3 to use aligned RGB-D evidence.',
+    message: 'RealSense depth idle. Select V9 live, Offline V3, or Offline Max to use aligned RGB-D evidence.',
     endpoint,
     result: null,
     receivedAt: null,

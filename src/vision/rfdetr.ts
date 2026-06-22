@@ -89,7 +89,7 @@ export const EMPTY_RFDETR_TRACK: RfdetrTrackState = {
 export function createInitialRfdetrRuntime(endpoint = DEFAULT_RFDETR_ENDPOINT): RfdetrRuntime {
   return {
     status: 'idle',
-    message: 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.',
+    message: 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.',
     endpoint,
     result: null,
     resultPalm: null,

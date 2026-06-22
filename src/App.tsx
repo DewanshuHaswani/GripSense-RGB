@@ -76,6 +76,7 @@ import {
   requestRealSenseDepthSignal,
   type RealSenseRuntime
 } from './vision/realsense';
+import { chooseOfflineMaxEvidenceMode, offlineMaxEvidenceLabel } from './vision/offlineMax';
 import { EMPTY_TEMPORAL_IDENTITY, temporalIdentityToMatch, updateTemporalIdentity, type TemporalIdentityState } from './vision/temporalIdentity';
 import type {
   AlgorithmVersion,
@@ -214,7 +215,22 @@ type OfflineTimelinePoint = {
   realsenseStereoConfidence?: number;
 };
 
-type OfflineReviewVersion = 'v1' | 'v2' | 'v3';
+type OfflineReviewVersion = 'v1' | 'v2' | 'v3' | 'max';
+
+function isOfflineEnhancedVersion(version: OfflineReviewVersion) {
+  return version === 'v2' || version === 'v3' || version === 'max';
+}
+
+function isOfflineDepthVersion(version: OfflineReviewVersion) {
+  return version === 'v3' || version === 'max';
+}
+
+function offlineVersionLabel(version: OfflineReviewVersion) {
+  if (version === 'max') return 'Offline Max';
+  if (version === 'v3') return 'Offline V3 RealSense';
+  if (version === 'v2') return 'Offline V2';
+  return 'Offline V1';
+}
 
 type RecordedClip = {
   file: File;
@@ -314,6 +330,7 @@ export default function App() {
   const trainingVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offlineVideoInputRef = useRef<HTMLInputElement | null>(null);
+  const offlineMaxInputRef = useRef<HTMLInputElement | null>(null);
   const uploadV1InputRef = useRef<HTMLInputElement | null>(null);
   const engineRef = useRef<VisionEngine | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -577,7 +594,7 @@ export default function App() {
     setRfdetrRuntime(next);
   }, []);
 
-  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.', endpoint = rfdetrEndpointForVersion(algorithmVersionRef.current)) => {
+  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.', endpoint = rfdetrEndpointForVersion(algorithmVersionRef.current)) => {
     updateRfdetrRuntime({
       status: 'idle',
       message,
@@ -595,7 +612,7 @@ export default function App() {
     setRealSenseRuntime(next);
   }, []);
 
-  const resetRealSenseRuntime = useCallback((message = 'RealSense depth idle. Select V9 live or Offline V3 to use aligned RGB-D evidence.') => {
+  const resetRealSenseRuntime = useCallback((message = 'RealSense depth idle. Select V9 live, Offline V3, or Offline Max to use aligned RGB-D evidence.') => {
     updateRealSenseRuntime({
       status: 'idle',
       message,
@@ -719,11 +736,13 @@ export default function App() {
     await waitForVideoMetadata(video);
     runLoop();
 
-    if (offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') {
+    if (isOfflineEnhancedVersion(offlineReviewVersionRef.current)) {
       offlineBatchProcessingRef.current = true;
       setOfflineAnalysisPhase('processing');
       setAnalysis(createEmptyAnalysis(
-        offlineReviewVersionRef.current === 'v3'
+        offlineReviewVersionRef.current === 'max'
+          ? 'Offline Max is scanning the full video before review. It will use D455/RealSense depth when available, otherwise RF-DETR RGB.'
+          : offlineReviewVersionRef.current === 'v3'
           ? 'Offline V3 RealSense is scanning the full video before review. It uses RF-DETR plus aligned depth when available.'
           : 'Offline V2 is scanning the full video before review. It will use past and future frames to smooth the result.'
       ));
@@ -734,7 +753,9 @@ export default function App() {
         video.playbackRate = 1;
         setOfflineAnalysisPhase('reviewing');
         setAnalysis(createEmptyAnalysis(
-          offlineReviewVersionRef.current === 'v3'
+          offlineReviewVersionRef.current === 'max'
+            ? 'Offline video loaded. Press play once to let Offline Max process the full video.'
+            : offlineReviewVersionRef.current === 'v3'
             ? 'Offline video loaded. Press play once to let RealSense Offline V3 process the full video.'
             : 'Offline video loaded. Press play once to let V2 process the full video.'
         ));
@@ -758,6 +779,26 @@ export default function App() {
     setUploadOnlyStatus('');
     if (file) void startOfflineVideo(file);
   }, [startOfflineVideo]);
+
+  const handleOfflineMaxUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('video/')) {
+      setUploadOnlyMode(false);
+      setUploadOnlyStatus('');
+      setAnalysis(createEmptyAnalysis('Offline Max needs a video file.'));
+      return;
+    }
+    offlineReviewVersionRef.current = 'max';
+    setOfflineReviewVersion('max');
+    setUploadOnlyMode(false);
+    setUploadOnlyStatus('');
+    setOfflineVideoExportStatus('');
+    resetRfdetrRuntime('Offline Max selected. RF-DETR will provide mask evidence for RGB and D455/RealSense review.');
+    resetRealSenseRuntime('Offline Max selected. D455/RealSense depth will be sampled when the local service is available.');
+    void startOfflineVideo(file);
+  }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
   const handleUploadV1Video = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -840,7 +881,7 @@ export default function App() {
       setRecordedClip({ file, url, durationMs });
       setRecordingElapsedMs(durationMs);
       setRecordingState('ready');
-      setAnalysis(createEmptyAnalysis('Recording captured. Choose Offline V1 or Offline V2 to process it.'));
+      setAnalysis(createEmptyAnalysis('Recording captured. Choose Offline V1, Offline V2, or Offline Max to process it.'));
     };
     recorder.start(250);
     setRecordingState('recording');
@@ -1000,7 +1041,7 @@ export default function App() {
         algorithmVersionRef.current === 'v8' ||
         algorithmVersionRef.current === 'v9' ||
         algorithmVersionRef.current === 'v10' ||
-        (mediaModeRef.current === 'offline' && (offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3'));
+        (mediaModeRef.current === 'offline' && isOfflineEnhancedVersion(offlineReviewVersionRef.current));
       if (!stillRelevant) return;
       if (result.ok) {
         updateRfdetrRuntime({
@@ -1058,7 +1099,7 @@ export default function App() {
     }).then((result) => {
       window.clearTimeout(timeout);
       const latest = realsenseRuntimeRef.current;
-      const stillRelevant = algorithmVersionRef.current === 'v9' || (mediaModeRef.current === 'offline' && offlineReviewVersionRef.current === 'v3');
+      const stillRelevant = algorithmVersionRef.current === 'v9' || (mediaModeRef.current === 'offline' && isOfflineDepthVersion(offlineReviewVersionRef.current));
       if (!stillRelevant) return;
       if (result.ok && result.response.available) {
         updateRealSenseRuntime({
@@ -1110,7 +1151,9 @@ export default function App() {
         const offlineReview = mediaModeRef.current === 'offline';
         const offlineV2Review = offlineReview && offlineReviewVersionRef.current === 'v2';
         const offlineV3Review = offlineReview && offlineReviewVersionRef.current === 'v3';
-        const offlineEnhancedReview = offlineV2Review || offlineV3Review;
+        const offlineMaxReview = offlineReview && offlineReviewVersionRef.current === 'max';
+        const offlineEnhancedReview = offlineV2Review || offlineV3Review || offlineMaxReview;
+        const offlineDepthReview = offlineV3Review || offlineMaxReview;
         const activeAlgorithmVersion = algorithmVersionRef.current;
         const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
         const liveRfdetrReview = (activeAlgorithmVersion === 'v8' || activeAlgorithmVersion === 'v10') && !offlineReview;
@@ -1130,8 +1173,8 @@ export default function App() {
         if (usesRfdetr) {
           scheduleRfdetrInference(video, hand, timestamp, offlineEnhancedReview);
         }
-        if (liveRealSenseReview || offlineV3Review) {
-          scheduleRealSenseInference(hand, previousObjectRef.current, timestamp, offlineV3Review);
+        if (liveRealSenseReview || offlineDepthReview) {
+          scheduleRealSenseInference(hand, previousObjectRef.current, timestamp, offlineDepthReview);
         }
         if (timestamp - lastDetectorRunRef.current > 650) {
           const detectorBoxes = engine.detectObjectBoxes(video, timestamp);
@@ -1370,7 +1413,7 @@ export default function App() {
           const latestRfdetr = rfdetrRuntimeRef.current;
           const latestRealSense = realsenseRuntimeRef.current;
           const freshRfdetr = isRfdetrResultFresh(latestRfdetr, timestamp, offlineEnhancedReview ? 2600 : 1500);
-          const freshRealSense = isRealSenseResultFresh(latestRealSense, timestamp, offlineV3Review ? 2200 : 1300);
+          const freshRealSense = isRealSenseResultFresh(latestRealSense, timestamp, offlineDepthReview ? 2200 : 1300);
           const canHoldOfflineRfdetr =
             offlineEnhancedReview &&
             !freshRfdetr &&
@@ -1396,7 +1439,7 @@ export default function App() {
               unavailableMessage: latestRfdetr.message || 'RF-DETR unavailable. Start the local RF-DETR server to use mask analysis.'
             };
             const rfdetrGrip =
-              liveRealSenseReview || offlineV3Review
+              liveRealSenseReview || offlineDepthReview
                 ? analyzeGripWithRealSense({
                     ...sharedRfdetrOptions,
                     depthSignal: freshRealSense ? latestRealSense.result : null
@@ -1422,7 +1465,7 @@ export default function App() {
                 latencyMs: latestRfdetr.latencyMs
               };
               realsenseSelectionMetrics =
-                liveRealSenseReview || offlineV3Review
+                liveRealSenseReview || offlineDepthReview
                   ? {
                       depthContact: freshRealSense ? (latestRealSense.result?.contactDepthScore ?? 0) : 0,
                       depthSeparation: freshRealSense ? (latestRealSense.result?.depthSeparationScore ?? 1) : 1,
@@ -1468,7 +1511,7 @@ export default function App() {
         }
         if (
           mediaModeRef.current === 'offline' &&
-          !((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && offlineReportRef.current) &&
+          !(isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineReportRef.current) &&
           (timestamp - lastOfflineTimelineRef.current > OFFLINE_TIMELINE_INTERVAL_MS || offlineTimelineRef.current.length === 0)
         ) {
           lastOfflineTimelineRef.current = timestamp;
@@ -1503,7 +1546,7 @@ export default function App() {
             realsenseStereoConfidence: realsenseSelectionMetrics?.stereoConfidence
           };
           offlineTimelineRef.current =
-            offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3'
+            isOfflineEnhancedVersion(offlineReviewVersionRef.current)
               ? [...offlineTimelineRef.current, point]
               : [...offlineTimelineRef.current.slice(-239), point];
           setOfflineTimeline(offlineTimelineRef.current);
@@ -1701,13 +1744,13 @@ export default function App() {
       resetRfdetrRuntime(
         version === 'v8' || version === 'v9' || version === 'v10'
           ? `${version.toUpperCase()} selected. Start tracking to connect to the local RF-DETR server.`
-          : 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.',
+          : 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.',
         rfdetrEndpointForVersion(version)
       );
       resetRealSenseRuntime(
         version === 'v9'
           ? 'V9 RealSense selected. Start the local RealSense depth service for aligned RGB-D evidence.'
-          : 'RealSense depth idle. Select V9 live or Offline V3 to use aligned RGB-D evidence.'
+          : 'RealSense depth idle. Select V9 live, Offline V3, or Offline Max to use aligned RGB-D evidence.'
       );
       setLocked(false);
       setCalibrating(false);
@@ -2107,12 +2150,16 @@ export default function App() {
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
     resetRfdetrRuntime(
-      version === 'v3'
+      version === 'max'
+        ? 'Offline Max selected. RF-DETR masks will provide RGB object evidence; D455/RealSense depth will be used if available.'
+        : version === 'v3'
         ? 'Offline V3 RealSense selected. RF-DETR will provide masks while RealSense provides depth when available.'
         : 'Offline V2 selected. RF-DETR will run when the local server is available.'
     );
     resetRealSenseRuntime(
-      version === 'v3'
+      version === 'max'
+        ? 'Offline Max selected. D455/RealSense depth will be sampled when available; RGB/RF-DETR remains active otherwise.'
+        : version === 'v3'
         ? 'Offline V3 selected. RealSense depth will be sampled when the local service is available.'
         : 'RealSense depth idle. Select V9 live or Offline V3 to use aligned RGB-D evidence.'
     );
@@ -2121,7 +2168,9 @@ export default function App() {
     setOfflineReport(null);
     setOfflineAnalysisPhase('processing');
     setAnalysis(createEmptyAnalysis(
-      version === 'v3'
+      version === 'max'
+        ? 'Offline Max is reprocessing the full video and choosing the strongest available evidence: D455/RealSense RGB-D when available, otherwise RF-DETR RGB.'
+        : version === 'v3'
         ? 'Offline V3 RealSense is reprocessing the full video with RF-DETR masks, depth contact, and future/past correction.'
         : 'Offline V2 is reprocessing the full video with future and past frame correction.'
     ));
@@ -2131,7 +2180,9 @@ export default function App() {
       video.playbackRate = 1;
       setOfflineAnalysisPhase('reviewing');
       setAnalysis(createEmptyAnalysis(
-        version === 'v3'
+        version === 'max'
+          ? 'Offline video loaded. Press play once to let Offline Max process the full video.'
+          : version === 'v3'
           ? 'Offline video loaded. Press play once to let RealSense Offline V3 process the full video.'
           : 'Offline video loaded. Press play once to let V2 process the full video.'
       ));
@@ -2203,14 +2254,14 @@ export default function App() {
     if (mediaModeRef.current !== 'offline') return;
     offlineBatchProcessingRef.current = false;
     if (videoRef.current) videoRef.current.playbackRate = 1;
-    if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && offlineTimelineRef.current.length > 2) {
+    if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineTimelineRef.current.length > 2) {
       const sanitized = sanitizeOfflineV2TimelineGeometry(
         offlineTimelineRef.current,
         videoRef.current?.videoWidth ?? 0,
         videoRef.current?.videoHeight ?? 0
       );
       const smoothed =
-        offlineReviewVersionRef.current === 'v3'
+        isOfflineDepthVersion(offlineReviewVersionRef.current)
           ? refineOfflineTimeline(refineRealSenseOfflineTimeline(refineRfdetrOfflineTimeline(sanitized)))
           : refineOfflineTimeline(refineRfdetrOfflineTimeline(sanitized));
       offlineTimelineRef.current = smoothed;
@@ -2220,7 +2271,7 @@ export default function App() {
     offlineReportRef.current = report;
     setOfflineReport(report);
     setOfflineAnalysisPhase('complete');
-    if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && videoRef.current) {
+    if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && videoRef.current) {
       videoRef.current.pause();
       videoRef.current.playbackRate = 1;
       videoRef.current.currentTime = 0;
@@ -2246,8 +2297,8 @@ export default function App() {
       setOfflineVideoExportStatus('Upload an offline video first.');
       return;
     }
-    if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && offlineAnalysisPhase !== 'complete') {
-      setOfflineVideoExportStatus(`${offlineReviewVersionRef.current === 'v3' ? 'Offline V3 RealSense' : 'Offline V2'} must finish full-video processing before export.`);
+    if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineAnalysisPhase !== 'complete') {
+      setOfflineVideoExportStatus(`${offlineVersionLabel(offlineReviewVersionRef.current)} must finish full-video processing before export.`);
       return;
     }
 
@@ -2305,11 +2356,11 @@ export default function App() {
       ctx.clearRect(0, 0, composite.width, composite.height);
       drawExportVideoFrame(ctx, video, composite.width, composite.height, mirroredRef.current);
       const refinedPoint =
-        offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3'
+        isOfflineEnhancedVersion(offlineReviewVersionRef.current)
           ? nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime)
           : null;
       const exportAnalysis = refinedPoint ? analysisFromOfflineTimelinePoint(analysisRef.current, refinedPoint) : analysisRef.current;
-      if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && refinedPoint) {
+      if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && refinedPoint) {
         const timelineObject = objectRegionFromOfflineTimelinePoint(refinedPoint, composite.width, composite.height);
         drawOfflineV2TimelineOverlay(ctx, composite.width, composite.height, mirroredRef.current, refinedPoint, timelineObject, exportAnalysis);
       } else {
@@ -2363,8 +2414,9 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [offlineVideoExportStatus, uploadOnlyMode]);
 
-  const offlineBatchProcessing = mediaMode === 'offline' && (offlineReviewVersion === 'v2' || offlineReviewVersion === 'v3') && offlineAnalysisPhase === 'processing';
-  const offlineV2ExportLocked = (offlineReviewVersion === 'v2' || offlineReviewVersion === 'v3') && offlineAnalysisPhase !== 'complete';
+  const offlineBatchProcessing = mediaMode === 'offline' && isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'processing';
+  const offlineV2ExportLocked = isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase !== 'complete';
+  const offlineMaxEvidenceMode = offlineMaxEvidenceLabel(chooseOfflineMaxEvidenceMode(offlineTimeline));
 
   return (
     <main
@@ -2386,8 +2438,8 @@ export default function App() {
           controls={mediaMode === 'offline' && !offlineBatchProcessing}
           onPlay={() => {
             if (mediaMode !== 'offline') return;
-            if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && offlineBatchProcessingRef.current) return;
-            if ((offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3') && offlineAnalysisPhase === 'complete') return;
+            if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineBatchProcessingRef.current) return;
+            if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineAnalysisPhase === 'complete') return;
             setOfflineAnalysisPhase('reviewing');
           }}
           onEnded={finalizeOfflineReview}
@@ -2457,6 +2509,17 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineVideoUpload}
             />
+            <button className="tool-button primary" onClick={() => offlineMaxInputRef.current?.click()} aria-label="Upload Offline Max review video">
+              <Sparkles size={17} />
+              <span>Offline Max</span>
+            </button>
+            <input
+              ref={offlineMaxInputRef}
+              className="hidden-file-input"
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,video/*"
+              onChange={handleOfflineMaxUpload}
+            />
             <button className="tool-button" onClick={() => uploadV1InputRef.current?.click()} aria-label="Upload V1 process and download">
               <Upload size={17} />
               <span>Upload V1</span>
@@ -2468,7 +2531,7 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleUploadV1Video}
             />
-            {mediaMode === 'offline' && (offlineReviewVersion === 'v2' || offlineReviewVersion === 'v3') && offlineAnalysisPhase === 'complete' && (
+            {mediaMode === 'offline' && isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'complete' && (
               <button className="tool-button primary" onClick={playOfflineReview} aria-label="Play completed offline review">
                 <Play size={17} />
                 <span>Play review</span>
@@ -2568,7 +2631,7 @@ export default function App() {
               <p className="eyebrow">Recorded offline clip</p>
               <h2>Process recording</h2>
               <p>
-                Choose the offline engine for this camera recording. V1 starts review quickly; V2 scans the whole clip and then unlocks CSV, JSON, MP4, compact MP4, and WebM export.
+                Choose the offline engine for this camera recording. V1 starts quickly; V2 scans the clip; Max chooses D455/RealSense RGB-D when available or RF-DETR RGB otherwise.
               </p>
               <div className="recording-meta">
                 <span>Duration</span>
@@ -2582,6 +2645,10 @@ export default function App() {
                 <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v2')}>
                   <Sparkles size={17} />
                   <span>Process V2</span>
+                </button>
+                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('max')}>
+                  <Sparkles size={17} />
+                  <span>Process Max</span>
                 </button>
                 <button type="button" className="tool-button" onClick={clearRecordedClip}>
                   <X size={17} />
@@ -2618,6 +2685,13 @@ export default function App() {
                 >
                   V3
                 </button>
+                <button
+                  type="button"
+                  className={offlineReviewVersion === 'max' ? 'active' : ''}
+                  onClick={() => switchOfflineReviewVersion('max')}
+                >
+                  Max
+                </button>
               </div>
               <h2>{analysis.gripPercentage}%</h2>
               <strong>
@@ -2644,17 +2718,23 @@ export default function App() {
                 <span>Object</span>
                 <strong>{objectDetection?.matched ? objectDetection.name : mediaMode === 'offline' ? 'auto-search' : 'not matched'}</strong>
               </div>
+              {offlineReviewVersion === 'max' && (
+                <div className="offline-mini-row">
+                  <span>Max path</span>
+                  <strong>{offlineMaxEvidenceMode}</strong>
+                </div>
+              )}
               <div className="offline-mini-row">
                 <span>Timeline</span>
                 <strong>{offlineTimeline.length} pts</strong>
               </div>
-              {(offlineReviewVersion === 'v2' || offlineReviewVersion === 'v3') && (
+              {isOfflineEnhancedVersion(offlineReviewVersion) && (
                 <div className="offline-mini-row">
                   <span>RF-DETR</span>
                   <strong>{formatRfdetrRuntimeStatus(rfdetrRuntime)}</strong>
                 </div>
               )}
-              {offlineReviewVersion === 'v3' && (
+              {isOfflineDepthVersion(offlineReviewVersion) && (
                 <div className="offline-mini-row">
                   <span>RealSense</span>
                   <strong>{formatRealSenseRuntimeStatus(realsenseRuntime)}</strong>
@@ -2679,13 +2759,13 @@ export default function App() {
               <GlassMetric label="Lock" value={analysis.objectLockQuality} />
               <GlassMetric label="Closure" value={analysis.closureScore} />
               <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
-              {(offlineReviewVersion === 'v2' || offlineReviewVersion === 'v3') && (
+              {isOfflineEnhancedVersion(offlineReviewVersion) && (
                 <>
                   <GlassMetric label="RF object" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrObjectScore ?? 0} />
                   <GlassMetric label="RF contact" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrContact ?? 0} />
                 </>
               )}
-              {offlineReviewVersion === 'v3' && (
+              {isOfflineDepthVersion(offlineReviewVersion) && (
                 <>
                   <GlassMetric label="Depth contact" value={offlineTimeline[offlineTimeline.length - 1]?.realsenseDepthContact ?? 0} />
                   <GlassMetric label="Depth separation" value={offlineTimeline[offlineTimeline.length - 1]?.realsenseDepthSeparation ?? 0} danger />
@@ -2700,6 +2780,8 @@ export default function App() {
                   <strong>
                     {uploadOnlyMode
                       ? `${uploadOnlyStatus} ${offlineTimeline.length} pts`
+                      : offlineReviewVersion === 'max'
+                      ? `Scanning full video for Offline Max. It will choose D455 RGB-D when enough depth evidence exists, otherwise RGB/RF-DETR... ${offlineTimeline.length} pts`
                       : offlineReviewVersion === 'v3'
                       ? `Scanning full video for V3 RealSense RGB-D correction before preview/export... ${offlineTimeline.length} pts`
                       : offlineReviewVersion === 'v2'
