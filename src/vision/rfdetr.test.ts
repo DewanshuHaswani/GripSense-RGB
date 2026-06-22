@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_RFDETR_PROXY_ENDPOINT,
   EMPTY_RFDETR_TRACK,
   analyzeGripWithRfdetr,
   compensateRfdetrResponseForHandMotion,
@@ -14,6 +15,10 @@ import { palmCenter } from './geometry';
 import type { Landmark } from './types';
 
 describe('RF-DETR grip analysis', () => {
+  it('exposes a same-origin RF-DETR proxy endpoint for V10', () => {
+    expect(DEFAULT_RFDETR_PROXY_ENDPOINT).toBe('/api/gripsense/rfdetr/analyze');
+  });
+
   it('lets a near RF-DETR mask enable grip scoring', () => {
     const result = analyzeGripWithRfdetr({
       hand: phoneGripHand(),

@@ -114,7 +114,7 @@ export function analyzeGrip(
   const fallbackAlgorithmVersion: AlgorithmVersion =
     algorithmVersion === 'v3' || algorithmVersion === 'v7'
       ? 'v2'
-      : algorithmVersion === 'v8' || algorithmVersion === 'v9'
+      : algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10'
       ? 'v6'
       : algorithmVersion;
   const scoringConfig = options.scoringConfig ?? DEFAULT_GRIP_SCORING_CONFIG;

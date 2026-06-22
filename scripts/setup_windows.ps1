@@ -69,7 +69,8 @@ if (-not $SkipWarmup) {
 
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green
-Write-Host "Terminal 1: npm run dev"
+Write-Host "Terminal 1: .\scripts\start_windows_frontend.ps1"
 Write-Host "Terminal 2: .\scripts\start_windows_inference.ps1"
-Write-Host "Open: http://127.0.0.1:5173/?version=v8"
-Write-Host "RealSense mode: http://127.0.0.1:5173/?version=v9"
+Write-Host "Open V10 proxy mode: http://127.0.0.1:7676/?version=v10"
+Write-Host "Open V8 direct mode: http://127.0.0.1:7676/?version=v8"
+Write-Host "RealSense mode: http://127.0.0.1:7676/?version=v9"

@@ -159,6 +159,19 @@ export const DEFAULT_GRIP_SCORING_CONFIG: GripScoringConfig = {
       identityMiss: -0.18,
       calibration: 0.02,
       weakCalibration: -0.07
+    },
+    v10: {
+      objectLockQuality: 0.18,
+      independentObjectScore: 0.22,
+      temporalLockScore: 0.16,
+      gripPercentage: 0.08,
+      motionCoupling: 0.08,
+      closureScore: 0.06,
+      bestModeScore: 0.06,
+      identityMatch: 0.18,
+      identityMiss: -0.18,
+      calibration: 0.02,
+      weakCalibration: -0.07
     }
   }
 };

@@ -55,6 +55,7 @@ import {
   compensateRfdetrResponseForHandMotion,
   createInitialRfdetrRuntime,
   DEFAULT_RFDETR_ENDPOINT,
+  DEFAULT_RFDETR_PROXY_ENDPOINT,
   EMPTY_RFDETR_TRACK,
   isRfdetrResultFresh,
   refineRfdetrOfflineTimeline,
@@ -102,6 +103,7 @@ const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
 const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const RFDETR_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_ENDPOINT ?? DEFAULT_RFDETR_ENDPOINT;
+const RFDETR_PROXY_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_PROXY_ENDPOINT ?? DEFAULT_RFDETR_PROXY_ENDPOINT;
 const REALSENSE_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_REALSENSE_ENDPOINT ?? DEFAULT_REALSENSE_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
@@ -111,6 +113,10 @@ const OFFLINE_BASE_TARGET_THRESHOLD = 0.12;
 const V6_LIVE_TARGET_THRESHOLD = 0.16;
 const V5_BASE_TRACK_GRACE_MISSES = 6;
 const TRAINING_VIEW_ROLES: TrainingViewRole[] = ['front', 'side', 'rotated', 'in-hand', 'alone', 'negative'];
+
+function rfdetrEndpointForVersion(version: AlgorithmVersion) {
+  return version === 'v10' ? RFDETR_PROXY_ENDPOINT : RFDETR_ENDPOINT;
+}
 
 type LocalWritableFile = {
   write(data: Blob | string): Promise<void>;
@@ -268,7 +274,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, or V9 for RealSense RGB-D live analysis.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, V9 for RealSense RGB-D live analysis, or V10 for V8 RF-DETR through the local frontend proxy.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -364,7 +370,7 @@ export default function App() {
     lastRequestAt: 0,
     latencyMs: null
   });
-  const rfdetrRuntimeRef = useRef<RfdetrRuntime>(createInitialRfdetrRuntime(RFDETR_ENDPOINT));
+  const rfdetrRuntimeRef = useRef<RfdetrRuntime>(createInitialRfdetrRuntime(rfdetrEndpointForVersion(algorithmVersionRef.current)));
   const realsenseRuntimeRef = useRef<RealSenseRuntime>(createInitialRealSenseRuntime(REALSENSE_ENDPOINT));
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const profileDirectoryRef = useRef<LocalDirectoryHandle | null>(null);
@@ -571,11 +577,11 @@ export default function App() {
     setRfdetrRuntime(next);
   }, []);
 
-  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8/V9 or Offline V2/V3 to begin RF-DETR analysis.') => {
+  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.', endpoint = rfdetrEndpointForVersion(algorithmVersionRef.current)) => {
     updateRfdetrRuntime({
       status: 'idle',
       message,
-      endpoint: RFDETR_ENDPOINT,
+      endpoint,
       result: null,
       receivedAt: null,
       lastRequestAt: 0,
@@ -993,6 +999,7 @@ export default function App() {
       const stillRelevant =
         algorithmVersionRef.current === 'v8' ||
         algorithmVersionRef.current === 'v9' ||
+        algorithmVersionRef.current === 'v10' ||
         (mediaModeRef.current === 'offline' && (offlineReviewVersionRef.current === 'v2' || offlineReviewVersionRef.current === 'v3'));
       if (!stillRelevant) return;
       if (result.ok) {
@@ -1106,7 +1113,7 @@ export default function App() {
         const offlineEnhancedReview = offlineV2Review || offlineV3Review;
         const activeAlgorithmVersion = algorithmVersionRef.current;
         const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
-        const liveRfdetrReview = activeAlgorithmVersion === 'v8' && !offlineReview;
+        const liveRfdetrReview = (activeAlgorithmVersion === 'v8' || activeAlgorithmVersion === 'v10') && !offlineReview;
         const liveRealSenseReview = activeAlgorithmVersion === 'v9' && !offlineReview;
         const offlineV1StyleReview = offlineReview || liveOfflineV1Review;
         const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6' || liveOfflineV1Review;
@@ -1687,12 +1694,15 @@ export default function App() {
           ? 'V8 selected. Start the local RF-DETR server to use live mask/box object evidence.'
           : version === 'v9'
           ? 'V9 RealSense selected. Start RF-DETR plus the local RealSense depth service for RGB-D grip analysis.'
+          : version === 'v10'
+          ? 'V10 selected. It uses the V8 RF-DETR live algorithm through the local frontend proxy for stricter Windows browsers.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       resetRfdetrRuntime(
-        version === 'v8' || version === 'v9'
+        version === 'v8' || version === 'v9' || version === 'v10'
           ? `${version.toUpperCase()} selected. Start tracking to connect to the local RF-DETR server.`
-          : 'RF-DETR server idle. Select V8/V9 or Offline V2/V3 to begin RF-DETR analysis.'
+          : 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.',
+        rfdetrEndpointForVersion(version)
       );
       resetRealSenseRuntime(
         version === 'v9'
@@ -1722,6 +1732,8 @@ export default function App() {
             ? 'V8 selected. It uses RF-DETR segmentation masks from the local CPU server and will not score grip when RF-DETR is unavailable.'
             : version === 'v9'
             ? 'V9 RealSense selected. It uses RF-DETR masks plus aligned stereo depth contact when the local RealSense service is available.'
+            : version === 'v10'
+            ? 'V10 selected. Same V8 RF-DETR grip analysis, routed through the local frontend proxy to avoid browser-side localhost/CORS/SSL blocking.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -2413,6 +2425,7 @@ export default function App() {
                 <option value="v7">V7 · offline V1 live copy</option>
                 <option value="v8">V8 · RF-DETR live</option>
                 <option value="v9">V9 · RealSense live</option>
+                <option value="v10">V10 · RF-DETR proxy live</option>
               </select>
             </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -3075,11 +3088,11 @@ export default function App() {
           </div>
         )}
 
-        {(algorithmVersion === 'v8' || algorithmVersion === 'v9') && (
+        {(algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10') && (
           <div className="v3-panel">
             <div className="motion-header">
               <Activity size={18} />
-              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : 'V8 RF-DETR'}</span>
+              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : algorithmVersion === 'v10' ? 'V10 RF-DETR proxy' : 'V8 RF-DETR'}</span>
             </div>
             <div className={rfdetrRuntime.status === 'ready' ? 'v3-status ready' : 'v3-status fallback'}>
               <span>{algorithmVersion === 'v9' ? `RF-DETR ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
@@ -5169,9 +5182,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9' || fromUrl === 'v10') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9'
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9' || fromStorage === 'v10'
     ? fromStorage
     : 'v5';
 }

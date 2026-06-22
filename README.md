@@ -28,7 +28,7 @@ Requirements:
 
 - Node.js 20.19 or newer. Vite 8 requires a recent Node 20+ runtime.
 - Python 3.10 or newer for the local inference server.
-- A webcam for V1-V8 live modes.
+- A webcam for V1-V8 and V10 live modes.
 - Optional: an Intel RealSense camera plus `pyrealsense2` for V9 live and Offline V3 depth.
 
 Clone and install the frontend:
@@ -81,6 +81,8 @@ curl -I http://127.0.0.1:7867/docs
 
 If V8 shows **server unavailable**, it means the browser cannot get a usable RF-DETR response from `http://127.0.0.1:7867/api/rfdetr/analyze`. Check that the Python server is running, dependencies installed correctly, port `7867` is not blocked, and the server terminal did not show an RF-DETR model load error. The first RF-DETR request can be slow because model weights may load or download.
 
+If this happens on a locked-down Windows or office network but `http://127.0.0.1:7867/docs` works, use **V10 · RF-DETR proxy live** at `?version=v10`. V10 runs the same grip analysis as V8, but the browser calls the frontend dev server first and Vite proxies the request to Python. This helps with browser-side localhost, CORS, proxy, and SSL inspection policies. It cannot fix a Python-side model download failure; run the RF-DETR warmup command on a network where Python can download the model or configure the machine's corporate CA certificate for Python.
+
 If V9 or Offline V3 shows **RealSense unavailable**, RF-DETR can still run, but depth evidence is missing. Check that the RealSense camera is connected to the same machine, `pyrealsense2` is installed in the local inference virtualenv, and the browser camera view is aligned with the RealSense RGB stream.
 
 Useful verification commands:
@@ -91,9 +93,45 @@ npm run build
 npm audit --audit-level=moderate
 ```
 
+### macOS One-Time Setup And Quick Run
+
+Use this on a different Mac after cloning the repo:
+
+```bash
+git clone https://github.com/DewanshuHaswani/GripSense-RGB.git
+cd GripSense-RGB
+chmod +x scripts/setup_mac.sh scripts/start_mac_inference.sh scripts/start_mac_frontend.sh
+./scripts/setup_mac.sh
+```
+
+For RealSense support on that Mac:
+
+```bash
+./scripts/setup_mac.sh --with-realsense
+```
+
+After setup, run these two terminals:
+
+```bash
+# Terminal 1
+./scripts/start_mac_inference.sh
+```
+
+```bash
+# Terminal 2
+./scripts/start_mac_frontend.sh
+```
+
+Open:
+
+- V10 RF-DETR proxy live: `http://127.0.0.1:7676/?version=v10`
+- V8 RF-DETR direct live: `http://127.0.0.1:7676/?version=v8`
+- V9 RealSense live: `http://127.0.0.1:7676/?version=v9`
+- Local server docs: `http://127.0.0.1:7867/docs`
+
 ### Windows Setup With RF-DETR And RealSense D445
 
-Use this section for a Windows machine that needs V8 RF-DETR, Offline V2, V9 RealSense, or Offline V3.
+Use this section for a Windows machine that needs V8/V10 RF-DETR, Offline V2, V9 RealSense, or Offline V3.
 
 Install first:
 
@@ -125,7 +163,7 @@ Run the app after setup:
 
 ```powershell
 # Terminal 1
-npm run dev
+.\scripts\start_windows_frontend.ps1
 ```
 
 ```powershell
@@ -135,8 +173,9 @@ npm run dev
 
 Open:
 
-- V8 RF-DETR live: `http://127.0.0.1:5173/?version=v8`
-- V9 RealSense live: `http://127.0.0.1:5173/?version=v9`
+- V10 RF-DETR proxy live: `http://127.0.0.1:7676/?version=v10`
+- V8 RF-DETR direct live: `http://127.0.0.1:7676/?version=v8`
+- V9 RealSense live: `http://127.0.0.1:7676/?version=v9`
 - Local server docs: `http://127.0.0.1:7867/docs`
 
 RF-DETR model files are intentionally not committed to GitHub. They are large runtime artifacts and may have their own distribution constraints. The supported setup path is to download/cache them on each machine using:
@@ -161,6 +200,7 @@ If V8 shows **server unavailable** on Windows:
 - Run the RF-DETR warmup command above and read any Python error.
 - Check Windows Firewall did not block Python on localhost.
 - Make sure the frontend is calling `127.0.0.1:7867`, not another machine or port.
+- Try V10 at `http://127.0.0.1:7676/?version=v10` if `/docs` works but the browser blocks direct RF-DETR calls. V10 uses the frontend proxy route `/api/gripsense/rfdetr/analyze`.
 
 If V9/Offline V3 shows **RealSense unavailable**:
 
@@ -188,12 +228,13 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v7`
 - `http://127.0.0.1:5173/?version=v8`
 - `http://127.0.0.1:5173/?version=v9`
+- `http://127.0.0.1:5173/?version=v10`
 
-The toolbar also has a `V1` through `V9` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` through `V10` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
 ### Optional RF-DETR CPU Server
 
-V8/V9 live mode and Offline V2/V3 enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9 and Offline V3 can also sample Intel RealSense depth when `pyrealsense2` and a connected RealSense camera are available.
+V8/V9/V10 live mode and Offline V2/V3 enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9 and Offline V3 can also sample Intel RealSense depth when `pyrealsense2` and a connected RealSense camera are available.
 
 ```bash
 cd local-inference
@@ -211,7 +252,7 @@ Then start the frontend in another terminal:
 npm run dev
 ```
 
-The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. RealSense V9 and Offline V3 call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
+The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for V8 RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. V10 calls same-origin `POST /api/gripsense/rfdetr/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`. RealSense V9 and Offline V3 call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
 
 ## Offline Video Review
 
@@ -338,6 +379,18 @@ Important V8 behavior:
 - If the RF-DETR server is unavailable, V8 shows `RF-DETR unavailable` and does not fake confidence or fall back to a high heuristic score.
 
 Limitations: RF-DETR-Seg Nano on CPU can be slower than the webcam frame rate, especially on large frames. Lighting, blur, occlusion, and unusual objects can still reduce mask quality. The app estimates visual grip stability only; it does not measure real force.
+
+## Version 10: RF-DETR Proxy Live
+
+V10 is an additive Windows-friendly copy of V8. It uses the same RF-DETR mask selection and grip scoring behavior as V8, but changes the browser transport:
+
+```text
+browser -> Vite same-origin proxy -> local Python RF-DETR server -> V8 grip analysis
+```
+
+Use V10 when V8 reports `RF-DETR unavailable` on a managed Windows or office machine even though the Python server docs page opens at `http://127.0.0.1:7867/docs`. The frontend request goes to `/api/gripsense/rfdetr/analyze`, and `vite.config.ts` proxies it to `/api/rfdetr/analyze` on the local inference server.
+
+V10 does not change grip scoring, object selection, person rejection, smoothing, or RF-DETR confidence rules. It also does not bypass Python-side SSL errors while downloading model weights. If the inference server terminal shows certificate or download failures, fix Python's network/certificate setup or run the warmup on a network where the model can be downloaded.
 
 ## Version 9: RealSense RGB-D Live
 

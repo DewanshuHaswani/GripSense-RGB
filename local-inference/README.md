@@ -5,7 +5,7 @@ This folder contains local CPU inference endpoints for GripSense.
 Endpoints:
 
 - `POST /v3/analyze-frame`: V3 adapter scaffold. It returns a conservative V3-shaped response from the browser's V2 state so the app can exercise timeout, stale-result, malformed-result, and fallback behavior.
-- `POST /api/rfdetr/analyze`: V8/V9 live and Offline V2/V3 RF-DETR-Seg Nano object evidence. Input is a multipart JPEG frame plus optional `handLandmarks`; output includes `id`, `label`, `score`, `bbox`, `maskPolygon`, `maskArea`, `center`, and `latencyMs` for each detection.
+- `POST /api/rfdetr/analyze`: V8/V9/V10 live and Offline V2/V3 RF-DETR-Seg Nano object evidence. Input is a multipart JPEG frame plus optional `handLandmarks`; output includes `id`, `label`, `score`, `bbox`, `maskPolygon`, `maskArea`, `center`, and `latencyMs` for each detection.
 - `POST /api/realsense/depth-signal`: V9 live and Offline V3 RealSense depth evidence. Input is current hand landmarks plus the selected object geometry; output includes depth contact, hand/object separation, stereo confidence, occlusion, surface continuity, and latency. If `pyrealsense2` or the camera is unavailable, the response reports `available: false` and the frontend does not fake depth confidence.
 
 The intended V3 production path is to replace the placeholder scoring in `server.py` with model adapters for:
@@ -61,6 +61,24 @@ Start the Windows inference server:
 .\scripts\start_windows_inference.ps1
 ```
 
+Start the Windows frontend on port `7676` with the V10 proxy configured:
+
+```powershell
+.\scripts\start_windows_frontend.ps1
+```
+
+Open `http://127.0.0.1:7676/?version=v10` for V10 proxy mode, or `http://127.0.0.1:7676/?version=v8` for the original direct V8 mode.
+
+macOS setup:
+
+```bash
+cd GripSense-RGB
+chmod +x scripts/setup_mac.sh scripts/start_mac_inference.sh scripts/start_mac_frontend.sh
+./scripts/setup_mac.sh
+```
+
+After setup, run `./scripts/start_mac_inference.sh` in one terminal and `./scripts/start_mac_frontend.sh` in another terminal.
+
 The setup script warms up RF-DETR-Seg Nano so the model weights download/cache on the Windows machine before V8 is used. If setup was run with `-SkipWarmup`, warm it up later:
 
 ```powershell
@@ -73,9 +91,10 @@ The browser calls:
 
 - `POST http://127.0.0.1:7867/v3/analyze-frame` for V3. Override with `VITE_GRIPSENSE_V3_ENDPOINT`.
 - `POST http://127.0.0.1:7867/api/rfdetr/analyze` for V8/V9 and Offline V2/V3. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT`.
+- `POST /api/gripsense/rfdetr/analyze` for V10. Vite proxies it to the local inference server. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`.
 - `POST http://127.0.0.1:7867/api/realsense/depth-signal` for V9 and Offline V3. Override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT`.
 
-RF-DETR runs on CPU by default. You can set `GRIPSENSE_RFDETR_DEVICE=cpu` explicitly before launching the server. V8 reports `RF-DETR unavailable` rather than inventing confidence if this server is not reachable.
+RF-DETR runs on CPU by default. You can set `GRIPSENSE_RFDETR_DEVICE=cpu` explicitly before launching the server. V8 and V10 report `RF-DETR unavailable` rather than inventing confidence if this server is not reachable.
 
 RealSense depth is optional and hardware-dependent. Use a RealSense RGB-D camera as the browser camera source, keep it connected to the same machine running this server, and install `pyrealsense2` separately. V9/Offline V3 use depth only as contact evidence; RF-DETR masks still provide the object evidence.
 
@@ -83,6 +102,8 @@ Troubleshooting:
 
 - `server unavailable` in V8 means the frontend could not get a valid RF-DETR response from this server.
 - If `curl -I http://127.0.0.1:7867/docs` fails, the server is not reachable.
-- If `/docs` works but V8 is unavailable, inspect the server terminal for missing `rfdetr`, model load/download failure, or CPU inference errors.
+- If `/docs` works but V8 is unavailable on Windows, try V10. It uses the frontend proxy route and avoids browser-side localhost/CORS/proxy/SSL inspection problems.
+- If `/docs` works but V10 is unavailable, inspect the server terminal for missing `rfdetr`, model load/download failure, or CPU inference errors.
+- If the server terminal shows Python SSL certificate errors while downloading RF-DETR, V10 cannot bypass that. Configure the corporate CA certificate for Python/pip or warm up the model on a network that allows the download.
 - If V9/Offline V3 show RealSense unavailable, install `pyrealsense2`, connect the RealSense camera, and restart this server.
 - For RealSense D445 on Windows, install Intel RealSense SDK 2.0, verify color/depth in RealSense Viewer, close RealSense Viewer, then start this server.

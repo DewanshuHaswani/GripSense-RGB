@@ -3,6 +3,7 @@ import { averagePoint, clamp, distance, FINGERTIP_INDICES, handSize, palmCenter,
 import type { GripAnalysis, GripCalibrationBaseline, Landmark, ObjectIdentitySignal, ObjectRegion, Point } from './types';
 
 export const DEFAULT_RFDETR_ENDPOINT = 'http://127.0.0.1:7867/api/rfdetr/analyze';
+export const DEFAULT_RFDETR_PROXY_ENDPOINT = '/api/gripsense/rfdetr/analyze';
 export const RFDETR_REQUEST_INTERVAL_MS = 520;
 export const RFDETR_OFFLINE_INTERVAL_MS = 220;
 
@@ -88,7 +89,7 @@ export const EMPTY_RFDETR_TRACK: RfdetrTrackState = {
 export function createInitialRfdetrRuntime(endpoint = DEFAULT_RFDETR_ENDPOINT): RfdetrRuntime {
   return {
     status: 'idle',
-    message: 'RF-DETR server idle. Select V8/V9 or Offline V2/V3 to begin RF-DETR analysis.',
+    message: 'RF-DETR server idle. Select V8/V9/V10 or Offline V2/V3 to begin RF-DETR analysis.',
     endpoint,
     result: null,
     resultPalm: null,
