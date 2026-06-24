@@ -267,6 +267,26 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.gripPercentage).toBeGreaterThan(35);
   });
 
+  it('lets V11 YOLO score a thumb plus two-finger phone hold without requiring a full-hand grip', () => {
+    const result = analyzeGripWithRfdetr({
+      hand: partialPhoneGripHand(),
+      detections: [objectDetection({ id: 'yolo-partial-phone', label: 'cell phone', score: 0.86 })],
+      previousPalm: { x: 320, y: 374 },
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      persistentSlipScore: 0.02,
+      serverAvailable: true,
+      provider: YOLO_PROVIDER
+    });
+
+    expect(result.selection.contact).toBeGreaterThan(0.16);
+    expect(result.object).not.toBeNull();
+    expect(result.analysis.diagnostics.state).not.toBe('Hand only');
+    expect(result.analysis.guidance).not.toBe('Object not locked');
+    expect(result.analysis.gripPercentage).toBeGreaterThanOrEqual(34);
+  });
+
   it('reports YOLO unavailable without fake confidence', () => {
     const result = analyzeGripWithRfdetr({
       hand: phoneGripHand(),
@@ -384,6 +404,29 @@ function phoneGripHand(): Landmark[] {
   hand[18] = { x: 388, y: 366 };
   hand[19] = { x: 394, y: 378 };
   hand[20] = { x: 386, y: 390 };
+  return hand;
+}
+
+function partialPhoneGripHand(): Landmark[] {
+  const hand = phoneGripHand();
+  hand[0] = { x: 320, y: 374 };
+  hand[4] = { x: 308, y: 326 };
+  hand[5] = { x: 294, y: 346 };
+  hand[6] = { x: 326, y: 328 };
+  hand[7] = { x: 358, y: 314 };
+  hand[8] = { x: 386, y: 308 };
+  hand[9] = { x: 320, y: 348 };
+  hand[10] = { x: 350, y: 334 };
+  hand[11] = { x: 378, y: 336 };
+  hand[12] = { x: 398, y: 344 };
+  hand[13] = { x: 360, y: 358 };
+  hand[14] = { x: 414, y: 288 };
+  hand[15] = { x: 438, y: 244 };
+  hand[16] = { x: 452, y: 210 };
+  hand[17] = { x: 378, y: 372 };
+  hand[18] = { x: 436, y: 318 };
+  hand[19] = { x: 468, y: 286 };
+  hand[20] = { x: 492, y: 260 };
   return hand;
 }
 

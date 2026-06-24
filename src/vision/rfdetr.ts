@@ -1,5 +1,5 @@
 import { analyzeGrip, createEmptyAnalysis } from './gripAnalysis';
-import { averagePoint, clamp, distance, FINGERTIP_INDICES, handSize, palmCenter, subtract } from './geometry';
+import { averagePoint, clamp, distance, dot, FINGERTIP_INDICES, handSize, normalize, palmCenter, subtract } from './geometry';
 import type { GripAnalysis, GripCalibrationBaseline, Landmark, ObjectIdentitySignal, ObjectRegion, Point } from './types';
 
 export const DEFAULT_RFDETR_ENDPOINT = 'http://127.0.0.1:7867/api/rfdetr/analyze';
@@ -283,7 +283,9 @@ export function rfdetrMaskContactScore(detection: RfdetrDetection, hand: Landmar
   const bboxOverlap = rectIoU(rectFromPoints(handCorridorPoints(hand)), detection.bbox);
   const palmDistance = pointToRectDistance(palmCenter(hand), detection.bbox);
   const palmNear = clamp(1 - palmDistance / Math.max(28, size * 0.72));
-  return clamp(inside * 0.38 + nearBoundary * 0.28 + Math.min(1, bboxOverlap * 5.2) * 0.22 + palmNear * 0.12);
+  const baseContact = clamp(inside * 0.38 + nearBoundary * 0.28 + Math.min(1, bboxOverlap * 5.2) * 0.22 + palmNear * 0.12);
+  const partialGripContact = rfdetrPartialGripContactScore(polygon, hand, size, detection.bbox);
+  return clamp(Math.max(baseContact, partialGripContact * 0.9));
 }
 
 export function rfdetrDetectionToObjectRegion(
@@ -787,6 +789,51 @@ function handContactSamples(hand: Landmark[]) {
     samples.push(hand[from], midpoint(hand[from], hand[to]), hand[to]);
   });
   return samples.filter(Boolean);
+}
+
+function rfdetrPartialGripContactScore(polygon: Point[], hand: Landmark[], size: number, bbox: RfdetrDetection['bbox']) {
+  const tolerance = Math.max(18, size * 0.18);
+  const pointContact = (point: Point) => {
+    const maskContact = pointInPolygon(point, polygon) ? 1 : clamp(1 - pointToPolygonDistance(point, polygon) / tolerance);
+    const boxContact = clamp(1 - pointToRectDistance(point, bbox) / Math.max(24, size * 0.24));
+    return Math.max(maskContact, boxContact * 0.72);
+  };
+  const roleContact = (indices: number[]) => Math.max(...indices.map((index) => pointContact(hand[index])).filter(Number.isFinite), 0);
+  const thumbContact = roleContact([3, 4]);
+  const fingerContacts = [
+    roleContact([7, 8]),
+    roleContact([11, 12]),
+    roleContact([15, 16]),
+    roleContact([19, 20])
+  ].sort((a, b) => b - a);
+  const bestFinger = fingerContacts[0] ?? 0;
+  const secondFinger = fingerContacts[1] ?? 0;
+  const center = rectCenter(bbox);
+  const thumbVector = normalize(subtract(hand[4], center));
+  const activeFinger = weightedAveragePoint(
+    [hand[8], hand[12], hand[16], hand[20]],
+    [roleContact([7, 8]), roleContact([11, 12]), roleContact([15, 16]), roleContact([19, 20])]
+  );
+  const fingerVector = normalize(subtract(activeFinger, center));
+  const opposition = clamp((-dot(thumbVector, fingerVector) + 0.1) / 1.1);
+  if (thumbContact < 0.18 || bestFinger < 0.18) return Math.min(0.12, thumbContact * bestFinger);
+  return clamp(thumbContact * 0.34 + bestFinger * 0.3 + secondFinger * 0.14 + opposition * 0.12 + Math.min(1, rectIoU(rectFromPoints(handCorridorPoints(hand)), bbox) * 4) * 0.1);
+}
+
+function rectCenter(rect: RfdetrDetection['bbox']): Point {
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+}
+
+function weightedAveragePoint(points: Point[], weights: number[]) {
+  const total = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+  if (total <= 0.0001) return averagePoint(points);
+  return points.reduce(
+    (sum, point, index) => {
+      const weight = Math.max(0, weights[index] ?? 0);
+      return { x: sum.x + point.x * weight, y: sum.y + point.y * weight };
+    },
+    { x: 0, y: 0 }
+  );
 }
 
 function handCorridorPoints(hand: Landmark[]) {
