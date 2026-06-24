@@ -97,7 +97,7 @@ npm audit --audit-level=moderate
 
 ### macOS One-Time Setup And Quick Run
 
-Use this on a different Mac after cloning the repo:
+Use this on a different Mac after cloning the repo. The setup script expects Homebrew to be installed. It will install or upgrade Node.js and Python through Homebrew when they are missing or too old, then install the app dependencies and warm up the RF-DETR and YOLO models.
 
 ```bash
 git clone https://github.com/DewanshuHaswani/GripSense-RGB.git
@@ -106,10 +106,22 @@ chmod +x scripts/setup_mac.sh scripts/start_mac_inference.sh scripts/start_mac_f
 ./scripts/setup_mac.sh
 ```
 
+If Homebrew is not installed, install it first and then rerun setup:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
 For RealSense support on that Mac:
 
 ```bash
 ./scripts/setup_mac.sh --with-realsense
+```
+
+If you only want to install dependencies and skip model downloads during setup:
+
+```bash
+./scripts/setup_mac.sh --skip-warmup
 ```
 
 After setup, run these two terminals:
@@ -414,6 +426,8 @@ webcam frame -> local YOLO segmentation mask/box -> best non-person hand-near ob
 ```
 
 V11 does not trust YOLO class labels for grip quality. Labels are diagnostic only, `person` detections are rejected, and the selected object is scored by hand proximity, mask overlap with the hand corridor, and temporal continuity. If the YOLO endpoint is unavailable, V11 shows `YOLO unavailable` and does not fake confidence.
+
+V11 also applies a live display stabilizer to the grip percentage while YOLO lock/contact evidence remains stable. Small frame-to-frame mask jitter is damped, but real object loss, low confidence, or contact collapse still drops the score quickly.
 
 Limitations: CPU YOLO segmentation is usually easier to install than RF-DETR on many Windows laptops, but it can still miss objects during blur, occlusion, glare, or poor lighting. Warm up the model once with `python local-inference/warmup_models.py --model yolo`.
 

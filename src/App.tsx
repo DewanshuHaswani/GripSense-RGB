@@ -190,6 +190,11 @@ type BaseClassSummary = {
   enabled: boolean;
 };
 
+type V11DisplayState = {
+  analysis: GripAnalysis | null;
+  timestamp: number;
+};
+
 type OfflineTimelinePoint = {
   time: number;
   grip: number;
@@ -385,6 +390,7 @@ export default function App() {
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
+  const v11DisplayRef = useRef<V11DisplayState>({ analysis: null, timestamp: 0 });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -1536,6 +1542,11 @@ export default function App() {
           );
         } else if (liveRfdetrReview || liveRealSenseReview || liveYoloReview) {
           frameAnalysis = baseFrameAnalysis;
+          if (liveYoloReview) {
+            const stabilizedV11 = stabilizeV11DisplayAnalysis(baseFrameAnalysis, v11DisplayRef.current, timestamp);
+            v11DisplayRef.current = stabilizedV11.state;
+            frameAnalysis = stabilizedV11.analysis;
+          }
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
@@ -1764,6 +1775,7 @@ export default function App() {
       baseObjectCandidatesRef.current = [];
       liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
       rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
+      v11DisplayRef.current = { analysis: null, timestamp: 0 };
       targetProfileIdRef.current = null;
       targetBaseIdRef.current = null;
       stabilizerRef.current.reset();
@@ -5344,6 +5356,92 @@ function selectCalibrationBaseline(
   kind: 'strong' | 'weak'
 ) {
   return profiles[mode]?.[kind] ?? null;
+}
+
+function stabilizeV11DisplayAnalysis(
+  analysis: GripAnalysis,
+  previousState: V11DisplayState,
+  timestamp: number
+): { analysis: GripAnalysis; state: V11DisplayState } {
+  const previous = previousState.analysis;
+  const lockCollapsed =
+    analysis.gripPercentage <= 18 ||
+    analysis.confidence <= 0.24 ||
+    analysis.objectLockQuality <= 0.2 ||
+    analysis.diagnostics.issueCategory === 'server_unavailable' ||
+    analysis.guidance === 'Object not locked';
+
+  if (!previous || lockCollapsed) {
+    return { analysis, state: { analysis, timestamp } };
+  }
+
+  const dt = Math.max(16, timestamp - previousState.timestamp);
+  const stableLock =
+    analysis.objectLockQuality >= 0.72 &&
+    analysis.confidence >= 0.52 &&
+    analysis.evidence.fingerSegmentContactScore >= 0.38 &&
+    analysis.slipRisk < 0.42;
+  const deadband = stableLock ? 7 : 3;
+  const gripDelta = analysis.gripPercentage - previous.gripPercentage;
+  const holdGrip = stableLock && Math.abs(gripDelta) <= deadband;
+  const timeScale = clampUnit(dt / 240);
+  const upAlpha = stableLock ? 0.16 + timeScale * 0.12 : 0.34 + timeScale * 0.1;
+  const downAlpha = stableLock && analysis.gripPercentage >= 45 ? 0.26 + timeScale * 0.12 : 0.58 + timeScale * 0.18;
+  const gripAlpha = gripDelta >= 0 ? upAlpha : downAlpha;
+  const gripPercentage = holdGrip
+    ? previous.gripPercentage
+    : Math.round(previous.gripPercentage + gripDelta * clampUnit(gripAlpha));
+
+  const confidence = smoothV11Metric(previous.confidence, analysis.confidence, stableLock ? 0.2 : 0.38);
+  const objectLockQuality = smoothV11Metric(previous.objectLockQuality, analysis.objectLockQuality, stableLock ? 0.18 : 0.36);
+  const closureScore = smoothV11Metric(previous.closureScore, analysis.closureScore, stableLock ? 0.22 : 0.42);
+  const thumbOpposition = smoothV11Metric(previous.thumbOpposition, analysis.thumbOpposition, stableLock ? 0.22 : 0.42);
+  const enclosureScore = smoothV11Metric(previous.enclosureScore, analysis.enclosureScore, stableLock ? 0.22 : 0.42);
+  const slipRisk = smoothV11Metric(previous.slipRisk, analysis.slipRisk, analysis.slipRisk > previous.slipRisk ? 0.5 : 0.24);
+  const motionCoupling = smoothV11Metric(previous.motionCoupling, analysis.motionCoupling, stableLock ? 0.2 : 0.4);
+  const guidance =
+    gripPercentage >= 78 && objectLockQuality >= 0.64 && slipRisk < 0.4
+      ? 'Strong grip'
+      : gripPercentage >= 38
+        ? 'Improve grip'
+        : analysis.guidance;
+  const stabilized: GripAnalysis = {
+    ...analysis,
+    gripPercentage,
+    confidence,
+    objectLockQuality,
+    closureScore,
+    thumbOpposition,
+    enclosureScore,
+    slipRisk,
+    motionCoupling,
+    guidance,
+    message: guidance === analysis.guidance ? analysis.message : messageForStabilizedV11Guidance(guidance),
+    diagnostics: {
+      ...analysis.diagnostics,
+      state:
+        guidance === 'Strong grip'
+          ? 'Strong hold'
+          : guidance === 'Improve grip'
+            ? 'Grip detected'
+            : analysis.diagnostics.state
+    }
+  };
+
+  return { analysis: stabilized, state: { analysis: stabilized, timestamp } };
+}
+
+function smoothV11Metric(previous: number, next: number, alpha: number) {
+  const strongDrop = next < previous - 0.34;
+  const adjustedAlpha = strongDrop ? Math.max(alpha, 0.62) : alpha;
+  return clampUnit(previous + (next - previous) * adjustedAlpha);
+}
+
+function messageForStabilizedV11Guidance(guidance: GripAnalysis['guidance']) {
+  if (guidance === 'Strong grip') return 'Grip looks stable. Keep the object seated while the YOLO mask updates.';
+  if (guidance === 'Improve grip') return 'Grip is usable; hold still or improve thumb support if the boundary drifts.';
+  if (guidance === 'Reposition') return 'Reposition the object deeper between the thumb and fingers.';
+  return 'Object not locked. Move an object into the hand area or improve visibility.';
 }
 
 function readInitialAlgorithmVersion(): AlgorithmVersion {
