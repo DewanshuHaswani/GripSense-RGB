@@ -28,7 +28,7 @@ Requirements:
 
 - Node.js 20.19 or newer. Vite 8 requires a recent Node 20+ runtime.
 - Python 3.10 or newer for the local inference server.
-- A webcam for V1-V8 and V10 live modes.
+- A webcam for V1-V8, V10, and V11 live modes.
 - Optional: an Intel RealSense D455/D445 camera plus `pyrealsense2` for V9 live, Offline V3 depth, and Offline Max RGB-D evidence.
 
 Clone and install the frontend:
@@ -48,7 +48,7 @@ npm run dev
 
 Open `http://127.0.0.1:5173/` in Chrome or another modern browser and allow camera access.
 
-For **V8 live**, **V9 live**, **Offline V2**, **Offline V3**, and **Offline Max**, also start the local Python inference server in a second terminal:
+For **V8 live**, **V9 live**, **V11 live**, **Offline V2**, **Offline V3**, **Offline Max**, and **Offline YOLO Max**, also start the local Python inference server in a second terminal:
 
 ```bash
 cd GripSense-RGB/local-inference
@@ -82,6 +82,8 @@ curl -I http://127.0.0.1:7867/docs
 If V8 shows **server unavailable**, it means the browser cannot get a usable RF-DETR response from `http://127.0.0.1:7867/api/rfdetr/analyze`. Check that the Python server is running, dependencies installed correctly, port `7867` is not blocked, and the server terminal did not show an RF-DETR model load error. The first RF-DETR request can be slow because model weights may load or download.
 
 If this happens on a locked-down Windows or office network but `http://127.0.0.1:7867/docs` works, use **V10 · RF-DETR proxy live** at `?version=v10`. V10 runs the same grip analysis as V8, but the browser calls the frontend dev server first and Vite proxies the request to Python. This helps with browser-side localhost, CORS, proxy, and SSL inspection policies. It cannot fix a Python-side model download failure; run the RF-DETR warmup command on a network where Python can download the model or configure the machine's corporate CA certificate for Python.
+
+If V11 shows **YOLO unavailable**, the frontend could not get a usable response from `POST /api/gripsense/yolo/analyze`, which Vite proxies to `http://127.0.0.1:7867/api/yolo/analyze`. Check that `ultralytics` installed correctly and run `python local-inference/warmup_models.py --model yolo` once so the YOLO segmentation weights download/cache on that machine.
 
 If V9, Offline V3, or Offline Max shows **RealSense unavailable**, RF-DETR can still run, but depth evidence is missing. Check that the RealSense D455/D445 is connected to the same machine, `pyrealsense2` is installed in the local inference virtualenv, and the browser camera view is aligned with the RealSense RGB stream.
 
@@ -127,11 +129,12 @@ Open:
 - V10 RF-DETR proxy live: `http://127.0.0.1:7676/?version=v10`
 - V8 RF-DETR direct live: `http://127.0.0.1:7676/?version=v8`
 - V9 RealSense live: `http://127.0.0.1:7676/?version=v9`
+- V11 YOLO live: `http://127.0.0.1:7676/?version=v11`
 - Local server docs: `http://127.0.0.1:7867/docs`
 
 ### Windows Setup With RF-DETR And RealSense D455/D445
 
-Use this section for a Windows machine that needs V8/V10 RF-DETR, Offline V2, V9 RealSense, Offline V3, or Offline Max.
+Use this section for a Windows machine that needs V8/V10 RF-DETR, V11 YOLO, Offline V2, V9 RealSense, Offline V3, Offline Max, or Offline YOLO Max.
 
 Install first:
 
@@ -157,7 +160,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\scripts\setup_windows.ps1 -WithRealSense
 ```
 
-The setup script installs npm packages, creates `local-inference\.venv`, installs Python inference dependencies, and warms up RF-DETR-Seg Nano. The warmup step is where model weights are downloaded/cached on that Windows machine. This can take several minutes the first time.
+The setup script installs npm packages, creates `local-inference\.venv`, installs Python inference dependencies, and warms up RF-DETR-Seg Nano. YOLO is installed with the same inference dependencies; warm it up separately before first V11/Offline YOLO Max use. Warmup is where model weights are downloaded/cached on that Windows machine and can take several minutes the first time.
 
 Run the app after setup:
 
@@ -176,12 +179,19 @@ Open:
 - V10 RF-DETR proxy live: `http://127.0.0.1:7676/?version=v10`
 - V8 RF-DETR direct live: `http://127.0.0.1:7676/?version=v8`
 - V9 RealSense live: `http://127.0.0.1:7676/?version=v9`
+- V11 YOLO live: `http://127.0.0.1:7676/?version=v11`
 - Local server docs: `http://127.0.0.1:7867/docs`
 
 RF-DETR model files are intentionally not committed to GitHub. They are large runtime artifacts and may have their own distribution constraints. The supported setup path is to download/cache them on each machine using:
 
 ```powershell
 .\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model rfdetr
+```
+
+YOLO model files are also intentionally not committed. Warm/cache the default YOLO segmentation model with:
+
+```powershell
+.\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model yolo
 ```
 
 For RealSense D455/D445:
@@ -229,12 +239,13 @@ You can open either algorithm directly:
 - `http://127.0.0.1:5173/?version=v8`
 - `http://127.0.0.1:5173/?version=v9`
 - `http://127.0.0.1:5173/?version=v10`
+- `http://127.0.0.1:5173/?version=v11`
 
-The toolbar also has a `V1` through `V10` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
+The toolbar also has a `V1` through `V11` switch. Changing versions clears the object lock so the algorithms can be compared cleanly.
 
-### Optional RF-DETR CPU Server
+### Optional Local Inference CPU Server
 
-V8/V9/V10 live mode and Offline V2/V3/Max enhancement use a local Python server. It runs RF-DETR on CPU by default and keeps frames on your machine. V9, Offline V3, and Offline Max can also sample Intel RealSense depth when `pyrealsense2` and a connected D455/D445 camera are available.
+V8/V9/V10 live mode and Offline V2/V3/Max enhancement use a local Python server with RF-DETR on CPU by default. V11 live and Offline YOLO Max use the same local server with Ultralytics YOLO segmentation on CPU by default. V9, Offline V3, and Offline Max can also sample Intel RealSense depth when `pyrealsense2` and a connected D455/D445 camera are available. Frames stay on your machine.
 
 ```bash
 cd local-inference
@@ -252,7 +263,7 @@ Then start the frontend in another terminal:
 npm run dev
 ```
 
-The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for V8 RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. V10 calls same-origin `POST /api/gripsense/rfdetr/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/rfdetr/analyze` by default. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`. RealSense V9, Offline V3, and Offline Max call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano, with `GRIPSENSE_RFDETR_DEVICE=cpu` behavior by default.
+The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default for V8 RF-DETR. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT` if needed. V10 calls same-origin `POST /api/gripsense/rfdetr/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/rfdetr/analyze` by default. V11 and Offline YOLO Max call same-origin `POST /api/gripsense/yolo/analyze`; Vite proxies that to `http://127.0.0.1:7867/api/yolo/analyze`. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET` or override YOLO directly with `VITE_GRIPSENSE_YOLO_ENDPOINT`. RealSense V9, Offline V3, and Offline Max call `POST http://127.0.0.1:7867/api/realsense/depth-signal`; override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT` if needed. The default RF-DETR model is RF-DETR-Seg Nano with `GRIPSENSE_RFDETR_DEVICE=cpu`; the default YOLO model is `yolo11n-seg.pt` with `GRIPSENSE_YOLO_DEVICE=cpu`.
 
 ## Offline Video Review
 
@@ -268,12 +279,13 @@ Offline mode adds liquid-glass overlays directly on top of the video:
 
 You can use the video controls to pause, scrub, or replay. Scrubbing is useful for inspecting when grip quality changes.
 
-Offline Review has four algorithms plus a one-click Max upload:
+Offline Review has four existing algorithms plus a YOLO Max path:
 
 - **Offline V1**: the original offline review path. It is unchanged and starts quickly.
 - **Offline V2**: scans the full clip before review, uses RF-DETR object masks when the local server is available, and then applies future/past smoothing. Its timeline includes grip score, object score, contact evidence, weak segments, and slip events. If RF-DETR is unavailable, Offline V2 keeps using the existing local review path and reports the server status in the overlay.
 - **Offline V3 · RealSense**: adds aligned RealSense stereo depth contact on top of Offline V2's RF-DETR mask pipeline. It still scans the full clip before preview/export, then applies future/past smoothing with depth contact, depth separation, stereo confidence, object score, weak segments, and slip events. If RealSense depth is unavailable, Offline V3 reports that state and falls back to RF-DETR/RGB evidence rather than inventing depth confidence.
 - **Offline Max**: the best-available offline path for both RGB webcams and RealSense D455/D445. Click **Offline Max**, upload a video, and the app scans the full clip first. If enough reliable D455/D445 depth frames are present, Max uses the RGB-D path; otherwise it automatically falls back to the RF-DETR RGB path. The preview and exports use the finalized smoothed timeline, not a first-pass preview.
+- **Offline YOLO Max**: scans the full clip first like Offline Max, but uses YOLO segmentation masks instead of RF-DETR for RGB object evidence. It still rejects `person`, does not trust class labels for grip scoring, and uses future/past smoothing before preview/export.
 
 ## Object Profile V2 Training
 
@@ -392,6 +404,18 @@ browser -> Vite same-origin proxy -> local Python RF-DETR server -> V8 grip anal
 Use V10 when V8 reports `RF-DETR unavailable` on a managed Windows or office machine even though the Python server docs page opens at `http://127.0.0.1:7867/docs`. The frontend request goes to `/api/gripsense/rfdetr/analyze`, and `vite.config.ts` proxies it to `/api/rfdetr/analyze` on the local inference server.
 
 V10 does not change grip scoring, object selection, person rejection, smoothing, or RF-DETR confidence rules. It also does not bypass Python-side SSL errors while downloading model weights. If the inference server terminal shows certificate or download failures, fix Python's network/certificate setup or run the warmup on a network where the model can be downloaded.
+
+## Version 11: YOLO Live Masks
+
+V11 is an additive YOLO-backed copy of V8's grip logic:
+
+```text
+webcam frame -> local YOLO segmentation mask/box -> best non-person hand-near object -> mask-contact grip score
+```
+
+V11 does not trust YOLO class labels for grip quality. Labels are diagnostic only, `person` detections are rejected, and the selected object is scored by hand proximity, mask overlap with the hand corridor, and temporal continuity. If the YOLO endpoint is unavailable, V11 shows `YOLO unavailable` and does not fake confidence.
+
+Limitations: CPU YOLO segmentation is usually easier to install than RF-DETR on many Windows laptops, but it can still miss objects during blur, occlusion, glare, or poor lighting. Warm up the model once with `python local-inference/warmup_models.py --model yolo`.
 
 ## Version 9: RealSense RGB-D Live
 

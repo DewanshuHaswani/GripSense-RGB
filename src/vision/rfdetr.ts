@@ -4,8 +4,33 @@ import type { GripAnalysis, GripCalibrationBaseline, Landmark, ObjectIdentitySig
 
 export const DEFAULT_RFDETR_ENDPOINT = 'http://127.0.0.1:7867/api/rfdetr/analyze';
 export const DEFAULT_RFDETR_PROXY_ENDPOINT = '/api/gripsense/rfdetr/analyze';
+export const DEFAULT_YOLO_ENDPOINT = '/api/gripsense/yolo/analyze';
 export const RFDETR_REQUEST_INTERVAL_MS = 520;
 export const RFDETR_OFFLINE_INTERVAL_MS = 220;
+
+export type DetectorProvider = {
+  idPrefix: string;
+  displayName: string;
+  idleMessage: string;
+  unavailableMessage: string;
+  heldObjectName: string;
+};
+
+export const RFDETR_PROVIDER: DetectorProvider = {
+  idPrefix: 'rfdetr',
+  displayName: 'RF-DETR',
+  idleMessage: 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.',
+  unavailableMessage: 'RF-DETR unavailable. Start the local RF-DETR server to use mask analysis.',
+  heldObjectName: 'RF-DETR held object'
+};
+
+export const YOLO_PROVIDER: DetectorProvider = {
+  idPrefix: 'yolo',
+  displayName: 'YOLO',
+  idleMessage: 'YOLO server idle. Select V11 or Offline YOLO Max to begin YOLO mask analysis.',
+  unavailableMessage: 'YOLO unavailable. Start the local Python YOLO server to use mask analysis.',
+  heldObjectName: 'YOLO held object'
+};
 
 export type RfdetrDetection = {
   id: string;
@@ -89,7 +114,7 @@ export const EMPTY_RFDETR_TRACK: RfdetrTrackState = {
 export function createInitialRfdetrRuntime(endpoint = DEFAULT_RFDETR_ENDPOINT): RfdetrRuntime {
   return {
     status: 'idle',
-    message: 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.',
+    message: RFDETR_PROVIDER.idleMessage,
     endpoint,
     result: null,
     resultPalm: null,
@@ -111,15 +136,17 @@ export function analyzeGripWithRfdetr(options: {
   weakCalibrationBaseline?: GripCalibrationBaseline | null;
   serverAvailable: boolean;
   unavailableMessage?: string;
+  provider?: DetectorProvider;
 }): RfdetrGripResult {
+  const provider = options.provider ?? RFDETR_PROVIDER;
   const emptyTrack = decayRfdetrTrack(options.previousTrack, options.now);
   const unavailable = !options.serverAvailable;
   if (unavailable) {
-    const analysis = createRfdetrUnavailableAnalysis(options.unavailableMessage);
+    const analysis = createRfdetrUnavailableAnalysis(options.unavailableMessage ?? provider.unavailableMessage);
     return {
       analysis,
       object: null,
-      objectIdentity: rfdetrIdentity(null, 0, 0),
+      objectIdentity: rfdetrIdentity(null, 0, 0, provider),
       track: emptyTrack,
       selection: { detection: null, objectScore: 0, contact: 0, proximity: 0, continuity: emptyTrack.continuity, rejectedPerson: false }
     };
@@ -129,7 +156,7 @@ export function analyzeGripWithRfdetr(options: {
     return {
       analysis: createEmptyAnalysis('No hand detected. Keep your hand inside the camera frame.'),
       object: null,
-      objectIdentity: rfdetrIdentity(null, 0, 0),
+      objectIdentity: rfdetrIdentity(null, 0, 0, provider),
       track: emptyTrack,
       selection: { detection: null, objectScore: 0, contact: 0, proximity: 0, continuity: emptyTrack.continuity, rejectedPerson: false }
     };
@@ -138,7 +165,7 @@ export function analyzeGripWithRfdetr(options: {
   const selection = selectRfdetrGripObject(options.detections, options.hand, options.previousTrack);
   const track = updateRfdetrTrack(options.previousTrack, selection, options.now);
   if (!selection.detection || !rfdetrObjectLockReady(selection)) {
-    const held = createHeldRfdetrObject(options.previousObject, options.hand, options.previousPalm, track);
+    const held = createHeldRfdetrObject(options.previousObject, options.hand, options.previousPalm, track, provider);
     if (held) {
       const holdSelection = {
         ...selection,
@@ -147,7 +174,7 @@ export function analyzeGripWithRfdetr(options: {
         proximity: held.proximity,
         continuity: track.continuity
       };
-      const objectIdentity = heldRfdetrIdentity(holdSelection.objectScore);
+      const objectIdentity = heldRfdetrIdentity(holdSelection.objectScore, provider);
       const baseAnalysis = analyzeGrip(options.hand, held.object, options.previousPalm, {
         persistentSlipScore: options.persistentSlipScore ?? 0,
         calibrationBaseline: options.calibrationBaseline,
@@ -156,7 +183,7 @@ export function analyzeGripWithRfdetr(options: {
         objectIdentity
       });
       return {
-        analysis: applyRfdetrHoldGate(baseAnalysis, holdSelection, track),
+        analysis: applyRfdetrHoldGate(baseAnalysis, holdSelection, track, provider),
         object: held.object,
         objectIdentity,
         track,
@@ -166,8 +193,8 @@ export function analyzeGripWithRfdetr(options: {
 
     const analysis = createEmptyAnalysis(
       selection.rejectedPerson
-        ? 'RF-DETR rejected person detection as a grip object.'
-        : 'RF-DETR did not find a non-person object close enough to the hand.'
+        ? `${provider.displayName} rejected person detection as a grip object.`
+        : `${provider.displayName} did not find a non-person object close enough to the hand.`
     );
     return {
       analysis: {
@@ -183,26 +210,26 @@ export function analyzeGripWithRfdetr(options: {
         }
       },
       object: null,
-      objectIdentity: rfdetrIdentity(null, 0, selection.contact),
+      objectIdentity: rfdetrIdentity(null, 0, selection.contact, provider),
       track,
       selection
     };
   }
 
-  const object = rfdetrDetectionToObjectRegion(selection.detection, options.previousObject, selection, track);
+  const object = rfdetrDetectionToObjectRegion(selection.detection, options.previousObject, selection, track, provider);
   const baseAnalysis = analyzeGrip(options.hand, object, options.previousPalm, {
     persistentSlipScore: options.persistentSlipScore ?? 0,
     calibrationBaseline: options.calibrationBaseline,
     weakCalibrationBaseline: options.weakCalibrationBaseline,
     algorithmVersion: 'v6',
-    objectIdentity: rfdetrIdentity(selection.detection, selection.objectScore, selection.contact)
+    objectIdentity: rfdetrIdentity(selection.detection, selection.objectScore, selection.contact, provider)
   });
-  const analysis = applyRfdetrContactGate(baseAnalysis, selection, track);
+  const analysis = applyRfdetrContactGate(baseAnalysis, selection, track, provider);
 
   return {
     analysis,
     object,
-    objectIdentity: rfdetrIdentity(selection.detection, selection.objectScore, selection.contact),
+    objectIdentity: rfdetrIdentity(selection.detection, selection.objectScore, selection.contact, provider),
     track,
     selection
   };
@@ -263,9 +290,10 @@ export function rfdetrDetectionToObjectRegion(
   detection: RfdetrDetection,
   previous: ObjectRegion | null,
   selection: Pick<RfdetrSelection, 'objectScore' | 'contact' | 'proximity' | 'continuity'>,
-  track: RfdetrTrackState
+  track: RfdetrTrackState,
+  provider: DetectorProvider = RFDETR_PROVIDER
 ): ObjectRegion {
-  const same = previous?.detectorLabel === `rfdetr:${detection.id}`;
+  const same = previous?.detectorLabel === `${provider.idPrefix}:${detection.id}`;
   const aspectRatio = Math.max(detection.bbox.width, detection.bbox.height) / Math.max(1, Math.min(detection.bbox.width, detection.bbox.height));
   const contour = detection.maskPolygon.length >= 3 ? detection.maskPolygon : bboxPolygon(detection.bbox);
   const confidence = clamp(0.36 + detection.score * 0.26 + selection.contact * 0.26 + selection.continuity * 0.12);
@@ -289,7 +317,7 @@ export function rfdetrDetectionToObjectRegion(
     visualTextureScore: clamp(0.24 + detection.score * 0.32),
     independentEvidenceScore: clamp(0.5 + detection.score * 0.26 + selection.contact * 0.18),
     relativeDriftScore: same && previous ? clamp(distance(center, previous.center) / Math.max(1, Math.max(detection.bbox.width, detection.bbox.height))) : 0,
-    detectorLabel: `rfdetr:${detection.id}`,
+    detectorLabel: `${provider.idPrefix}:${detection.id}`,
     detectorScore: detection.score
   };
 }
@@ -300,8 +328,8 @@ function rfdetrObjectLockReady(selection: Pick<RfdetrSelection, 'objectScore' | 
   return selection.contact >= 0.1 && selection.proximity >= 0.42 && selection.continuity >= 0.7;
 }
 
-function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[], previousPalm: Point | null, track: RfdetrTrackState) {
-  if (!previous || !previous.detectorLabel?.startsWith('rfdetr:')) return null;
+function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[], previousPalm: Point | null, track: RfdetrTrackState, provider: DetectorProvider = RFDETR_PROVIDER) {
+  if (!previous || !previous.detectorLabel?.startsWith(`${provider.idPrefix}:`)) return null;
   if (track.missedFrames < 1 || track.missedFrames > 4 || track.confidence < 0.08 || track.continuity < 0.04) return null;
   const currentPalm = palmCenter(hand);
   const palmShift = previousPalm ? subtract(currentPalm, previousPalm) : { x: 0, y: 0 };
@@ -328,7 +356,7 @@ function createHeldRfdetrObject(previous: ObjectRegion | null, hand: Landmark[],
   return { object, objectScore, contact, proximity };
 }
 
-function applyRfdetrHoldGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState): GripAnalysis {
+function applyRfdetrHoldGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState, provider: DetectorProvider = RFDETR_PROVIDER): GripAnalysis {
   const holdCap = Math.max(20, Math.round((selection.objectScore * 0.56 + selection.contact * 0.3 + track.continuity * 0.14) * 72));
   const gripPercentage = Math.min(analysis.gripPercentage, holdCap);
   const confidence = Math.min(analysis.confidence, clamp(selection.objectScore * 0.52 + selection.contact * 0.2 + track.continuity * 0.1));
@@ -350,15 +378,15 @@ function applyRfdetrHoldGate(analysis: GripAnalysis, selection: RfdetrSelection,
     diagnostics: {
       ...analysis.diagnostics,
       state: gripPercentage >= 34 ? 'Grip detected' : 'Object uncertain',
-      recommendation: 'RF-DETR missed this frame; holding the previous object boundary briefly.',
-      objectIssue: 'RF-DETR did not refresh the object mask on this frame.',
+      recommendation: `${provider.displayName} missed this frame; holding the previous object boundary briefly.`,
+      objectIssue: `${provider.displayName} did not refresh the object mask on this frame.`,
       gripIssue: 'Object boundary is a short temporal hold, so grip confidence is capped.',
       issueCategory: 'object_problem'
     }
   };
 }
 
-export function applyRfdetrContactGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState): GripAnalysis {
+export function applyRfdetrContactGate(analysis: GripAnalysis, selection: RfdetrSelection, track: RfdetrTrackState, provider: DetectorProvider = RFDETR_PROVIDER): GripAnalysis {
   const quickDecay = selection.contact < 0.14 || selection.proximity < 0.18 || track.missedFrames > 0;
   const contactCap = selection.contact < 0.12 ? 18 : selection.contact < 0.22 ? 32 : selection.contact < 0.34 ? 52 : 100;
   const continuityCap = track.missedFrames > 0 ? Math.max(8, Math.round(track.confidence * 46)) : 100;
@@ -396,9 +424,9 @@ export function applyRfdetrContactGate(analysis: GripAnalysis, selection: Rfdetr
       ...analysis.diagnostics,
       state: gripPercentage <= 18 || quickDecay ? 'Object uncertain' : analysis.diagnostics.state,
       recommendation: quickDecay
-        ? 'RF-DETR object mask is no longer overlapping the hand corridor.'
-        : 'RF-DETR mask contact is weak; reposition object against the hand.',
-      gripIssue: 'RF-DETR mask boundary is not visibly in contact with the hand corridor.',
+        ? `${provider.displayName} object mask is no longer overlapping the hand corridor.`
+        : `${provider.displayName} mask contact is weak; reposition object against the hand.`,
+      gripIssue: `${provider.displayName} mask boundary is not visibly in contact with the hand corridor.`,
       issueCategory: 'object_problem'
     }
   };
@@ -644,22 +672,22 @@ function translateObjectRegion(object: ObjectRegion, offset: Point): ObjectRegio
   };
 }
 
-function rfdetrIdentity(detection: RfdetrDetection | null, objectScore: number, contact: number): ObjectIdentitySignal {
+function rfdetrIdentity(detection: RfdetrDetection | null, objectScore: number, contact: number, provider: DetectorProvider = RFDETR_PROVIDER): ObjectIdentitySignal {
   return {
     hasProfiles: Boolean(detection),
     score: objectScore,
     matched: Boolean(detection && objectScore >= 0.28 && contact >= 0.16),
-    name: detection ? `RF-DETR ${safeObjectLabel(detection.label)}` : null,
+    name: detection ? `${provider.displayName} ${safeObjectLabel(detection.label)}` : null,
     source: 'base'
   };
 }
 
-function heldRfdetrIdentity(objectScore: number): ObjectIdentitySignal {
+function heldRfdetrIdentity(objectScore: number, provider: DetectorProvider = RFDETR_PROVIDER): ObjectIdentitySignal {
   return {
     hasProfiles: true,
     score: objectScore,
     matched: false,
-    name: 'RF-DETR held object',
+    name: provider.heldObjectName,
     source: 'base'
   };
 }

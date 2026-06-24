@@ -5,3 +5,4 @@ python-multipart>=0.0.9,<1
 pillow>=10,<12
 numpy>=1.26,<3
 rfdetr>=1.7,<2
+ultralytics>=8.3,<9

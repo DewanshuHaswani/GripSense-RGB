@@ -56,12 +56,16 @@ import {
   createInitialRfdetrRuntime,
   DEFAULT_RFDETR_ENDPOINT,
   DEFAULT_RFDETR_PROXY_ENDPOINT,
+  DEFAULT_YOLO_ENDPOINT,
   EMPTY_RFDETR_TRACK,
   isRfdetrResultFresh,
   refineRfdetrOfflineTimeline,
   requestRfdetrFrameAnalysis,
+  RFDETR_PROVIDER,
   RFDETR_OFFLINE_INTERVAL_MS,
   RFDETR_REQUEST_INTERVAL_MS,
+  YOLO_PROVIDER,
+  type DetectorProvider,
   type RfdetrRuntime,
   type RfdetrTrackState
 } from './vision/rfdetr';
@@ -105,6 +109,7 @@ const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | un
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const RFDETR_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_ENDPOINT ?? DEFAULT_RFDETR_ENDPOINT;
 const RFDETR_PROXY_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_PROXY_ENDPOINT ?? DEFAULT_RFDETR_PROXY_ENDPOINT;
+const YOLO_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_YOLO_ENDPOINT ?? DEFAULT_YOLO_ENDPOINT;
 const REALSENSE_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_REALSENSE_ENDPOINT ?? DEFAULT_REALSENSE_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
@@ -116,6 +121,7 @@ const V5_BASE_TRACK_GRACE_MISSES = 6;
 const TRAINING_VIEW_ROLES: TrainingViewRole[] = ['front', 'side', 'rotated', 'in-hand', 'alone', 'negative'];
 
 function rfdetrEndpointForVersion(version: AlgorithmVersion) {
+  if (version === 'v11') return YOLO_ENDPOINT;
   return version === 'v10' ? RFDETR_PROXY_ENDPOINT : RFDETR_ENDPOINT;
 }
 
@@ -215,18 +221,23 @@ type OfflineTimelinePoint = {
   realsenseStereoConfidence?: number;
 };
 
-type OfflineReviewVersion = 'v1' | 'v2' | 'v3' | 'max';
+type OfflineReviewVersion = 'v1' | 'v2' | 'v3' | 'max' | 'yoloMax';
 
 function isOfflineEnhancedVersion(version: OfflineReviewVersion) {
-  return version === 'v2' || version === 'v3' || version === 'max';
+  return version === 'v2' || version === 'v3' || version === 'max' || version === 'yoloMax';
 }
 
 function isOfflineDepthVersion(version: OfflineReviewVersion) {
   return version === 'v3' || version === 'max';
 }
 
+function isOfflineYoloVersion(version: OfflineReviewVersion) {
+  return version === 'yoloMax';
+}
+
 function offlineVersionLabel(version: OfflineReviewVersion) {
   if (version === 'max') return 'Offline Max';
+  if (version === 'yoloMax') return 'Offline YOLO Max';
   if (version === 'v3') return 'Offline V3 RealSense';
   if (version === 'v2') return 'Offline V2';
   return 'Offline V1';
@@ -290,7 +301,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, V9 for RealSense RGB-D live analysis, or V10 for V8 RF-DETR through the local frontend proxy.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, V9 for RealSense RGB-D live analysis, V10 for V8 RF-DETR through the local frontend proxy, or V11 for YOLO live masks.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -331,6 +342,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offlineVideoInputRef = useRef<HTMLInputElement | null>(null);
   const offlineMaxInputRef = useRef<HTMLInputElement | null>(null);
+  const offlineYoloMaxInputRef = useRef<HTMLInputElement | null>(null);
   const uploadV1InputRef = useRef<HTMLInputElement | null>(null);
   const engineRef = useRef<VisionEngine | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -594,7 +606,7 @@ export default function App() {
     setRfdetrRuntime(next);
   }, []);
 
-  const resetRfdetrRuntime = useCallback((message = 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.', endpoint = rfdetrEndpointForVersion(algorithmVersionRef.current)) => {
+  const resetRfdetrRuntime = useCallback((message = RFDETR_PROVIDER.idleMessage, endpoint = rfdetrEndpointForVersion(algorithmVersionRef.current)) => {
     updateRfdetrRuntime({
       status: 'idle',
       message,
@@ -742,6 +754,8 @@ export default function App() {
       setAnalysis(createEmptyAnalysis(
         offlineReviewVersionRef.current === 'max'
           ? 'Offline Max is scanning the full video before review. It will use D455/RealSense depth when available, otherwise RF-DETR RGB.'
+          : offlineReviewVersionRef.current === 'yoloMax'
+          ? 'Offline YOLO Max is scanning the full video before review. It uses YOLO masks plus future and past frame smoothing.'
           : offlineReviewVersionRef.current === 'v3'
           ? 'Offline V3 RealSense is scanning the full video before review. It uses RF-DETR plus aligned depth when available.'
           : 'Offline V2 is scanning the full video before review. It will use past and future frames to smooth the result.'
@@ -755,6 +769,8 @@ export default function App() {
         setAnalysis(createEmptyAnalysis(
           offlineReviewVersionRef.current === 'max'
             ? 'Offline video loaded. Press play once to let Offline Max process the full video.'
+            : offlineReviewVersionRef.current === 'yoloMax'
+            ? 'Offline video loaded. Press play once to let Offline YOLO Max process the full video.'
             : offlineReviewVersionRef.current === 'v3'
             ? 'Offline video loaded. Press play once to let RealSense Offline V3 process the full video.'
             : 'Offline video loaded. Press play once to let V2 process the full video.'
@@ -797,6 +813,26 @@ export default function App() {
     setOfflineVideoExportStatus('');
     resetRfdetrRuntime('Offline Max selected. RF-DETR will provide mask evidence for RGB and D455/RealSense review.');
     resetRealSenseRuntime('Offline Max selected. D455/RealSense depth will be sampled when the local service is available.');
+    void startOfflineVideo(file);
+  }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
+
+  const handleOfflineYoloMaxUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('video/')) {
+      setUploadOnlyMode(false);
+      setUploadOnlyStatus('');
+      setAnalysis(createEmptyAnalysis('Offline YOLO Max needs a video file.'));
+      return;
+    }
+    offlineReviewVersionRef.current = 'yoloMax';
+    setOfflineReviewVersion('yoloMax');
+    setUploadOnlyMode(false);
+    setUploadOnlyStatus('');
+    setOfflineVideoExportStatus('');
+    resetRfdetrRuntime('Offline YOLO Max selected. YOLO will provide mask evidence for RGB review.', YOLO_ENDPOINT);
+    resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
     void startOfflineVideo(file);
   }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
@@ -1013,16 +1049,18 @@ export default function App() {
     });
   }, [updateV3Runtime]);
 
-  const scheduleRfdetrInference = useCallback((video: HTMLVideoElement, hand: Landmark[] | null, timestamp: number, offline = false) => {
+  const scheduleRfdetrInference = useCallback((video: HTMLVideoElement, hand: Landmark[] | null, timestamp: number, offline = false, provider: DetectorProvider = RFDETR_PROVIDER) => {
     const current = rfdetrRuntimeRef.current;
     const interval = offline ? RFDETR_OFFLINE_INTERVAL_MS : RFDETR_REQUEST_INTERVAL_MS;
     if (current.status === 'pending' || timestamp - current.lastRequestAt < interval) return;
     const requestPalm = hand ? palmCenter(hand) : null;
+    const endpoint = provider.idPrefix === YOLO_PROVIDER.idPrefix ? YOLO_ENDPOINT : current.endpoint;
 
     updateRfdetrRuntime({
       ...current,
       status: 'pending',
-      message: offline ? 'RF-DETR scanning offline frame.' : 'RF-DETR analyzing live frame.',
+      endpoint,
+      message: offline ? `${provider.displayName} scanning offline frame.` : `${provider.displayName} analyzing live frame.`,
       lastRequestAt: timestamp
     });
 
@@ -1031,7 +1069,7 @@ export default function App() {
     void requestRfdetrFrameAnalysis({
       video,
       hand,
-      endpoint: current.endpoint,
+      endpoint,
       mirrored: mirroredRef.current,
       signal: controller.signal
     }).then((result) => {
@@ -1041,13 +1079,14 @@ export default function App() {
         algorithmVersionRef.current === 'v8' ||
         algorithmVersionRef.current === 'v9' ||
         algorithmVersionRef.current === 'v10' ||
+        algorithmVersionRef.current === 'v11' ||
         (mediaModeRef.current === 'offline' && isOfflineEnhancedVersion(offlineReviewVersionRef.current));
       if (!stillRelevant) return;
       if (result.ok) {
         updateRfdetrRuntime({
           ...latest,
           status: 'ready',
-          message: `RF-DETR active (${result.response.detections.length} detection${result.response.detections.length === 1 ? '' : 's'}).`,
+          message: `${provider.displayName} active (${result.response.detections.length} detection${result.response.detections.length === 1 ? '' : 's'}).`,
           result: result.response,
           resultPalm: requestPalm,
           receivedAt: result.receivedAt,
@@ -1058,7 +1097,7 @@ export default function App() {
       updateRfdetrRuntime({
         ...latest,
         status: 'unavailable',
-        message: `RF-DETR unavailable: ${result.status}.`,
+        message: `${provider.displayName} unavailable: ${result.status}.`,
         result: null,
         resultPalm: null,
         receivedAt: result.receivedAt,
@@ -1152,12 +1191,16 @@ export default function App() {
         const offlineV2Review = offlineReview && offlineReviewVersionRef.current === 'v2';
         const offlineV3Review = offlineReview && offlineReviewVersionRef.current === 'v3';
         const offlineMaxReview = offlineReview && offlineReviewVersionRef.current === 'max';
-        const offlineEnhancedReview = offlineV2Review || offlineV3Review || offlineMaxReview;
+        const offlineYoloMaxReview = offlineReview && offlineReviewVersionRef.current === 'yoloMax';
+        const offlineEnhancedReview = offlineV2Review || offlineV3Review || offlineMaxReview || offlineYoloMaxReview;
         const offlineDepthReview = offlineV3Review || offlineMaxReview;
         const activeAlgorithmVersion = algorithmVersionRef.current;
         const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
         const liveRfdetrReview = (activeAlgorithmVersion === 'v8' || activeAlgorithmVersion === 'v10') && !offlineReview;
         const liveRealSenseReview = activeAlgorithmVersion === 'v9' && !offlineReview;
+        const liveYoloReview = activeAlgorithmVersion === 'v11' && !offlineReview;
+        const yoloDetectorReview = liveYoloReview || offlineYoloMaxReview;
+        const detectorProvider = yoloDetectorReview ? YOLO_PROVIDER : RFDETR_PROVIDER;
         const offlineV1StyleReview = offlineReview || liveOfflineV1Review;
         const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6' || liveOfflineV1Review;
         const liveV6Review = activeAlgorithmVersion === 'v6' && !offlineReview;
@@ -1169,9 +1212,9 @@ export default function App() {
         const hands = engine.detectHands(video, timestamp);
         const rawHand = hands[0] ? pointsToPixelSpace(hands[0], video.videoWidth, video.videoHeight) : null;
         hand = stabilizerRef.current.stabilizeHand(rawHand, timestamp);
-        const usesRfdetr = liveRfdetrReview || liveRealSenseReview || offlineEnhancedReview;
+        const usesRfdetr = liveRfdetrReview || liveRealSenseReview || liveYoloReview || offlineEnhancedReview;
         if (usesRfdetr) {
-          scheduleRfdetrInference(video, hand, timestamp, offlineEnhancedReview);
+          scheduleRfdetrInference(video, hand, timestamp, offlineEnhancedReview, detectorProvider);
         }
         if (liveRealSenseReview || offlineDepthReview) {
           scheduleRealSenseInference(hand, previousObjectRef.current, timestamp, offlineDepthReview);
@@ -1409,18 +1452,19 @@ export default function App() {
         });
         let rfdetrSelectionMetrics: { objectScore: number; contact: number; latencyMs: number | null } | null = null;
         let realsenseSelectionMetrics: { depthContact: number; depthSeparation: number; stereoConfidence: number } | null = null;
-        if (liveRfdetrReview || liveRealSenseReview || offlineEnhancedReview) {
+        if (liveRfdetrReview || liveRealSenseReview || liveYoloReview || offlineEnhancedReview) {
           const latestRfdetr = rfdetrRuntimeRef.current;
           const latestRealSense = realsenseRuntimeRef.current;
           const freshRfdetr = isRfdetrResultFresh(latestRfdetr, timestamp, offlineEnhancedReview ? 2600 : 1500);
           const freshRealSense = isRealSenseResultFresh(latestRealSense, timestamp, offlineDepthReview ? 2200 : 1300);
+          const detectorLabelPrefix = `${detectorProvider.idPrefix}:`;
           const canHoldOfflineRfdetr =
             offlineEnhancedReview &&
             !freshRfdetr &&
             latestRfdetr.status === 'pending' &&
-            Boolean(previousObjectRef.current?.detectorLabel?.startsWith('rfdetr:')) &&
+            Boolean(previousObjectRef.current?.detectorLabel?.startsWith(detectorLabelPrefix)) &&
             rfdetrTrackRef.current.missedFrames < 4;
-          if (liveRfdetrReview || liveRealSenseReview || freshRfdetr || canHoldOfflineRfdetr) {
+          if (liveRfdetrReview || liveRealSenseReview || liveYoloReview || freshRfdetr || canHoldOfflineRfdetr) {
             const compensatedRfdetr =
               freshRfdetr && latestRfdetr.result
                 ? compensateRfdetrResponseForHandMotion(latestRfdetr.result, latestRfdetr.resultPalm, hand)
@@ -1436,7 +1480,8 @@ export default function App() {
               calibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'strong'),
               weakCalibrationBaseline: selectCalibrationBaseline(calibrationProfilesRef.current, rawFrameAnalysis.diagnostics.mode, 'weak'),
               serverAvailable: freshRfdetr || canHoldOfflineRfdetr,
-              unavailableMessage: latestRfdetr.message || 'RF-DETR unavailable. Start the local RF-DETR server to use mask analysis.'
+              unavailableMessage: latestRfdetr.message || detectorProvider.unavailableMessage,
+              provider: detectorProvider
             };
             const rfdetrGrip =
               liveRealSenseReview || offlineDepthReview
@@ -1451,7 +1496,7 @@ export default function App() {
               objectIdentity = rfdetrGrip.objectIdentity;
               objectDetectionRef.current = rfdetrGrip.objectIdentity.name
                 ? {
-                    profileId: rfdetrGrip.object?.detectorLabel ?? 'rfdetr-object',
+                    profileId: rfdetrGrip.object?.detectorLabel ?? `${detectorProvider.idPrefix}-object`,
                     name: rfdetrGrip.objectIdentity.name,
                     score: rfdetrGrip.objectIdentity.score,
                     matched: rfdetrGrip.objectIdentity.matched
@@ -1489,7 +1534,7 @@ export default function App() {
             }),
             timestamp
           );
-        } else if (liveRfdetrReview || liveRealSenseReview) {
+        } else if (liveRfdetrReview || liveRealSenseReview || liveYoloReview) {
           frameAnalysis = baseFrameAnalysis;
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
@@ -1739,12 +1784,16 @@ export default function App() {
           ? 'V9 RealSense selected. Start RF-DETR plus the local RealSense depth service for RGB-D grip analysis.'
           : version === 'v10'
           ? 'V10 selected. It uses the V8 RF-DETR live algorithm through the local frontend proxy for stricter Windows browsers.'
+          : version === 'v11'
+          ? 'V11 selected. Start the local YOLO server to use live mask/box object evidence.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       resetRfdetrRuntime(
-        version === 'v8' || version === 'v9' || version === 'v10'
+        version === 'v11'
+          ? 'V11 selected. Start tracking to connect to the local YOLO server.'
+          : version === 'v8' || version === 'v9' || version === 'v10'
           ? `${version.toUpperCase()} selected. Start tracking to connect to the local RF-DETR server.`
-          : 'RF-DETR server idle. Select V8/V9/V10, Offline V2/V3, or Offline Max to begin RF-DETR analysis.',
+          : RFDETR_PROVIDER.idleMessage,
         rfdetrEndpointForVersion(version)
       );
       resetRealSenseRuntime(
@@ -1777,6 +1826,8 @@ export default function App() {
             ? 'V9 RealSense selected. It uses RF-DETR masks plus aligned stereo depth contact when the local RealSense service is available.'
             : version === 'v10'
             ? 'V10 selected. Same V8 RF-DETR grip analysis, routed through the local frontend proxy to avoid browser-side localhost/CORS/SSL blocking.'
+            : version === 'v11'
+            ? 'V11 selected. Same V8 grip analysis, using YOLO segmentation masks from the local CPU server instead of RF-DETR.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -2152,13 +2203,18 @@ export default function App() {
     resetRfdetrRuntime(
       version === 'max'
         ? 'Offline Max selected. RF-DETR masks will provide RGB object evidence; D455/RealSense depth will be used if available.'
+        : version === 'yoloMax'
+        ? 'Offline YOLO Max selected. YOLO masks will provide RGB object evidence.'
         : version === 'v3'
         ? 'Offline V3 RealSense selected. RF-DETR will provide masks while RealSense provides depth when available.'
-        : 'Offline V2 selected. RF-DETR will run when the local server is available.'
+        : 'Offline V2 selected. RF-DETR will run when the local server is available.',
+      version === 'yoloMax' ? YOLO_ENDPOINT : rfdetrEndpointForVersion(algorithmVersionRef.current)
     );
     resetRealSenseRuntime(
       version === 'max'
         ? 'Offline Max selected. D455/RealSense depth will be sampled when available; RGB/RF-DETR remains active otherwise.'
+        : version === 'yoloMax'
+        ? 'RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.'
         : version === 'v3'
         ? 'Offline V3 selected. RealSense depth will be sampled when the local service is available.'
         : 'RealSense depth idle. Select V9 live or Offline V3 to use aligned RGB-D evidence.'
@@ -2170,6 +2226,8 @@ export default function App() {
     setAnalysis(createEmptyAnalysis(
       version === 'max'
         ? 'Offline Max is reprocessing the full video and choosing the strongest available evidence: D455/RealSense RGB-D when available, otherwise RF-DETR RGB.'
+        : version === 'yoloMax'
+        ? 'Offline YOLO Max is reprocessing the full video with YOLO masks and future/past correction.'
         : version === 'v3'
         ? 'Offline V3 RealSense is reprocessing the full video with RF-DETR masks, depth contact, and future/past correction.'
         : 'Offline V2 is reprocessing the full video with future and past frame correction.'
@@ -2182,6 +2240,8 @@ export default function App() {
       setAnalysis(createEmptyAnalysis(
         version === 'max'
           ? 'Offline video loaded. Press play once to let Offline Max process the full video.'
+          : version === 'yoloMax'
+          ? 'Offline video loaded. Press play once to let Offline YOLO Max process the full video.'
           : version === 'v3'
           ? 'Offline video loaded. Press play once to let RealSense Offline V3 process the full video.'
           : 'Offline video loaded. Press play once to let V2 process the full video.'
@@ -2478,6 +2538,7 @@ export default function App() {
                 <option value="v8">V8 · RF-DETR live</option>
                 <option value="v9">V9 · RealSense live</option>
                 <option value="v10">V10 · RF-DETR proxy live</option>
+                <option value="v11">V11 · YOLO live</option>
               </select>
             </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -2519,6 +2580,17 @@ export default function App() {
               type="file"
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineMaxUpload}
+            />
+            <button className="tool-button primary" onClick={() => offlineYoloMaxInputRef.current?.click()} aria-label="Upload Offline YOLO Max review video">
+              <Sparkles size={17} />
+              <span>YOLO Max</span>
+            </button>
+            <input
+              ref={offlineYoloMaxInputRef}
+              className="hidden-file-input"
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,video/*"
+              onChange={handleOfflineYoloMaxUpload}
             />
             <button className="tool-button" onClick={() => uploadV1InputRef.current?.click()} aria-label="Upload V1 process and download">
               <Upload size={17} />
@@ -2631,7 +2703,7 @@ export default function App() {
               <p className="eyebrow">Recorded offline clip</p>
               <h2>Process recording</h2>
               <p>
-                Choose the offline engine for this camera recording. V1 starts quickly; V2 scans the clip; Max chooses D455/RealSense RGB-D when available or RF-DETR RGB otherwise.
+                Choose the offline engine for this camera recording. V1 starts quickly; V2 scans the clip; Max chooses D455/RealSense RGB-D when available or RF-DETR RGB otherwise; YOLO Max uses YOLO masks.
               </p>
               <div className="recording-meta">
                 <span>Duration</span>
@@ -2649,6 +2721,10 @@ export default function App() {
                 <button type="button" className="tool-button primary" onClick={() => processRecordedClip('max')}>
                   <Sparkles size={17} />
                   <span>Process Max</span>
+                </button>
+                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('yoloMax')}>
+                  <Sparkles size={17} />
+                  <span>YOLO Max</span>
                 </button>
                 <button type="button" className="tool-button" onClick={clearRecordedClip}>
                   <X size={17} />
@@ -2692,6 +2768,13 @@ export default function App() {
                 >
                   Max
                 </button>
+                <button
+                  type="button"
+                  className={offlineReviewVersion === 'yoloMax' ? 'active' : ''}
+                  onClick={() => switchOfflineReviewVersion('yoloMax')}
+                >
+                  YOLO
+                </button>
               </div>
               <h2>{analysis.gripPercentage}%</h2>
               <strong>
@@ -2730,7 +2813,7 @@ export default function App() {
               </div>
               {isOfflineEnhancedVersion(offlineReviewVersion) && (
                 <div className="offline-mini-row">
-                  <span>RF-DETR</span>
+                  <span>{isOfflineYoloVersion(offlineReviewVersion) ? 'YOLO' : 'RF-DETR'}</span>
                   <strong>{formatRfdetrRuntimeStatus(rfdetrRuntime)}</strong>
                 </div>
               )}
@@ -2761,8 +2844,8 @@ export default function App() {
               <GlassMetric label="Contact" value={analysis.evidence.fingerSegmentContactScore} />
               {isOfflineEnhancedVersion(offlineReviewVersion) && (
                 <>
-                  <GlassMetric label="RF object" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrObjectScore ?? 0} />
-                  <GlassMetric label="RF contact" value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrContact ?? 0} />
+                  <GlassMetric label={isOfflineYoloVersion(offlineReviewVersion) ? 'YOLO object' : 'RF object'} value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrObjectScore ?? 0} />
+                  <GlassMetric label={isOfflineYoloVersion(offlineReviewVersion) ? 'YOLO contact' : 'RF contact'} value={offlineTimeline[offlineTimeline.length - 1]?.rfdetrContact ?? 0} />
                 </>
               )}
               {isOfflineDepthVersion(offlineReviewVersion) && (
@@ -2782,6 +2865,8 @@ export default function App() {
                       ? `${uploadOnlyStatus} ${offlineTimeline.length} pts`
                       : offlineReviewVersion === 'max'
                       ? `Scanning full video for Offline Max. It will choose D455 RGB-D when enough depth evidence exists, otherwise RGB/RF-DETR... ${offlineTimeline.length} pts`
+                      : offlineReviewVersion === 'yoloMax'
+                      ? `Scanning full video for Offline YOLO Max correction before preview/export... ${offlineTimeline.length} pts`
                       : offlineReviewVersion === 'v3'
                       ? `Scanning full video for V3 RealSense RGB-D correction before preview/export... ${offlineTimeline.length} pts`
                       : offlineReviewVersion === 'v2'
@@ -3170,14 +3255,14 @@ export default function App() {
           </div>
         )}
 
-        {(algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10') && (
+        {(algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10' || algorithmVersion === 'v11') && (
           <div className="v3-panel">
             <div className="motion-header">
               <Activity size={18} />
-              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : algorithmVersion === 'v10' ? 'V10 RF-DETR proxy' : 'V8 RF-DETR'}</span>
+              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : algorithmVersion === 'v10' ? 'V10 RF-DETR proxy' : algorithmVersion === 'v11' ? 'V11 YOLO' : 'V8 RF-DETR'}</span>
             </div>
             <div className={rfdetrRuntime.status === 'ready' ? 'v3-status ready' : 'v3-status fallback'}>
-              <span>{algorithmVersion === 'v9' ? `RF-DETR ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
+              <span>{algorithmVersion === 'v9' ? `RF-DETR ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : algorithmVersion === 'v11' ? `YOLO ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
               <strong>{rfdetrRuntime.status === 'ready' ? `${rfdetrRuntime.result?.detections.length ?? 0} obj` : '--'}</strong>
             </div>
             <p className={rfdetrRuntime.status === 'ready' ? 'diagnostic-copy' : 'diagnostic-copy warn'}>{rfdetrRuntime.message}</p>
@@ -3191,7 +3276,7 @@ export default function App() {
               </>
             )}
             <div className="v3-score-grid">
-              <V3Score label={algorithmVersion === 'v9' ? 'RGB object' : 'RF object'} value={objectDetection?.score ?? 0} />
+              <V3Score label={algorithmVersion === 'v9' ? 'RGB object' : algorithmVersion === 'v11' ? 'YOLO object' : 'RF object'} value={objectDetection?.score ?? 0} />
               <V3Score label={algorithmVersion === 'v9' ? 'Depth contact' : 'Contact'} value={algorithmVersion === 'v9' ? realsenseRuntime.result?.contactDepthScore ?? analysis.evidence.visibleContactScore : analysis.evidence.visibleContactScore} />
               <V3Score label="Lock" value={analysis.objectLockQuality} />
               <V3Score label="Confidence" value={analysis.confidence} />
@@ -5264,9 +5349,9 @@ function selectCalibrationBaseline(
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9' || fromUrl === 'v10') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9' || fromUrl === 'v10' || fromUrl === 'v11') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9' || fromStorage === 'v10'
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9' || fromStorage === 'v10' || fromStorage === 'v11'
     ? fromStorage
     : 'v5';
 }

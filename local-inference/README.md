@@ -6,6 +6,7 @@ Endpoints:
 
 - `POST /v3/analyze-frame`: V3 adapter scaffold. It returns a conservative V3-shaped response from the browser's V2 state so the app can exercise timeout, stale-result, malformed-result, and fallback behavior.
 - `POST /api/rfdetr/analyze`: V8/V9/V10 live and Offline V2/V3/Max RF-DETR-Seg Nano object evidence. Input is a multipart JPEG frame plus optional `handLandmarks`; output includes `id`, `label`, `score`, `bbox`, `maskPolygon`, `maskArea`, `center`, and `latencyMs` for each detection.
+- `POST /api/yolo/analyze`: V11 live and Offline YOLO Max object evidence. It uses Ultralytics YOLO segmentation on CPU by default and returns the same detection contract as RF-DETR so the frontend can reuse the V8 grip scorer.
 - `POST /api/realsense/depth-signal`: V9 live, Offline V3, and Offline Max RealSense depth evidence. Input is current hand landmarks plus the selected object geometry; output includes depth contact, hand/object separation, stereo confidence, occlusion, surface continuity, and latency. If `pyrealsense2` or the camera is unavailable, the response reports `available: false` and the frontend does not fake depth confidence.
 
 The intended V3 production path is to replace the placeholder scoring in `server.py` with model adapters for:
@@ -67,7 +68,7 @@ Start the Windows frontend on port `7676` with the V10 proxy configured:
 .\scripts\start_windows_frontend.ps1
 ```
 
-Open `http://127.0.0.1:7676/?version=v10` for V10 proxy mode, or `http://127.0.0.1:7676/?version=v8` for the original direct V8 mode.
+Open `http://127.0.0.1:7676/?version=v10` for V10 proxy mode, `http://127.0.0.1:7676/?version=v8` for the original direct V8 mode, or `http://127.0.0.1:7676/?version=v11` for YOLO live mode.
 
 macOS setup:
 
@@ -85,6 +86,12 @@ The setup script warms up RF-DETR-Seg Nano so the model weights download/cache o
 .\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model rfdetr
 ```
 
+Warm up YOLO before first V11 or Offline YOLO Max use:
+
+```powershell
+.\local-inference\.venv\Scripts\python.exe .\local-inference\warmup_models.py --model yolo
+```
+
 Model weights are not stored in this Git repository. They are runtime artifacts resolved by the installed inference packages and should be downloaded on each target machine.
 
 The browser calls:
@@ -92,9 +99,12 @@ The browser calls:
 - `POST http://127.0.0.1:7867/v3/analyze-frame` for V3. Override with `VITE_GRIPSENSE_V3_ENDPOINT`.
 - `POST http://127.0.0.1:7867/api/rfdetr/analyze` for V8/V9 and Offline V2/V3/Max. Override with `VITE_GRIPSENSE_RFDETR_ENDPOINT`.
 - `POST /api/gripsense/rfdetr/analyze` for V10. Vite proxies it to the local inference server. Override the proxy target with `VITE_GRIPSENSE_INFERENCE_TARGET`.
+- `POST /api/gripsense/yolo/analyze` for V11 and Offline YOLO Max. Vite proxies it to `POST http://127.0.0.1:7867/api/yolo/analyze`. Override with `VITE_GRIPSENSE_YOLO_ENDPOINT`.
 - `POST http://127.0.0.1:7867/api/realsense/depth-signal` for V9, Offline V3, and Offline Max. Override with `VITE_GRIPSENSE_REALSENSE_ENDPOINT`.
 
 RF-DETR runs on CPU by default. You can set `GRIPSENSE_RFDETR_DEVICE=cpu` explicitly before launching the server. V8 and V10 report `RF-DETR unavailable` rather than inventing confidence if this server is not reachable.
+
+YOLO runs on CPU by default with `GRIPSENSE_YOLO_MODEL=yolo11n-seg.pt` and `GRIPSENSE_YOLO_DEVICE=cpu`. V11 and Offline YOLO Max report `YOLO unavailable` rather than inventing confidence if the model or endpoint is not reachable.
 
 RealSense depth is optional and hardware-dependent. Use a RealSense D455/D445 RGB-D camera as the browser camera source, keep it connected to the same machine running this server, and install `pyrealsense2` separately. V9/Offline V3/Offline Max use depth only as contact evidence; RF-DETR masks still provide the object evidence.
 
@@ -104,6 +114,7 @@ Troubleshooting:
 - If `curl -I http://127.0.0.1:7867/docs` fails, the server is not reachable.
 - If `/docs` works but V8 is unavailable on Windows, try V10. It uses the frontend proxy route and avoids browser-side localhost/CORS/proxy/SSL inspection problems.
 - If `/docs` works but V10 is unavailable, inspect the server terminal for missing `rfdetr`, model load/download failure, or CPU inference errors.
+- If V11 or Offline YOLO Max shows YOLO unavailable, run the YOLO warmup command above and inspect the server terminal for missing `ultralytics`, model download failure, or CPU inference errors.
 - If the server terminal shows Python SSL certificate errors while downloading RF-DETR, V10 cannot bypass that. Configure the corporate CA certificate for Python/pip or warm up the model on a network that allows the download.
 - If V9/Offline V3/Offline Max show RealSense unavailable, install `pyrealsense2`, connect the RealSense camera, and restart this server.
 - For RealSense D455/D445 on Windows, install Intel RealSense SDK 2.0, verify color/depth in RealSense Viewer, close RealSense Viewer, then start this server.

@@ -33,13 +33,34 @@ def warmup_rfdetr() -> None:
     print(f"RF-DETR warmup complete in {elapsed:.1f}s.")
 
 
+def warmup_yolo() -> None:
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    model_name = os.environ.get("GRIPSENSE_YOLO_MODEL", "yolo11n-seg.pt")
+    device = os.environ.get("GRIPSENSE_YOLO_DEVICE", "cpu")
+    started = time.perf_counter()
+    print(f"Loading YOLO segmentation model {model_name} on {device}...")
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:
+        raise RuntimeError("Could not import ultralytics. Run `pip install -r local-inference/requirements.txt` first.") from exc
+
+    model = YOLO(model_name)
+    image = Image.new("RGB", (320, 320), (245, 245, 245))
+    print("Running one tiny YOLO warmup prediction...")
+    model.predict(image, conf=0.45, device=device, verbose=False)
+    elapsed = time.perf_counter() - started
+    print(f"YOLO warmup complete in {elapsed:.1f}s.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Warm up GripSense local inference models.")
-    parser.add_argument("--model", choices=["rfdetr"], default="rfdetr")
+    parser.add_argument("--model", choices=["rfdetr", "yolo", "all"], default="rfdetr")
     args = parser.parse_args()
 
-    if args.model == "rfdetr":
+    if args.model in {"rfdetr", "all"}:
         warmup_rfdetr()
+    if args.model in {"yolo", "all"}:
+        warmup_yolo()
     return 0
 
 

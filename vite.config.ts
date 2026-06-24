@@ -13,6 +13,12 @@ export default defineConfig({
         secure: false,
         rewrite: () => '/api/rfdetr/analyze'
       },
+      '/api/gripsense/yolo/analyze': {
+        target: inferenceTarget,
+        changeOrigin: true,
+        secure: false,
+        rewrite: () => '/api/yolo/analyze'
+      },
       '/api/gripsense/realsense/depth-signal': {
         target: inferenceTarget,
         changeOrigin: true,

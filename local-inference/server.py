@@ -205,6 +205,9 @@ _RFDETR_MODEL: Any | None = None
 _RFDETR_CLASSES: dict[int, str] | list[str] | None = None
 _RFDETR_MODEL_NAME = "RF-DETR-Seg Nano"
 _RFDETR_DEVICE = os.environ.get("GRIPSENSE_RFDETR_DEVICE", "cpu").lower()
+_YOLO_MODEL: Any | None = None
+_YOLO_MODEL_NAME = os.environ.get("GRIPSENSE_YOLO_MODEL", "yolo11n-seg.pt")
+_YOLO_DEVICE = os.environ.get("GRIPSENSE_YOLO_DEVICE", "cpu").lower()
 _REALSENSE_PIPELINE: Any | None = None
 _REALSENSE_ALIGN: Any | None = None
 _REALSENSE_RS: Any | None = None
@@ -335,6 +338,50 @@ async def analyze_rfdetr_frame(
         latencyMs=latency_ms,
         model=_RFDETR_MODEL_NAME,
         device=_RFDETR_DEVICE,
+    )
+
+
+@app.post("/api/yolo/analyze", response_model=RfdetrAnalyzeResponse)
+async def analyze_yolo_frame(
+    frame: UploadFile = File(...),
+    width: int | None = Form(default=None),
+    height: int | None = Form(default=None),
+    mirrored: bool = Form(default=False),
+    handLandmarks: str | None = Form(default=None),
+    threshold: float = Form(default=0.25),
+) -> RfdetrAnalyzeResponse:
+    """Run YOLO segmentation on a JPEG frame and return the RF-DETR-shaped contract.
+
+    V11 uses the same browser grip scoring as V8. Labels are diagnostic only;
+    the frontend still rejects person detections and scores object evidence by
+    hand proximity, mask overlap, and temporal continuity.
+    """
+
+    del width, height, mirrored
+    if handLandmarks:
+        try:
+            json.loads(handLandmarks)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="handLandmarks must be JSON when provided")
+
+    model = get_yolo_model()
+    start = time.perf_counter()
+    image_bytes = await frame.read()
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+
+    try:
+        results = model.predict(image, conf=float(threshold), device=_YOLO_DEVICE, verbose=False)
+    except Exception as exc:  # pragma: no cover - depends on local model install/runtime.
+        raise HTTPException(status_code=500, detail=f"YOLO inference failed: {exc}") from exc
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    first_result = results[0] if results else None
+    detections = normalize_yolo_detections(first_result, latency_ms)
+    return RfdetrAnalyzeResponse(
+        detections=detections,
+        latencyMs=latency_ms,
+        model=_YOLO_MODEL_NAME,
+        device=_YOLO_DEVICE,
     )
 
 
@@ -514,6 +561,24 @@ def get_rfdetr_model() -> tuple[Any, dict[int, str] | list[str] | None]:
     return _RFDETR_MODEL, _RFDETR_CLASSES
 
 
+def get_yolo_model() -> Any:
+    global _YOLO_MODEL
+    if _YOLO_MODEL is not None:
+        return _YOLO_MODEL
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:  # pragma: no cover - depends on optional local dependency.
+        raise HTTPException(
+            status_code=503,
+            detail="YOLO is not installed. Run `pip install -r local-inference/requirements.txt`.",
+        ) from exc
+    try:
+        _YOLO_MODEL = YOLO(_YOLO_MODEL_NAME)
+    except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
+        raise HTTPException(status_code=503, detail=f"YOLO model could not load: {exc}") from exc
+    return _YOLO_MODEL
+
+
 def normalize_rfdetr_detections(raw_detections: Any, classes: dict[int, str] | list[str] | None, latency_ms: float) -> list[RfdetrDetectionResponse]:
     xyxy = np.asarray(getattr(raw_detections, "xyxy", []), dtype=float)
     confidence = np.asarray(getattr(raw_detections, "confidence", []), dtype=float)
@@ -546,6 +611,72 @@ def normalize_rfdetr_detections(raw_detections: Any, classes: dict[int, str] | l
             )
         )
     return responses
+
+
+def normalize_yolo_detections(result: Any, latency_ms: float) -> list[RfdetrDetectionResponse]:
+    if result is None:
+        return []
+    boxes = getattr(result, "boxes", None)
+    if boxes is None or getattr(boxes, "xyxy", None) is None:
+        return []
+    xyxy = tensor_to_numpy(boxes.xyxy)
+    confidence = tensor_to_numpy(getattr(boxes, "conf", []))
+    raw_class_ids = tensor_to_numpy(getattr(boxes, "cls", []))
+    class_ids = raw_class_ids.astype(int) if len(raw_class_ids) else np.asarray([], dtype=int)
+    names = getattr(result, "names", None)
+    masks = getattr(result, "masks", None)
+    mask_polygons = getattr(masks, "xy", None) if masks is not None else None
+    mask_data = tensor_to_numpy(getattr(masks, "data", [])) if masks is not None and getattr(masks, "data", None) is not None else None
+    responses: list[RfdetrDetectionResponse] = []
+
+    for index, box in enumerate(np.asarray(xyxy, dtype=float)):
+        if box.shape[0] < 4:
+            continue
+        x1, y1, x2, y2 = [float(value) for value in box[:4]]
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        score = clamp(float(confidence[index])) if index < len(confidence) else 0.0
+        class_id = int(class_ids[index]) if index < len(class_ids) else -1
+        label = class_label(names, class_id)
+        polygon = yolo_mask_polygon(mask_polygons[index] if mask_polygons is not None and index < len(mask_polygons) else None, (x1, y1, x2, y2))
+        mask_area = float(np.asarray(mask_data[index], dtype=bool).sum()) if mask_data is not None and index < len(mask_data) else width * height
+        responses.append(
+            RfdetrDetectionResponse(
+                id=f"yolo-{index}-{class_id}",
+                label=label,
+                score=score,
+                bbox=RfdetrBBox(x=x1, y=y1, width=width, height=height),
+                maskPolygon=[RfdetrPoint(x=point[0], y=point[1]) for point in polygon],
+                maskArea=mask_area,
+                center=RfdetrPoint(x=x1 + width / 2, y=y1 + height / 2),
+                latencyMs=latency_ms,
+            )
+        )
+    return responses
+
+
+def tensor_to_numpy(value: Any) -> np.ndarray:
+    if value is None:
+        return np.asarray([])
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        return np.asarray(value.numpy())
+    return np.asarray(value)
+
+
+def yolo_mask_polygon(mask_points: Any, box: tuple[float, float, float, float]) -> list[tuple[float, float]]:
+    if mask_points is None:
+        return bbox_polygon(box)
+    points = np.asarray(mask_points, dtype=float)
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] < 2:
+        return bbox_polygon(box)
+    if points.shape[0] > 64:
+        step = max(1, points.shape[0] // 64)
+        points = points[::step]
+    return [(float(point[0]), float(point[1])) for point in points]
 
 
 def class_label(classes: dict[int, str] | list[str] | None, class_id: int) -> str:

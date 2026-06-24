@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_RFDETR_PROXY_ENDPOINT,
+  DEFAULT_YOLO_ENDPOINT,
   EMPTY_RFDETR_TRACK,
+  YOLO_PROVIDER,
   analyzeGripWithRfdetr,
   compensateRfdetrResponseForHandMotion,
   isRfdetrResultFresh,
@@ -17,6 +19,10 @@ import type { Landmark } from './types';
 describe('RF-DETR grip analysis', () => {
   it('exposes a same-origin RF-DETR proxy endpoint for V10', () => {
     expect(DEFAULT_RFDETR_PROXY_ENDPOINT).toBe('/api/gripsense/rfdetr/analyze');
+  });
+
+  it('exposes a same-origin YOLO proxy endpoint for V11', () => {
+    expect(DEFAULT_YOLO_ENDPOINT).toBe('/api/gripsense/yolo/analyze');
   });
 
   it('lets a near RF-DETR mask enable grip scoring', () => {
@@ -240,6 +246,43 @@ describe('RF-DETR grip analysis', () => {
     expect(result.analysis.gripPercentage).toBe(0);
     expect(result.analysis.confidence).toBe(0);
     expect(result.analysis.message).toContain('RF-DETR unavailable');
+    expect(result.analysis.diagnostics.issueCategory).toBe('server_unavailable');
+  });
+
+  it('lets V11 YOLO use the V8 grip scoring contract with YOLO object identity', () => {
+    const result = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [objectDetection({ id: 'yolo-0-39', label: 'bottle', score: 0.87 })],
+      previousPalm: { x: 326, y: 346 },
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      persistentSlipScore: 0.02,
+      serverAvailable: true,
+      provider: YOLO_PROVIDER
+    });
+
+    expect(result.object?.detectorLabel).toBe('yolo:yolo-0-39');
+    expect(result.objectIdentity.name).toContain('YOLO');
+    expect(result.analysis.gripPercentage).toBeGreaterThan(35);
+  });
+
+  it('reports YOLO unavailable without fake confidence', () => {
+    const result = analyzeGripWithRfdetr({
+      hand: phoneGripHand(),
+      detections: [],
+      previousPalm: null,
+      previousObject: null,
+      previousTrack: EMPTY_RFDETR_TRACK,
+      now: 1000,
+      serverAvailable: false,
+      unavailableMessage: 'YOLO unavailable',
+      provider: YOLO_PROVIDER
+    });
+
+    expect(result.analysis.gripPercentage).toBe(0);
+    expect(result.analysis.confidence).toBe(0);
+    expect(result.analysis.message).toContain('YOLO unavailable');
     expect(result.analysis.diagnostics.issueCategory).toBe('server_unavailable');
   });
 
