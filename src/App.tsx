@@ -105,6 +105,7 @@ const INITIAL_MODEL_STATUS: VisionModelStatus = {
 const CALIBRATION_STORAGE_KEY = 'grip-lab-calibration-profiles-v2';
 const ALGORITHM_VERSION_STORAGE_KEY = 'grip-lab-algorithm-version';
 const OBJECT_PROFILES_STORAGE_KEY = 'grip-lab-object-profiles-v2';
+const GRIP_DISPLAY_MODE_STORAGE_KEY = 'grip-lab-grip-display-mode';
 const VITE_ENV = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const RFDETR_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_ENDPOINT ?? DEFAULT_RFDETR_ENDPOINT;
@@ -194,6 +195,9 @@ type V11DisplayState = {
   analysis: GripAnalysis | null;
   timestamp: number;
 };
+
+type GripDisplayMode = 'label' | 'percentage';
+type GripLevel = 'none' | 'mild' | 'moderate' | 'strong';
 
 type OfflineTimelinePoint = {
   time: number;
@@ -436,6 +440,7 @@ export default function App() {
   const [uploadOnlyStatus, setUploadOnlyStatus] = useState('');
   const [modelStatus, setModelStatus] = useState<VisionModelStatus>(INITIAL_MODEL_STATUS);
   const [analysis, setAnalysis] = useState<GripAnalysis>(() => createEmptyAnalysis());
+  const [gripDisplayMode, setGripDisplayMode] = useState<GripDisplayMode>(() => readInitialGripDisplayMode());
   const [mirrored, setMirrored] = useState(true);
   const [paused, setPaused] = useState(false);
   const [locked, setLocked] = useState(false);
@@ -496,6 +501,10 @@ export default function App() {
   useEffect(() => {
     analysisRef.current = analysis;
   }, [analysis]);
+
+  useEffect(() => {
+    saveGripDisplayMode(gripDisplayMode);
+  }, [gripDisplayMode]);
 
   useEffect(() => {
     lockObjectRef.current = locked;
@@ -2788,7 +2797,7 @@ export default function App() {
                   YOLO
                 </button>
               </div>
-              <h2>{analysis.gripPercentage}%</h2>
+              <GripLevelDisplay analysis={analysis} mode={gripDisplayMode} compact />
               <strong>
                 {offlineBatchProcessing
                   ? 'Batch processing video'
@@ -2923,6 +2932,7 @@ export default function App() {
                 </button>
               </div>
               {offlineVideoExportStatus && <p className="offline-export-status">{offlineVideoExportStatus}</p>}
+              <GripDisplaySettings mode={gripDisplayMode} onChange={setGripDisplayMode} compact />
             </div>
           </div>
         )}
@@ -3183,10 +3193,7 @@ export default function App() {
       )}
 
       {mediaMode === 'live' && <aside className="analysis-rail" aria-label="Grip analysis">
-        <div className={`score-orb ${analysis.guidance.toLowerCase().replaceAll(' ', '-')}`}>
-          <span>{analysis.gripPercentage}</span>
-          <small>%</small>
-        </div>
+        <GripLevelDisplay analysis={analysis} mode={gripDisplayMode} />
         <div>
           <p className="eyebrow">Grip quality</p>
           <h2 className="explain-heading">
@@ -3673,6 +3680,8 @@ export default function App() {
             <p>Lock an object to reveal grip points.</p>
           )}
         </div>
+
+        <GripDisplaySettings mode={gripDisplayMode} onChange={setGripDisplayMode} />
       </aside>}
     </main>
   );
@@ -5177,6 +5186,78 @@ function GlassMetric({ label, value, danger = false }: { label: string; value: n
   );
 }
 
+function GripDisplaySettings({
+  mode,
+  onChange,
+  compact = false
+}: {
+  mode: GripDisplayMode;
+  onChange: (mode: GripDisplayMode) => void;
+  compact?: boolean;
+}) {
+  return (
+    <div className={`display-settings-panel ${compact ? 'compact' : ''}`} aria-label="Display settings">
+      <div className="motion-header">
+        <Eye size={18} />
+        <span>Display</span>
+      </div>
+      <div className="display-mode-toggle" role="group" aria-label="Grip display mode">
+        <button
+          type="button"
+          className={mode === 'label' ? 'active' : ''}
+          onClick={() => onChange('label')}
+        >
+          Labels
+        </button>
+        <button
+          type="button"
+          className={mode === 'percentage' ? 'active' : ''}
+          onClick={() => onChange('percentage')}
+        >
+          Percent
+        </button>
+      </div>
+      <div className="grip-legend" aria-label="Grip label legend">
+        <span className="none">No grip</span>
+        <span className="mild">Mild</span>
+        <span className="moderate">Moderate</span>
+        <span className="strong">Strong</span>
+      </div>
+    </div>
+  );
+}
+
+function GripLevelDisplay({ analysis, mode, compact = false }: { analysis: GripAnalysis; mode: GripDisplayMode; compact?: boolean }) {
+  const level = gripLevelForAnalysis(analysis);
+  const meterPercent = gripLevelMeterPercent(level, analysis.gripPercentage);
+  const className = `grip-level-display ${compact ? 'compact' : ''} ${level.kind}`;
+  if (mode === 'percentage') {
+    return (
+      <div className={`${className} percentage-mode`}>
+        <div className="score-orb-content">
+          <span>{analysis.gripPercentage}</span>
+          <small>%</small>
+        </div>
+        <div className="grip-band-meter" aria-hidden="true">
+          <span style={{ width: `${meterPercent}%` }} />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={className}>
+      <div className="grip-level-chip">
+        <span>{level.label}</span>
+        <small>{level.colorLabel}</small>
+      </div>
+      <div className="grip-band-meter" aria-hidden="true">
+        <span style={{ width: `${meterPercent}%` }} />
+      </div>
+      <p>{level.description}</p>
+    </div>
+  );
+}
+
 function Metric({ label, value, text, info }: { label: string; value: number; text?: string; info: string }) {
   return (
     <div className="metric">
@@ -5442,6 +5523,70 @@ function messageForStabilizedV11Guidance(guidance: GripAnalysis['guidance']) {
   if (guidance === 'Improve grip') return 'Grip is usable; hold still or improve thumb support if the boundary drifts.';
   if (guidance === 'Reposition') return 'Reposition the object deeper between the thumb and fingers.';
   return 'Object not locked. Move an object into the hand area or improve visibility.';
+}
+
+function gripLevelForAnalysis(analysis: GripAnalysis): { kind: GripLevel; label: string; colorLabel: string; description: string } {
+  const notLocked =
+    analysis.gripPercentage < 25 ||
+    analysis.confidence < 0.18 ||
+    analysis.diagnostics.state === 'No hand' ||
+    analysis.diagnostics.state === 'Hand only' ||
+    analysis.guidance === 'Object not locked';
+  if (notLocked) {
+    return {
+      kind: 'none',
+      label: 'No grip',
+      colorLabel: 'Gray',
+      description: 'No reliable grip is detected.'
+    };
+  }
+  if (analysis.gripPercentage >= 75 && analysis.objectLockQuality >= 0.55) {
+    return {
+      kind: 'strong',
+      label: 'Strong grip',
+      colorLabel: 'Green',
+      description: 'Stable object contact is visible.'
+    };
+  }
+  if (analysis.gripPercentage >= 50) {
+    return {
+      kind: 'moderate',
+      label: 'Moderate grip',
+      colorLabel: 'Yellow',
+      description: 'Grip is usable but not fully stable.'
+    };
+  }
+  return {
+    kind: 'mild',
+    label: 'Mild grip',
+    colorLabel: 'Red',
+    description: 'Weak contact; improve support.'
+  };
+}
+
+function gripLevelMeterPercent(level: { kind: GripLevel }, gripPercentage: number) {
+  if (level.kind === 'none') return 8;
+  if (level.kind === 'mild') return Math.max(25, Math.min(49, gripPercentage));
+  if (level.kind === 'moderate') return Math.max(50, Math.min(74, gripPercentage));
+  return Math.max(75, Math.min(100, gripPercentage));
+}
+
+function readInitialGripDisplayMode(): GripDisplayMode {
+  try {
+    const saved = window.localStorage.getItem(GRIP_DISPLAY_MODE_STORAGE_KEY);
+    return saved === 'percentage' ? 'percentage' : 'label';
+  } catch (error) {
+    console.warn('Failed to read grip display mode', error);
+    return 'label';
+  }
+}
+
+function saveGripDisplayMode(mode: GripDisplayMode) {
+  try {
+    window.localStorage.setItem(GRIP_DISPLAY_MODE_STORAGE_KEY, mode);
+  } catch (error) {
+    console.warn('Failed to save grip display mode', error);
+  }
 }
 
 function readInitialAlgorithmVersion(): AlgorithmVersion {

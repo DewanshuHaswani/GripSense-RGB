@@ -825,6 +825,134 @@ button {
   color: #a8b3c1;
 }
 
+.grip-level-display {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  width: 184px;
+  min-height: 184px;
+  margin: 8px auto 0;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  color: #f8fafc;
+  background:
+    conic-gradient(from -90deg, rgba(148, 163, 184, 0.7), rgba(30, 41, 59, 0.92), rgba(255, 255, 255, 0.08)),
+    rgba(15, 23, 42, 0.78);
+  box-shadow: 0 0 44px rgba(148, 163, 184, 0.12);
+  text-align: center;
+}
+
+.grip-level-display.mild {
+  background:
+    conic-gradient(from -90deg, rgba(248, 113, 113, 0.92), rgba(127, 29, 29, 0.58), rgba(255, 255, 255, 0.08)),
+    rgba(15, 23, 42, 0.78);
+  box-shadow: 0 0 44px rgba(248, 113, 113, 0.16);
+}
+
+.grip-level-display.moderate {
+  background:
+    conic-gradient(from -90deg, rgba(250, 204, 21, 0.94), rgba(120, 113, 23, 0.5), rgba(255, 255, 255, 0.08)),
+    rgba(15, 23, 42, 0.78);
+  box-shadow: 0 0 44px rgba(250, 204, 21, 0.16);
+}
+
+.grip-level-display.strong {
+  background:
+    conic-gradient(from -90deg, rgba(74, 222, 128, 0.94), rgba(20, 83, 45, 0.54), rgba(255, 255, 255, 0.08)),
+    rgba(15, 23, 42, 0.78);
+  box-shadow: 0 0 44px rgba(74, 222, 128, 0.18);
+}
+
+.grip-level-display.compact {
+  width: 100%;
+  min-height: 118px;
+  margin: 0;
+  border-radius: 10px;
+}
+
+.grip-level-chip {
+  display: grid;
+  gap: 4px;
+  max-width: 138px;
+}
+
+.grip-level-chip span {
+  color: #ffffff;
+  font-size: 1.5rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.grip-level-display.compact .grip-level-chip span {
+  font-size: 1.35rem;
+}
+
+.grip-level-chip small,
+.grip-level-display p {
+  color: rgba(226, 232, 240, 0.84);
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.grip-level-display p {
+  max-width: 136px;
+  margin: 0;
+  font-weight: 700;
+}
+
+.grip-level-display.percentage-mode .score-orb-content {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+}
+
+.grip-level-display.percentage-mode .score-orb-content span {
+  font-size: 4rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.grip-level-display.compact.percentage-mode .score-orb-content span {
+  font-size: 3rem;
+}
+
+.grip-level-display.percentage-mode .score-orb-content small {
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.grip-band-meter {
+  width: min(118px, 100%);
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.38);
+}
+
+.grip-band-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #94a3b8;
+  transition: width 180ms ease;
+}
+
+.grip-level-display.mild .grip-band-meter span {
+  background: #f87171;
+}
+
+.grip-level-display.moderate .grip-band-meter span {
+  background: #facc15;
+}
+
+.grip-level-display.strong .grip-band-meter span {
+  background: #4ade80;
+}
+
 .eyebrow {
   margin: 0 0 8px;
   color: var(--cyan);
@@ -967,11 +1095,94 @@ h2 {
 .trainer-panel,
 .grip-points,
 .v3-panel,
-.diagnostics-panel {
+.diagnostics-panel,
+.display-settings-panel {
   display: grid;
   gap: 12px;
   padding: 16px;
   border-radius: 8px;
+}
+
+.display-settings-panel {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(14, 21, 30, 0.46);
+}
+
+.display-settings-panel.compact {
+  gap: 8px;
+  padding: 10px;
+}
+
+.display-settings-panel.compact .motion-header {
+  font-size: 0.78rem;
+}
+
+.display-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(2, 6, 12, 0.24);
+}
+
+.display-mode-toggle button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  color: #94a3b8;
+  background: transparent;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.display-settings-panel.compact .display-mode-toggle button {
+  min-height: 28px;
+  font-size: 0.74rem;
+}
+
+.display-mode-toggle button.active {
+  color: #071018;
+  background: #a7f3d0;
+}
+
+.grip-legend {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.grip-legend span {
+  display: grid;
+  place-items: center;
+  min-height: 28px;
+  border-radius: 999px;
+  color: #0f172a;
+  font-size: 0.68rem;
+  font-weight: 950;
+}
+
+.display-settings-panel.compact .grip-legend span {
+  min-height: 24px;
+  font-size: 0.62rem;
+}
+
+.grip-legend .none {
+  color: #e2e8f0;
+  background: #64748b;
+}
+
+.grip-legend .mild {
+  background: #f87171;
+}
+
+.grip-legend .moderate {
+  background: #facc15;
+}
+
+.grip-legend .strong {
+  background: #4ade80;
 }
 
 .v3-panel {
