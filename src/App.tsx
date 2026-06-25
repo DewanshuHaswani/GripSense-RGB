@@ -49,6 +49,7 @@ import {
 import { drawTrackingOverlay } from './vision/drawing';
 import { createVisionEngine, type VisionEngine, type VisionModelStatus } from './vision/visionEngine';
 import { TrackingStabilizer } from './vision/stabilization';
+import { SiriWave } from '@/components/ui/siri-wave';
 import { createV3AnalyzeFrameRequest, DEFAULT_V3_ENDPOINT, requestV3FrameAnalysis } from './vision/v3Inference';
 import {
   analyzeGripWithRfdetr,
@@ -197,6 +198,13 @@ type V11DisplayState = {
   softLossStartedAt: number | null;
 };
 
+type V11ObjectEvidence = {
+  objectScore: number;
+  contact: number;
+  hasObject: boolean;
+  missedFrames: number;
+};
+
 type GripDisplayMode = 'label' | 'percentage';
 type GripLevel = 'none' | 'mild' | 'moderate' | 'strong';
 
@@ -251,6 +259,48 @@ function offlineVersionLabel(version: OfflineReviewVersion) {
   if (version === 'v3') return 'Offline V3 RealSense';
   if (version === 'v2') return 'Offline V2';
   return 'Offline V1';
+}
+
+const TRAINING_TARGET_VERSIONS: AlgorithmVersion[] = ['v11', 'v8', 'v10', 'v9', 'v4', 'v5', 'v6'];
+
+function normalizeTrainingTargetVersion(version: AlgorithmVersion) {
+  return TRAINING_TARGET_VERSIONS.includes(version) ? version : 'v11';
+}
+
+function trainingTargetInfoForVersion(version: AlgorithmVersion) {
+  if (version === 'v11') {
+    return {
+      version,
+      shortLabel: 'YOLO',
+      description: 'This profile assists V11 only: YOLO finds the object mask, then the trained profile verifies/names that object and can stabilize the lock. It does not retrain YOLO weights.'
+    };
+  }
+  if (version === 'v8' || version === 'v10') {
+    return {
+      version,
+      shortLabel: 'RF-DETR',
+      description: `${version.toUpperCase()} uses RF-DETR masks. Profiles are saved locally and can assist identity checks, but RF-DETR model weights are not retrained in the browser.`
+    };
+  }
+  if (version === 'v9') {
+    return {
+      version,
+      shortLabel: 'RealSense',
+      description: 'V9 uses RF-DETR RGB masks plus RealSense depth. Profiles are local identity assists; D455/D435 depth improves contact, not the profile itself.'
+    };
+  }
+  if (version === 'v4' || version === 'v5' || version === 'v6') {
+    return {
+      version,
+      shortLabel: `${version.toUpperCase()} local`,
+      description: `${version.toUpperCase()} uses these profiles directly for local object identity tracking. Multiple object-only angles and negative examples improve matching.`
+    };
+  }
+  return {
+    version: 'v11' as AlgorithmVersion,
+    shortLabel: 'YOLO',
+    description: 'Profiles are most useful in V11 YOLO, V8/V10 RF-DETR, V9 RealSense, and V4/V5/V6 trained-object modes. Select one of those targets before training.'
+  };
 }
 
 type RecordedClip = {
@@ -331,15 +381,15 @@ const EXPLAIN = {
   thumbSupport: 'How much the thumb appears to support or oppose the fingers.',
   motionStability: 'How stable the object-hand motion is over recent frames.',
   calibration: 'How much saved strong/weak calibration is affecting the current score.',
-  objectTrainer: 'Open a separate enrollment portal. Live grip scoring pauses there so you can capture or upload object images without needing the app to believe a grip is already happening.',
-  trainerSteps: 'The guided flow is add object images, review quality suggestions, train a local profile, save it, then enable it for live detection.',
+  objectTrainer: 'Open a separate enrollment portal. Live grip scoring pauses there so you can capture or upload object images without needing the app to believe a grip is already happening. In V11 this creates a local profile assist for YOLO masks; it does not retrain YOLO weights.',
+  trainerSteps: 'The guided flow is add object images, review quality suggestions, train a local profile, save it, then enable it. V11 uses enabled profiles to verify and name YOLO objects.',
   captureView: 'Captures the current webcam frame as an object training image. Center the object in the frame; the app will warn if the image looks weak but will not block you.',
   uploadView: 'Adds object images from your computer. Use multiple angles, backgrounds, and distances to make matching more reliable.',
-  trainProfile: 'Asks for an object name, then builds a local visual profile. This is profile matching, not a neural fine-tune.',
+  trainProfile: 'Asks for an object name, then builds a local visual profile with augmented positive and negative descriptors. It fine-tunes local matching for this browser, not the base YOLO/RF-DETR neural weights.',
   clearViews: 'Removes the temporary captured views before training. Already trained profiles stay saved.',
   folderSave: 'Mirrors trained profiles and thumbnails into a local folder when the browser supports folder access.',
-  objectIdentity: 'How closely the current locked object matches the trained profile. Low match blocks strong grip in V2.',
-  trainedProfiles: 'Saved local object profiles. Enabled profiles are used for live matching; disabled profiles stay saved but are ignored.',
+  objectIdentity: 'How closely the current locked object matches the trained profile. V11 uses this as a YOLO profile assist after YOLO finds the mask.',
+  trainedProfiles: 'Saved local object profiles. Enabled profiles are used by V4/V5/V6 and as V11 YOLO profile assist; disabled profiles stay saved but are ignored.',
   v4Temporal: 'V4/V5/V6 require the same enabled trained object to match across several frames before it turns green. This reduces flicker and wrong detections.',
   v5Target: 'V5/V6 combine the base object detector with trained profiles. V5 prefers explicit target selection; V6 can also auto-follow the best hand-near object with sticky tracking.',
   contactGate: 'V5/V6 require current visual contact between the selected object and hand. If the object drops away, grip cannot remain high.',
@@ -374,6 +424,7 @@ export default function App() {
   const autoRetryRef = useRef(false);
   const stabilizerRef = useRef(new TrackingStabilizer());
   const algorithmVersionRef = useRef<AlgorithmVersion>(readInitialAlgorithmVersion());
+  const trainingTargetVersionRef = useRef<AlgorithmVersion>(normalizeTrainingTargetVersion(algorithmVersionRef.current));
   const calibrationProfilesRef = useRef<GripCalibrationProfiles>({});
   const objectProfilesRef = useRef<ObjectProfileV2[]>([]);
   const objectDetectionRef = useRef<ObjectProfileMatch>(null);
@@ -449,6 +500,7 @@ export default function App() {
   const [hasCalibration, setHasCalibration] = useState(false);
   const [calibrationKind, setCalibrationKind] = useState<'strong' | 'weak'>('strong');
   const [algorithmVersion, setAlgorithmVersion] = useState<AlgorithmVersion>(() => algorithmVersionRef.current);
+  const [trainingTargetVersion, setTrainingTargetVersion] = useState<AlgorithmVersion>(() => trainingTargetVersionRef.current);
   const [objectName, setObjectName] = useState('');
   const [trainingSamples, setTrainingSamples] = useState<ObjectTrainingSampleV2[]>([]);
   const [pendingUploads, setPendingUploads] = useState<PendingUploadReview[]>([]);
@@ -1466,7 +1518,7 @@ export default function App() {
           algorithmVersion: offlineV1StyleReview ? 'v2' : fallbackAlgorithmVersion,
           objectIdentity
         });
-        let rfdetrSelectionMetrics: { objectScore: number; contact: number; latencyMs: number | null } | null = null;
+        let rfdetrSelectionMetrics: { objectScore: number; contact: number; latencyMs: number | null; hasObject: boolean; missedFrames: number } | null = null;
         let realsenseSelectionMetrics: { depthContact: number; depthSeparation: number; stereoConfidence: number } | null = null;
         if (liveRfdetrReview || liveRealSenseReview || liveYoloReview || offlineEnhancedReview) {
           const latestRfdetr = rfdetrRuntimeRef.current;
@@ -1507,7 +1559,14 @@ export default function App() {
                   })
                 : analyzeGripWithRfdetr(sharedRfdetrOptions);
             rfdetrTrackRef.current = rfdetrGrip.track;
-            if (liveRfdetrReview || liveRealSenseReview || rfdetrGrip.object) {
+            rfdetrSelectionMetrics = {
+              objectScore: rfdetrGrip.selection.objectScore,
+              contact: rfdetrGrip.selection.contact,
+              latencyMs: latestRfdetr.latencyMs,
+              hasObject: Boolean(rfdetrGrip.object),
+              missedFrames: rfdetrGrip.track.missedFrames
+            };
+            if (liveRfdetrReview || liveRealSenseReview || liveYoloReview || rfdetrGrip.object) {
               object = rfdetrGrip.object;
               objectIdentity = rfdetrGrip.objectIdentity;
               objectDetectionRef.current = rfdetrGrip.objectIdentity.name
@@ -1520,11 +1579,31 @@ export default function App() {
                 : null;
               setObjectDetection(objectDetectionRef.current);
               baseFrameAnalysis = rfdetrGrip.analysis;
-              rfdetrSelectionMetrics = {
-                objectScore: rfdetrGrip.selection.objectScore,
-                contact: rfdetrGrip.selection.contact,
-                latencyMs: latestRfdetr.latencyMs
-              };
+              if (liveYoloReview && rfdetrGrip.object && enabledProfiles.length) {
+                const yoloProfileDescriptor = browserObjectDescriptorProvider.describe(video, rfdetrGrip.object);
+                const yoloProfileMatch = matchObjectProfiles(yoloProfileDescriptor, enabledProfiles, {
+                  threshold: 0.54,
+                  margin: 0.04,
+                  useExemplars: true
+                });
+                if (yoloProfileMatch) {
+                  objectDetectionRef.current = {
+                    profileId: yoloProfileMatch.profileId,
+                    name: yoloProfileMatch.name,
+                    score: yoloProfileMatch.score,
+                    matched: yoloProfileMatch.matched
+                  };
+                  setObjectDetection(objectDetectionRef.current);
+                  objectIdentity = {
+                    hasProfiles: true,
+                    score: Math.max(rfdetrGrip.objectIdentity.score, yoloProfileMatch.score),
+                    matched: yoloProfileMatch.matched,
+                    name: yoloProfileMatch.matched ? yoloProfileMatch.name : rfdetrGrip.objectIdentity.name,
+                    source: yoloProfileMatch.matched ? 'trained' : 'base'
+                  };
+                  baseFrameAnalysis = applyV11YoloProfileAssist(baseFrameAnalysis, yoloProfileMatch);
+                }
+              }
               realsenseSelectionMetrics =
                 liveRealSenseReview || offlineDepthReview
                   ? {
@@ -1553,7 +1632,12 @@ export default function App() {
         } else if (liveRfdetrReview || liveRealSenseReview || liveYoloReview) {
           frameAnalysis = baseFrameAnalysis;
           if (liveYoloReview) {
-            const stabilizedV11 = stabilizeV11DisplayAnalysis(baseFrameAnalysis, v11DisplayRef.current, timestamp);
+            const stabilizedV11 = stabilizeV11DisplayAnalysis(baseFrameAnalysis, v11DisplayRef.current, timestamp, {
+              objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
+              contact: rfdetrSelectionMetrics?.contact ?? 0,
+              hasObject: rfdetrSelectionMetrics?.hasObject ?? false,
+              missedFrames: rfdetrSelectionMetrics?.missedFrames ?? 0
+            });
             v11DisplayRef.current = stabilizedV11.state;
             frameAnalysis = stabilizedV11.analysis;
           }
@@ -1859,11 +1943,23 @@ export default function App() {
     [algorithmVersion, resetRealSenseRuntime, resetRfdetrRuntime, resetV3Runtime]
   );
 
+  const selectTrainingTargetVersion = useCallback((version: AlgorithmVersion) => {
+    const targetVersion = normalizeTrainingTargetVersion(version);
+    trainingTargetVersionRef.current = targetVersion;
+    setTrainingTargetVersion(targetVersion);
+    const target = trainingTargetInfoForVersion(targetVersion);
+    setTrainingStatus(`${target.shortLabel} profile assist selected. Capture/upload object images, train locally, then enable the profile.`);
+  }, []);
+
   const openTrainerPortal = useCallback(() => {
     pausedBeforeTrainerRef.current = pausedRef.current;
     setPaused(true);
     setTrainerOpen(true);
-    setTrainingStatus('Live grip scoring is paused. Capture webcam frames or upload object images.');
+    const targetVersion = normalizeTrainingTargetVersion(algorithmVersionRef.current);
+    trainingTargetVersionRef.current = targetVersion;
+    setTrainingTargetVersion(targetVersion);
+    const target = trainingTargetInfoForVersion(targetVersion);
+    setTrainingStatus(`${target.shortLabel} profile assist selected. Capture/upload object images, train locally, then enable the profile.`);
   }, []);
 
   const closeTrainerPortal = useCallback(() => {
@@ -2105,7 +2201,8 @@ export default function App() {
         setFolderStatus('Folder write failed.');
       }
     }
-    setTrainingStatus(result.message + folderMessage + ' Enable it below, then resume live tracking to verify detection.');
+    const target = trainingTargetInfoForVersion(trainingTargetVersionRef.current);
+    setTrainingStatus(`${target.shortLabel} profile assist trained. ${result.message}${folderMessage} Enable it below, then resume live tracking to verify detection.`);
     targetProfileIdRef.current = profile.id;
     targetBaseIdRef.current = null;
     setTargetProfileId(profile.id);
@@ -2499,6 +2596,19 @@ export default function App() {
   const offlineBatchProcessing = mediaMode === 'offline' && isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'processing';
   const offlineV2ExportLocked = isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase !== 'complete';
   const offlineMaxEvidenceMode = offlineMaxEvidenceLabel(chooseOfflineMaxEvidenceMode(offlineTimeline));
+  const offlineProcessingActive = mediaMode === 'offline' && offlineAnalysisPhase === 'processing';
+  const trainingTargetInfo = trainingTargetInfoForVersion(trainingTargetVersion);
+  const offlineProcessingMessage = uploadOnlyMode
+    ? `${uploadOnlyStatus || 'Upload V1 is processing the finalized download.'} ${offlineTimeline.length} pts`
+    : offlineReviewVersion === 'max'
+      ? `Scanning full video for Offline Max. It will choose D455 RGB-D when enough depth evidence exists, otherwise RGB/RF-DETR... ${offlineTimeline.length} pts`
+      : offlineReviewVersion === 'yoloMax'
+        ? `Scanning full video for Offline YOLO Max correction before preview/export... ${offlineTimeline.length} pts`
+        : offlineReviewVersion === 'v3'
+          ? `Scanning full video for V3 RealSense RGB-D correction before preview/export... ${offlineTimeline.length} pts`
+          : offlineReviewVersion === 'v2'
+            ? `Scanning full video for V2 RF-DETR correction before preview/export... ${offlineTimeline.length} pts`
+            : 'Preparing frame analysis...';
 
   return (
     <main
@@ -2757,6 +2867,19 @@ export default function App() {
           </div>
         )}
 
+        {offlineProcessingActive && !trainerOpen && (
+          <div className="offline-processing-stage" role="status" aria-live="polite" aria-label="Offline video processing">
+            <div className="offline-processing-card">
+              <SiriWave variant="wave" size={260} renderScale={0.58} className="offline-siri-wave" />
+              <div className="offline-processing-copy">
+                <p className="eyebrow">{offlineVersionLabel(offlineReviewVersion)}</p>
+                <strong>Processing video</strong>
+                <span>{offlineProcessingMessage}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {mediaMode === 'offline' && cameraState === 'live' && !trainerOpen && (
           <div className="offline-review-overlay" aria-label="Offline grip video review">
             <div className="offline-glass-panel offline-left">
@@ -2882,19 +3005,7 @@ export default function App() {
               {offlineAnalysisPhase === 'processing' && (
                 <div className="offline-processing">
                   <span />
-                  <strong>
-                    {uploadOnlyMode
-                      ? `${uploadOnlyStatus} ${offlineTimeline.length} pts`
-                      : offlineReviewVersion === 'max'
-                      ? `Scanning full video for Offline Max. It will choose D455 RGB-D when enough depth evidence exists, otherwise RGB/RF-DETR... ${offlineTimeline.length} pts`
-                      : offlineReviewVersion === 'yoloMax'
-                      ? `Scanning full video for Offline YOLO Max correction before preview/export... ${offlineTimeline.length} pts`
-                      : offlineReviewVersion === 'v3'
-                      ? `Scanning full video for V3 RealSense RGB-D correction before preview/export... ${offlineTimeline.length} pts`
-                      : offlineReviewVersion === 'v2'
-                      ? `Scanning full video for V2 RF-DETR correction before preview/export... ${offlineTimeline.length} pts`
-                      : 'Preparing frame analysis...'}
-                  </strong>
+                  <strong>{offlineProcessingMessage}</strong>
                 </div>
               )}
               <div className="offline-timeline" aria-label="Offline analysis timeline">
@@ -2982,10 +3093,27 @@ export default function App() {
                   ))}
                   <InlineExplain label="Explain training steps" text={EXPLAIN.trainerSteps} compact />
                 </div>
+                <label className="training-target-field">
+                  <span>Profile target</span>
+                  <select
+                    value={trainingTargetInfo.version}
+                    onChange={(event) => selectTrainingTargetVersion(event.target.value as AlgorithmVersion)}
+                    aria-label="Object profile target detector"
+                  >
+                    <option value="v11">V11 YOLO profile assist</option>
+                    <option value="v8">V8 RF-DETR profile assist</option>
+                    <option value="v10">V10 RF-DETR proxy assist</option>
+                    <option value="v9">V9 RealSense + RF-DETR assist</option>
+                    <option value="v4">V4 local trained identity</option>
+                    <option value="v5">V5 local target detector</option>
+                    <option value="v6">V6 local sticky detector</option>
+                  </select>
+                </label>
+                <p className="diagnostic-copy">{trainingTargetInfo.description}</p>
                 <div className="training-coverage-panel">
                   <div className="motion-header compact-heading">
                     <span>
-                      V4 training coverage
+                      Profile fine-tune coverage
                       <InlineExplain label="Explain profile strength" text={EXPLAIN.profileStrength} compact />
                     </span>
                     <strong>{Math.round(trainerCoverage * 100)}%</strong>
@@ -3000,7 +3128,7 @@ export default function App() {
                       </span>
                     ))}
                   </div>
-                  <p className="diagnostic-copy">Expected result: {trainerStrength}. Add negative examples to reduce false positives.</p>
+                  <p className="diagnostic-copy">Expected result: {trainerStrength}. Add negative examples to reduce false positives for {trainingTargetInfo.shortLabel}.</p>
                 </div>
                 <div className="portal-actions">
                   <button type="button" onClick={captureObjectTrainingView}>
@@ -3163,7 +3291,7 @@ export default function App() {
                 <div className="portal-train-row">
                   <button type="button" onClick={trainObjectProfile}>
                     <Sparkles size={16} />
-                    Train profile
+                    Train {trainingTargetInfo.shortLabel} profile
                   </button>
                   <button type="button" onClick={clearTrainingSamples}>
                     Clear images
@@ -3369,6 +3497,10 @@ export default function App() {
             <Images size={17} />
             Open training portal
           </button>
+          <div className="training-target-summary">
+            <span>{trainingTargetInfo.shortLabel} profile assist</span>
+            <strong>{trainingTargetInfo.version === 'v11' ? 'V11 only' : trainingTargetInfo.version.toUpperCase()}</strong>
+          </div>
           <p className="diagnostic-copy">{trainingStatus}</p>
           <div className={objectDetection?.matched ? 'detected-object matched' : 'detected-object'}>
             <Box size={17} />
@@ -4206,10 +4338,11 @@ function profileLiveStatus(
 ) {
   if (profile.enabled === false) return { kind: 'disabled', label: 'disabled' };
   const isDetected = detection?.profileId === profile.id && detection.matched;
+  const matchLabel = detection?.score ? `match ${Math.round(detection.score * 100)}%` : 'in frame';
   if (isDetected && analysis.gripPercentage > 0 && ['Grip detected', 'Strong hold', 'Slip risk'].includes(analysis.diagnostics.state)) {
-    return { kind: 'gripping', label: 'grip active' };
+    return { kind: 'gripping', label: matchLabel };
   }
-  if (isDetected) return { kind: 'visible', label: 'in frame' };
+  if (isDetected) return { kind: 'visible', label: matchLabel };
   if (candidate?.matched) return { kind: 'candidate', label: 'candidate' };
   if (candidate) return { kind: 'enabled', label: `${Math.round(candidate.score * 100)}%` };
   return { kind: 'enabled', label: 'enabled' };
@@ -5440,13 +5573,63 @@ function selectCalibrationBaseline(
   return profiles[mode]?.[kind] ?? null;
 }
 
+function applyV11YoloProfileAssist(
+  analysis: GripAnalysis,
+  match: NonNullable<ObjectProfileMatch>
+): GripAnalysis {
+  const profileScore = clampUnit(match.score);
+  const profileBoost = match.matched ? profileScore * 0.12 : 0;
+  const confidence = match.matched
+    ? Math.max(analysis.confidence, clampUnit(analysis.confidence + profileBoost))
+    : analysis.confidence;
+  const objectLockQuality = match.matched
+    ? Math.max(analysis.objectLockQuality, clampUnit(analysis.objectLockQuality + profileBoost * 0.72))
+    : analysis.objectLockQuality;
+  return {
+    ...analysis,
+    confidence,
+    objectLockQuality,
+    objectIdentityScore: Math.max(analysis.objectIdentityScore, profileScore),
+    objectIdentityName: match.matched ? match.name : analysis.objectIdentityName,
+    objectIdentityMatched: match.matched,
+    hasObjectProfiles: true,
+    evidence: {
+      ...analysis.evidence,
+      objectLockQuality: Math.max(analysis.evidence.objectLockQuality, objectLockQuality),
+      independentObjectScore: Math.max(analysis.evidence.independentObjectScore, match.matched ? profileScore : analysis.evidence.independentObjectScore),
+      positiveReasons: match.matched
+        ? [...analysis.evidence.positiveReasons, `YOLO crop matches trained profile ${match.name}`]
+        : analysis.evidence.positiveReasons,
+      negativeReasons: match.matched
+        ? analysis.evidence.negativeReasons.filter((reason) => !reason.toLowerCase().includes('identity'))
+        : [...analysis.evidence.negativeReasons, 'YOLO crop did not strongly match an enabled profile']
+    },
+    diagnostics: {
+      ...analysis.diagnostics,
+      objectIssue: match.matched ? null : analysis.diagnostics.objectIssue,
+      recommendation: match.matched
+        ? `YOLO object verified against trained profile ${match.name}.`
+        : analysis.diagnostics.recommendation
+    }
+  };
+}
+
 function stabilizeV11DisplayAnalysis(
   analysis: GripAnalysis,
   previousState: V11DisplayState,
-  timestamp: number
+  timestamp: number,
+  objectEvidence: V11ObjectEvidence
 ): { analysis: GripAnalysis; state: V11DisplayState } {
   const previous = previousState.analysis;
   const dt = Math.max(16, timestamp - previousState.timestamp);
+  const hasCurrentObjectEvidence =
+    objectEvidence.hasObject &&
+    objectEvidence.objectScore >= 0.12 &&
+    objectEvidence.contact >= 0.12;
+  const hasNoCurrentObjectEvidence =
+    !objectEvidence.hasObject ||
+    objectEvidence.objectScore < 0.08 ||
+    objectEvidence.contact < 0.08;
   const lockCollapsed =
     analysis.gripPercentage <= 18 ||
     analysis.confidence <= 0.24 ||
@@ -5463,6 +5646,8 @@ function stabilizeV11DisplayAnalysis(
     const lossAge = timestamp - softLossStartedAt;
     const canBridgeDetectorBlink =
       analysis.diagnostics.issueCategory !== 'server_unavailable' &&
+      hasCurrentObjectEvidence &&
+      objectEvidence.missedFrames > 0 &&
       previous.gripPercentage >= 48 &&
       previous.objectLockQuality >= 0.42 &&
       previous.confidence >= 0.36 &&
@@ -5515,6 +5700,9 @@ function stabilizeV11DisplayAnalysis(
     analysis.confidence >= 0.52 &&
     analysis.evidence.fingerSegmentContactScore >= 0.38 &&
     analysis.slipRisk < 0.42;
+  if (hasNoCurrentObjectEvidence && analysis.guidance === 'Object not locked') {
+    return { analysis, state: { analysis, timestamp, softLossStartedAt: null } };
+  }
   const deadband = stableLock ? 7 : 3;
   const gripDelta = analysis.gripPercentage - previous.gripPercentage;
   const holdGrip = stableLock && Math.abs(gripDelta) <= deadband;
