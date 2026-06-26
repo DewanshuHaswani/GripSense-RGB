@@ -448,6 +448,7 @@ V12 still does not trust YOLO class labels for grip quality. It uses mask/box ev
 - Object-in-hand validation: thumb/finger corridor contact, visible boundary contact, temporal continuity, and detector object score must agree.
 - Partial-grip support: thumb plus one or two fingers can produce a real grip label when YOLO sees the object and contact is visible.
 - Short blink smoothing: one or two missed YOLO frames can be bridged with fast decay, but real object loss drops to gray/no grip quickly.
+- Motion/edge-on grace: after a stable YOLO lock, V12 can briefly hold a degraded object overlay during fast blur or a thin side-view phone angle while the hand still looks wrapped around the same object. The hold expires quickly, and open-hand or no-hand evidence immediately returns to gray/no grip.
 - Label-free output: generic YOLO names such as `bottle`, `brush`, or `remote` are not used as grip labels.
 
 This follows the same direction as hand-object interaction work that emphasizes contact and temporal consistency rather than category names. Useful references: [ContactPose](https://contactpose.cc.gatech.edu/), [HOI4D](https://hoi4d.github.io/), [DexYCB](https://dex-ycb.github.io/), and [HOT3D](https://github.com/facebookresearch/hot3d).

@@ -11,6 +11,7 @@ export type V12DisplayState = {
   analysis: GripAnalysis | null;
   timestamp: number;
   softLossStartedAt: number | null;
+  lastStableAt?: number | null;
 };
 
 type V12Validation = {
@@ -27,6 +28,8 @@ const V12_EMPTY_HAND_CAP = 18;
 const V12_WEAK_OBJECT_CAP = 24;
 const V12_LOW_CONTACT_CAP = 34;
 const V12_BRIDGE_MS = 420;
+const V12_MOTION_BRIDGE_MS = 760;
+const V12_EDGE_ON_BRIDGE_MS = 1180;
 
 export function applyV12ProductionGripGate(
   analysis: GripAnalysis,
@@ -85,55 +88,91 @@ export function stabilizeV12DisplayAnalysis(
   timestamp: number,
   objectEvidence: V12ObjectEvidence
 ): { analysis: GripAnalysis; state: V12DisplayState } {
+  const rawValidation = validateV12ObjectInHand(rawAnalysis, objectEvidence);
   const gated = applyV12ProductionGripGate(rawAnalysis, objectEvidence);
   const previous = previousState.analysis;
   const validation = validateV12ObjectInHand(gated, objectEvidence);
 
   if (!previous) {
-    return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null } };
+    return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null, lastStableAt: stableTimestamp(gated, rawValidation, timestamp, null) } };
   }
 
   const dt = Math.max(16, timestamp - previousState.timestamp);
   const collapsed = gated.gripPercentage <= V12_EMPTY_HAND_CAP || gated.guidance === 'Object not locked';
+  const previousStable =
+    previous.gripPercentage >= 42 &&
+    previous.objectLockQuality >= 0.42 &&
+    previous.confidence >= 0.34;
+  const stableAge = timestamp - (previousState.lastStableAt ?? previousState.timestamp);
+  const currentGripLike =
+    rawValidation.partialGripScore >= 0.34 ||
+    rawValidation.contactScore >= 0.16 ||
+    rawAnalysis.closureScore >= 0.42 ||
+    (rawAnalysis.evidence.modeScores['phone-side grip'] ?? 0) >= 0.38 ||
+    (rawAnalysis.evidence.modeScores['power grip'] ?? 0) >= 0.42 ||
+    (rawAnalysis.evidence.modeScores['pinch grip'] ?? 0) >= 0.42;
+  const currentClearlyEmpty =
+    rawAnalysis.diagnostics.state === 'No hand' ||
+    ((rawAnalysis.evidence.modeScores['open hand'] ?? 0) >= 0.78 && rawAnalysis.closureScore < 0.24) ||
+    (rawValidation.emptyHandScore >= 0.78 && rawValidation.partialGripScore < 0.26);
   const canBridgeDetectorBlink =
     collapsed &&
     gated.diagnostics.issueCategory !== 'server_unavailable' &&
     objectEvidence.missedFrames > 0 &&
     objectEvidence.missedFrames <= 2 &&
-    validation.objectInHandScore >= 0.34 &&
-    validation.emptyHandScore < 0.5 &&
-    previous.gripPercentage >= 42 &&
-    previous.objectLockQuality >= 0.42 &&
-    previous.confidence >= 0.34;
+    rawValidation.objectInHandScore >= 0.28 &&
+    rawValidation.emptyHandScore < 0.64 &&
+    previousStable &&
+    currentGripLike &&
+    !currentClearlyEmpty;
+  const canBridgeEdgeOnOrBlur =
+    collapsed &&
+    gated.diagnostics.issueCategory !== 'server_unavailable' &&
+    previousStable &&
+    stableAge <= V12_EDGE_ON_BRIDGE_MS &&
+    objectEvidence.missedFrames <= 5 &&
+    currentGripLike &&
+    rawValidation.emptyHandScore < 0.72 &&
+    !currentClearlyEmpty;
 
   if (collapsed) {
-    if (!canBridgeDetectorBlink) {
-      return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null } };
+    const bridgeMs = canBridgeDetectorBlink ? V12_MOTION_BRIDGE_MS : V12_EDGE_ON_BRIDGE_MS;
+    if (!canBridgeDetectorBlink && !canBridgeEdgeOnOrBlur) {
+      return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null, lastStableAt: previousState.lastStableAt ?? null } };
     }
 
     const softLossStartedAt = previousState.softLossStartedAt ?? timestamp;
     const lossAge = timestamp - softLossStartedAt;
-    if (lossAge > V12_BRIDGE_MS) {
-      return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null } };
+    if (lossAge > bridgeMs) {
+      return { analysis: gated, state: { analysis: gated, timestamp, softLossStartedAt: null, lastStableAt: previousState.lastStableAt ?? null } };
     }
 
-    const decay = clampUnit(lossAge / V12_BRIDGE_MS);
-    const gripPercentage = Math.round(Math.max(26, previous.gripPercentage * (1 - decay * 0.6)));
-    const confidence = clampUnit(Math.max(0.24, previous.confidence * (1 - decay * 0.5)));
-    const objectLockQuality = clampUnit(Math.max(0.24, previous.objectLockQuality * (1 - decay * 0.54)));
+    const decay = clampUnit(lossAge / bridgeMs);
+    const minimumGrip = canBridgeDetectorBlink ? 26 : 20;
+    const confidenceFloor = canBridgeDetectorBlink ? 0.24 : 0.18;
+    const lockFloor = canBridgeDetectorBlink ? 0.24 : 0.18;
+    const gripPercentage = Math.round(Math.max(minimumGrip, previous.gripPercentage * (1 - decay * 0.66)));
+    const confidence = clampUnit(Math.max(confidenceFloor, previous.confidence * (1 - decay * 0.58)));
+    const objectLockQuality = clampUnit(Math.max(lockFloor, previous.objectLockQuality * (1 - decay * 0.62)));
     const analysis: GripAnalysis = {
       ...gated,
       gripPercentage,
       confidence,
       objectLockQuality,
       guidance: gripPercentage >= 45 ? 'Improve grip' : 'Reposition',
-      message: 'YOLO briefly missed the object; V12 is holding a degraded estimate while checking for real separation.',
+      message: canBridgeDetectorBlink
+        ? 'YOLO briefly missed the object during motion; V12 is holding a degraded estimate while checking for real separation.'
+        : 'V12 is bridging an edge-on or blurred object from the last stable lock while the hand still looks wrapped around it.',
       evidence: {
         ...gated.evidence,
         objectLockQuality,
         temporalLockScore: Math.max(gated.evidence.temporalLockScore, previous.evidence.temporalLockScore * (1 - decay * 0.55)),
         visibleContactScore: Math.max(gated.evidence.visibleContactScore, previous.evidence.visibleContactScore * (1 - decay * 0.52)),
-        fingerSegmentContactScore: Math.max(gated.evidence.fingerSegmentContactScore, previous.evidence.fingerSegmentContactScore * (1 - decay * 0.52))
+        fingerSegmentContactScore: Math.max(gated.evidence.fingerSegmentContactScore, previous.evidence.fingerSegmentContactScore * (1 - decay * 0.52)),
+        negativeReasons: [
+          ...gated.evidence.negativeReasons,
+          canBridgeDetectorBlink ? 'V12 motion bridge active' : 'V12 edge-on bridge active'
+        ]
       },
       diagnostics: {
         ...gated.diagnostics,
@@ -143,7 +182,7 @@ export function stabilizeV12DisplayAnalysis(
         objectIssue: 'Short YOLO miss bridged with fast decay; persistent object loss is not smoothed.'
       }
     };
-    return { analysis, state: { analysis, timestamp, softLossStartedAt } };
+    return { analysis, state: { analysis, timestamp, softLossStartedAt, lastStableAt: previousState.lastStableAt ?? previousState.timestamp } };
   }
 
   const stableObject =
@@ -173,7 +212,7 @@ export function stabilizeV12DisplayAnalysis(
     }
   };
 
-  return { analysis, state: { analysis, timestamp, softLossStartedAt: null } };
+  return { analysis, state: { analysis, timestamp, softLossStartedAt: null, lastStableAt: stableTimestamp(analysis, validation, timestamp, previousState.lastStableAt ?? null) } };
 }
 
 export function validateV12ObjectInHand(analysis: GripAnalysis, objectEvidence: V12ObjectEvidence): V12Validation {
@@ -353,4 +392,14 @@ function smooth(previous: number, next: number, alpha: number) {
 
 function clampUnit(value: number) {
   return Math.min(1, Math.max(0, value));
+}
+
+function stableTimestamp(analysis: GripAnalysis, validation: V12Validation, timestamp: number, fallback: number | null) {
+  const stable =
+    validation.objectInHandScore >= 0.52 &&
+    analysis.objectLockQuality >= 0.5 &&
+    analysis.confidence >= 0.38 &&
+    analysis.gripPercentage >= 38 &&
+    analysis.diagnostics.issueCategory !== 'server_unavailable';
+  return stable ? timestamp : fallback;
 }

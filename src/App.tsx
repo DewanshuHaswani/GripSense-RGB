@@ -128,6 +128,21 @@ function rfdetrEndpointForVersion(version: AlgorithmVersion) {
   return version === 'v10' ? RFDETR_PROXY_ENDPOINT : RFDETR_ENDPOINT;
 }
 
+function translateObjectRegion(object: ObjectRegion, delta: Point, confidence: number): ObjectRegion {
+  const translatePoint = (point: Point): Point => ({ x: point.x + delta.x, y: point.y + delta.y });
+  return {
+    ...object,
+    center: translatePoint(object.center),
+    contour: object.contour.map(translatePoint),
+    velocity: delta,
+    confidence: Math.min(object.confidence, Math.max(0.16, confidence)),
+    locked: false,
+    lockAgeFrames: Math.max(0, (object.lockAgeFrames ?? 0) - 1),
+    detectorScore: object.detectorScore ? object.detectorScore * 0.82 : object.detectorScore,
+    relativeDriftScore: Math.max(object.relativeDriftScore ?? 0, distance({ x: 0, y: 0 }, delta) / Math.max(1, object.radiusX + object.radiusY))
+  };
+}
+
 type LocalWritableFile = {
   write(data: Blob | string): Promise<void>;
   close(): Promise<void>;
@@ -455,7 +470,7 @@ export default function App() {
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
   const v11DisplayRef = useRef<V11DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null });
-  const v12DisplayRef = useRef<V12DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null });
+  const v12DisplayRef = useRef<V12DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -1651,6 +1666,15 @@ export default function App() {
             });
             v12DisplayRef.current = stabilizedV12.state;
             frameAnalysis = stabilizedV12.analysis;
+            if (!object && hand && previousPalmRef.current && frameAnalysis.gripPercentage > 0) {
+              const heldObject = previousObjectRef.current;
+              const currentPalm = palmCenter(hand);
+              const delta = subtract(currentPalm, previousPalmRef.current);
+              const allowedDrift = Math.max(42, handSize(hand) * 0.95);
+              if (heldObject?.detectorLabel?.startsWith(`${YOLO_PROVIDER.idPrefix}:`) && distance({ x: 0, y: 0 }, delta) <= allowedDrift) {
+                object = translateObjectRegion(heldObject, delta, frameAnalysis.objectLockQuality);
+              }
+            }
           } else if (liveYoloReview) {
             const stabilizedV11 = stabilizeV11DisplayAnalysis(baseFrameAnalysis, v11DisplayRef.current, timestamp, {
               objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
@@ -1890,7 +1914,7 @@ export default function App() {
       liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
       rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
       v11DisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null };
-      v12DisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null };
+      v12DisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null };
       targetProfileIdRef.current = null;
       targetBaseIdRef.current = null;
       stabilizerRef.current.reset();

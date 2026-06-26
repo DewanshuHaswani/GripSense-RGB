@@ -109,6 +109,86 @@ describe('V12 YOLO production grip gate', () => {
     expect(bridged.analysis.guidance).not.toBe('Object not locked');
   });
 
+  it('bridges an edge-on phone angle briefly when the hand still wraps the last stable object', () => {
+    const previous = analysisFixture({
+      gripPercentage: 84,
+      confidence: 0.78,
+      objectLockQuality: 0.74,
+      closureScore: 0.66,
+      mode: 'phone-side grip',
+      state: 'Strong hold',
+      contact: 0.48,
+      thumb: 0.7,
+      index: 0.56,
+      middle: 0.44,
+      phoneSide: 0.78,
+      openHand: 0.05
+    });
+    const edgeOnMiss = analysisFixture({
+      gripPercentage: 0,
+      confidence: 0,
+      objectLockQuality: 0,
+      closureScore: 0.5,
+      mode: 'phone-side grip',
+      state: 'Hand only',
+      contact: 0.12,
+      thumb: 0.46,
+      index: 0.38,
+      middle: 0.26,
+      phoneSide: 0.52,
+      openHand: 0.18
+    });
+    const state: V12DisplayState = { analysis: previous, timestamp: 1000, softLossStartedAt: null, lastStableAt: 1000 };
+    const bridged = stabilizeV12DisplayAnalysis(edgeOnMiss, state, 1380, {
+      objectScore: 0,
+      contact: 0,
+      hasObject: false,
+      missedFrames: 3
+    });
+
+    expect(bridged.analysis.gripPercentage).toBeGreaterThan(20);
+    expect(bridged.analysis.guidance).not.toBe('Object not locked');
+    expect(bridged.analysis.message).toContain('edge-on');
+  });
+
+  it('expires the edge-on bridge instead of holding a stale object indefinitely', () => {
+    const previous = analysisFixture({
+      gripPercentage: 84,
+      confidence: 0.78,
+      objectLockQuality: 0.74,
+      closureScore: 0.66,
+      mode: 'phone-side grip',
+      state: 'Strong hold',
+      contact: 0.48,
+      thumb: 0.7,
+      index: 0.56,
+      phoneSide: 0.78,
+      openHand: 0.05
+    });
+    const current = analysisFixture({
+      gripPercentage: 0,
+      confidence: 0,
+      objectLockQuality: 0,
+      closureScore: 0.5,
+      mode: 'phone-side grip',
+      state: 'Hand only',
+      contact: 0.12,
+      thumb: 0.46,
+      index: 0.38,
+      phoneSide: 0.52,
+      openHand: 0.18
+    });
+    const expired = stabilizeV12DisplayAnalysis(
+      current,
+      { analysis: previous, timestamp: 1000, softLossStartedAt: 1000, lastStableAt: 1000 },
+      2300,
+      { objectScore: 0, contact: 0, hasObject: false, missedFrames: 5 }
+    );
+
+    expect(expired.analysis.gripPercentage).toBe(0);
+    expect(expired.analysis.guidance).toBe('Object not locked');
+  });
+
   it('drops quickly when the object is really gone from the hand', () => {
     const previous = analysisFixture({
       gripPercentage: 78,
