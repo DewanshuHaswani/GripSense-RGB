@@ -81,6 +81,7 @@ import {
   requestRealSenseDepthSignal,
   type RealSenseRuntime
 } from './vision/realsense';
+import { stabilizeV12DisplayAnalysis, type V12DisplayState } from './vision/v12Grip';
 import { chooseOfflineMaxEvidenceMode, offlineMaxEvidenceLabel } from './vision/offlineMax';
 import { EMPTY_TEMPORAL_IDENTITY, temporalIdentityToMatch, updateTemporalIdentity, type TemporalIdentityState } from './vision/temporalIdentity';
 import type {
@@ -123,7 +124,7 @@ const V5_BASE_TRACK_GRACE_MISSES = 6;
 const TRAINING_VIEW_ROLES: TrainingViewRole[] = ['front', 'side', 'rotated', 'in-hand', 'alone', 'negative'];
 
 function rfdetrEndpointForVersion(version: AlgorithmVersion) {
-  if (version === 'v11') return YOLO_ENDPOINT;
+  if (version === 'v11' || version === 'v12') return YOLO_ENDPOINT;
   return version === 'v10' ? RFDETR_PROXY_ENDPOINT : RFDETR_ENDPOINT;
 }
 
@@ -261,13 +262,20 @@ function offlineVersionLabel(version: OfflineReviewVersion) {
   return 'Offline V1';
 }
 
-const TRAINING_TARGET_VERSIONS: AlgorithmVersion[] = ['v11', 'v8', 'v10', 'v9', 'v4', 'v5', 'v6'];
+const TRAINING_TARGET_VERSIONS: AlgorithmVersion[] = ['v12', 'v11', 'v8', 'v10', 'v9', 'v4', 'v5', 'v6'];
 
 function normalizeTrainingTargetVersion(version: AlgorithmVersion) {
   return TRAINING_TARGET_VERSIONS.includes(version) ? version : 'v11';
 }
 
 function trainingTargetInfoForVersion(version: AlgorithmVersion) {
+  if (version === 'v12') {
+    return {
+      version,
+      shortLabel: 'V12 YOLO',
+      description: 'This profile assists V12 only: YOLO finds the object mask, then the trained profile can verify the object before V12 applies stricter object-in-hand scoring. It does not retrain YOLO weights.'
+    };
+  }
   if (version === 'v11') {
     return {
       version,
@@ -297,9 +305,9 @@ function trainingTargetInfoForVersion(version: AlgorithmVersion) {
     };
   }
   return {
-    version: 'v11' as AlgorithmVersion,
-    shortLabel: 'YOLO',
-    description: 'Profiles are most useful in V11 YOLO, V8/V10 RF-DETR, V9 RealSense, and V4/V5/V6 trained-object modes. Select one of those targets before training.'
+    version: 'v12' as AlgorithmVersion,
+    shortLabel: 'V12 YOLO',
+    description: 'Profiles are most useful in V12/V11 YOLO, V8/V10 RF-DETR, V9 RealSense, and V4/V5/V6 trained-object modes. Select one of those targets before training.'
   };
 }
 
@@ -361,7 +369,7 @@ const EXPLAIN = {
   grow: 'Grows the locked object region when the outline is too small and misses part of the object.',
   strong: 'Records your current pose as a strong grip baseline for this grip mode. It helps personalize future scores.',
   weak: 'Records your current pose as a weak grip baseline. Similar poses can be scored lower or shown as less confident.',
-  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, V9 for RealSense RGB-D live analysis, V10 for V8 RF-DETR through the local frontend proxy, or V11 for YOLO live masks.',
+  version: 'Choose V1 for the original permissive heuristic, V2 for stricter object-first scoring, V3 for local-server perception fusion, V4 for trained-object-first matching, V5 for target-object selection, V6 for offline-style sticky live tracking, V7 for the Offline V1 live copy, V8 for RF-DETR live masks, V9 for RealSense RGB-D live analysis, V10 for V8 RF-DETR through the local frontend proxy, V11 for YOLO live masks, or V12 for YOLO production scoring with stricter object-in-hand validation.',
   gripQuality: 'Visual grip stability estimated from the camera. It is not real physical force.',
   state: 'The tracking state says what the app believes is happening: no hand, hand only, object uncertain, grip detected, strong hold, or slip risk.',
   mode: 'Grip mode is the type of hold the app thinks it sees, such as phone-side, pinch, power, hook, open hand, or uncertain.',
@@ -381,15 +389,15 @@ const EXPLAIN = {
   thumbSupport: 'How much the thumb appears to support or oppose the fingers.',
   motionStability: 'How stable the object-hand motion is over recent frames.',
   calibration: 'How much saved strong/weak calibration is affecting the current score.',
-  objectTrainer: 'Open a separate enrollment portal. Live grip scoring pauses there so you can capture or upload object images without needing the app to believe a grip is already happening. In V11 this creates a local profile assist for YOLO masks; it does not retrain YOLO weights.',
-  trainerSteps: 'The guided flow is add object images, review quality suggestions, train a local profile, save it, then enable it. V11 uses enabled profiles to verify and name YOLO objects.',
+  objectTrainer: 'Open a separate enrollment portal. Live grip scoring pauses there so you can capture or upload object images without needing the app to believe a grip is already happening. In V12/V11 this creates a local profile assist for YOLO masks; it does not retrain YOLO weights.',
+  trainerSteps: 'The guided flow is add object images, review quality suggestions, train a local profile, save it, then enable it. V12/V11 use enabled profiles to verify and name YOLO objects.',
   captureView: 'Captures the current webcam frame as an object training image. Center the object in the frame; the app will warn if the image looks weak but will not block you.',
   uploadView: 'Adds object images from your computer. Use multiple angles, backgrounds, and distances to make matching more reliable.',
   trainProfile: 'Asks for an object name, then builds a local visual profile with augmented positive and negative descriptors. It fine-tunes local matching for this browser, not the base YOLO/RF-DETR neural weights.',
   clearViews: 'Removes the temporary captured views before training. Already trained profiles stay saved.',
   folderSave: 'Mirrors trained profiles and thumbnails into a local folder when the browser supports folder access.',
-  objectIdentity: 'How closely the current locked object matches the trained profile. V11 uses this as a YOLO profile assist after YOLO finds the mask.',
-  trainedProfiles: 'Saved local object profiles. Enabled profiles are used by V4/V5/V6 and as V11 YOLO profile assist; disabled profiles stay saved but are ignored.',
+  objectIdentity: 'How closely the current locked object matches the trained profile. V12/V11 use this as a YOLO profile assist after YOLO finds the mask.',
+  trainedProfiles: 'Saved local object profiles. Enabled profiles are used by V4/V5/V6 and as V12/V11 YOLO profile assist; disabled profiles stay saved but are ignored.',
   v4Temporal: 'V4/V5/V6 require the same enabled trained object to match across several frames before it turns green. This reduces flicker and wrong detections.',
   v5Target: 'V5/V6 combine the base object detector with trained profiles. V5 prefers explicit target selection; V6 can also auto-follow the best hand-near object with sticky tracking.',
   contactGate: 'V5/V6 require current visual contact between the selected object and hand. If the object drops away, grip cannot remain high.',
@@ -447,6 +455,7 @@ export default function App() {
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
   const v11DisplayRef = useRef<V11DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null });
+  const v12DisplayRef = useRef<V12DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -1148,6 +1157,7 @@ export default function App() {
         algorithmVersionRef.current === 'v9' ||
         algorithmVersionRef.current === 'v10' ||
         algorithmVersionRef.current === 'v11' ||
+        algorithmVersionRef.current === 'v12' ||
         (mediaModeRef.current === 'offline' && isOfflineEnhancedVersion(offlineReviewVersionRef.current));
       if (!stillRelevant) return;
       if (result.ok) {
@@ -1266,7 +1276,8 @@ export default function App() {
         const liveOfflineV1Review = activeAlgorithmVersion === 'v7' && !offlineReview;
         const liveRfdetrReview = (activeAlgorithmVersion === 'v8' || activeAlgorithmVersion === 'v10') && !offlineReview;
         const liveRealSenseReview = activeAlgorithmVersion === 'v9' && !offlineReview;
-        const liveYoloReview = activeAlgorithmVersion === 'v11' && !offlineReview;
+        const liveYoloReview = (activeAlgorithmVersion === 'v11' || activeAlgorithmVersion === 'v12') && !offlineReview;
+        const liveV12Review = activeAlgorithmVersion === 'v12' && !offlineReview;
         const yoloDetectorReview = liveYoloReview || offlineYoloMaxReview;
         const detectorProvider = yoloDetectorReview ? YOLO_PROVIDER : RFDETR_PROVIDER;
         const offlineV1StyleReview = offlineReview || liveOfflineV1Review;
@@ -1582,7 +1593,7 @@ export default function App() {
               if (liveYoloReview && rfdetrGrip.object && enabledProfiles.length) {
                 const yoloProfileDescriptor = browserObjectDescriptorProvider.describe(video, rfdetrGrip.object);
                 const yoloProfileMatch = matchObjectProfiles(yoloProfileDescriptor, enabledProfiles, {
-                  threshold: 0.54,
+                  threshold: liveV12Review ? 0.52 : 0.54,
                   margin: 0.04,
                   useExemplars: true
                 });
@@ -1631,7 +1642,16 @@ export default function App() {
           );
         } else if (liveRfdetrReview || liveRealSenseReview || liveYoloReview) {
           frameAnalysis = baseFrameAnalysis;
-          if (liveYoloReview) {
+          if (liveV12Review) {
+            const stabilizedV12 = stabilizeV12DisplayAnalysis(baseFrameAnalysis, v12DisplayRef.current, timestamp, {
+              objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
+              contact: rfdetrSelectionMetrics?.contact ?? 0,
+              hasObject: rfdetrSelectionMetrics?.hasObject ?? false,
+              missedFrames: rfdetrSelectionMetrics?.missedFrames ?? 0
+            });
+            v12DisplayRef.current = stabilizedV12.state;
+            frameAnalysis = stabilizedV12.analysis;
+          } else if (liveYoloReview) {
             const stabilizedV11 = stabilizeV11DisplayAnalysis(baseFrameAnalysis, v11DisplayRef.current, timestamp, {
               objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
               contact: rfdetrSelectionMetrics?.contact ?? 0,
@@ -1870,6 +1890,7 @@ export default function App() {
       liveV6TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
       rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
       v11DisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null };
+      v12DisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null };
       targetProfileIdRef.current = null;
       targetBaseIdRef.current = null;
       stabilizerRef.current.reset();
@@ -1892,11 +1913,13 @@ export default function App() {
           ? 'V10 selected. It uses the V8 RF-DETR live algorithm through the local frontend proxy for stricter Windows browsers.'
           : version === 'v11'
           ? 'V11 selected. Start the local YOLO server to use live mask/box object evidence.'
+          : version === 'v12'
+          ? 'V12 selected. Start the local YOLO server; V12 adds stricter object-in-hand validation before scoring.'
           : 'V3 server idle. Select V3 and start tracking to begin fusion.'
       );
       resetRfdetrRuntime(
-        version === 'v11'
-          ? 'V11 selected. Start tracking to connect to the local YOLO server.'
+        version === 'v11' || version === 'v12'
+          ? `${version.toUpperCase()} selected. Start tracking to connect to the local YOLO server.`
           : version === 'v8' || version === 'v9' || version === 'v10'
           ? `${version.toUpperCase()} selected. Start tracking to connect to the local RF-DETR server.`
           : RFDETR_PROVIDER.idleMessage,
@@ -1934,6 +1957,8 @@ export default function App() {
             ? 'V10 selected. Same V8 RF-DETR grip analysis, routed through the local frontend proxy to avoid browser-side localhost/CORS/SSL blocking.'
             : version === 'v11'
             ? 'V11 selected. Same V8 grip analysis, using YOLO segmentation masks from the local CPU server instead of RF-DETR.'
+            : version === 'v12'
+            ? 'V12 selected. It uses YOLO masks plus stricter object-in-hand scoring so empty hands cannot keep a grip label.'
             : version === 'v2'
             ? 'V2 selected. It will require independent object evidence before scoring grip.'
             : 'V1 selected. It uses the original permissive grip heuristic.'
@@ -2671,6 +2696,7 @@ export default function App() {
                 <option value="v9">V9 · RealSense live</option>
                 <option value="v10">V10 · RF-DETR proxy live</option>
                 <option value="v11">V11 · YOLO live</option>
+                <option value="v12">V12 · YOLO production</option>
               </select>
             </label>
             <InlineExplain label="Explain algorithm version" text={EXPLAIN.version} compact />
@@ -3100,6 +3126,7 @@ export default function App() {
                     onChange={(event) => selectTrainingTargetVersion(event.target.value as AlgorithmVersion)}
                     aria-label="Object profile target detector"
                   >
+                    <option value="v12">V12 YOLO production assist</option>
                     <option value="v11">V11 YOLO profile assist</option>
                     <option value="v8">V8 RF-DETR profile assist</option>
                     <option value="v10">V10 RF-DETR proxy assist</option>
@@ -3403,14 +3430,14 @@ export default function App() {
           </div>
         )}
 
-        {(algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10' || algorithmVersion === 'v11') && (
+        {(algorithmVersion === 'v8' || algorithmVersion === 'v9' || algorithmVersion === 'v10' || algorithmVersion === 'v11' || algorithmVersion === 'v12') && (
           <div className="v3-panel">
             <div className="motion-header">
               <Activity size={18} />
-              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : algorithmVersion === 'v10' ? 'V10 RF-DETR proxy' : algorithmVersion === 'v11' ? 'V11 YOLO' : 'V8 RF-DETR'}</span>
+              <span>{algorithmVersion === 'v9' ? 'V9 RealSense' : algorithmVersion === 'v10' ? 'V10 RF-DETR proxy' : algorithmVersion === 'v12' ? 'V12 YOLO production' : algorithmVersion === 'v11' ? 'V11 YOLO' : 'V8 RF-DETR'}</span>
             </div>
             <div className={rfdetrRuntime.status === 'ready' ? 'v3-status ready' : 'v3-status fallback'}>
-              <span>{algorithmVersion === 'v9' ? `RF-DETR ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : algorithmVersion === 'v11' ? `YOLO ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
+              <span>{algorithmVersion === 'v9' ? `RF-DETR ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : algorithmVersion === 'v11' || algorithmVersion === 'v12' ? `YOLO ${formatRfdetrRuntimeStatus(rfdetrRuntime)}` : formatRfdetrRuntimeStatus(rfdetrRuntime)}</span>
               <strong>{rfdetrRuntime.status === 'ready' ? `${rfdetrRuntime.result?.detections.length ?? 0} obj` : '--'}</strong>
             </div>
             <p className={rfdetrRuntime.status === 'ready' ? 'diagnostic-copy' : 'diagnostic-copy warn'}>{rfdetrRuntime.message}</p>
@@ -3424,7 +3451,7 @@ export default function App() {
               </>
             )}
             <div className="v3-score-grid">
-              <V3Score label={algorithmVersion === 'v9' ? 'RGB object' : algorithmVersion === 'v11' ? 'YOLO object' : 'RF object'} value={objectDetection?.score ?? 0} />
+              <V3Score label={algorithmVersion === 'v9' ? 'RGB object' : algorithmVersion === 'v11' || algorithmVersion === 'v12' ? 'YOLO object' : 'RF object'} value={objectDetection?.score ?? 0} />
               <V3Score label={algorithmVersion === 'v9' ? 'Depth contact' : 'Contact'} value={algorithmVersion === 'v9' ? realsenseRuntime.result?.contactDepthScore ?? analysis.evidence.visibleContactScore : analysis.evidence.visibleContactScore} />
               <V3Score label="Lock" value={analysis.objectLockQuality} />
               <V3Score label="Confidence" value={analysis.confidence} />
@@ -3499,7 +3526,7 @@ export default function App() {
           </button>
           <div className="training-target-summary">
             <span>{trainingTargetInfo.shortLabel} profile assist</span>
-            <strong>{trainingTargetInfo.version === 'v11' ? 'V11 only' : trainingTargetInfo.version.toUpperCase()}</strong>
+            <strong>{trainingTargetInfo.version === 'v12' ? 'V12 only' : trainingTargetInfo.version === 'v11' ? 'V11 only' : trainingTargetInfo.version.toUpperCase()}</strong>
           </div>
           <p className="diagnostic-copy">{trainingStatus}</p>
           <div className={objectDetection?.matched ? 'detected-object matched' : 'detected-object'}>
@@ -5858,9 +5885,9 @@ function saveGripDisplayMode(mode: GripDisplayMode) {
 function readInitialAlgorithmVersion(): AlgorithmVersion {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('version');
-  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9' || fromUrl === 'v10' || fromUrl === 'v11') return fromUrl;
+  if (fromUrl === 'v1' || fromUrl === 'v2' || fromUrl === 'v3' || fromUrl === 'v4' || fromUrl === 'v5' || fromUrl === 'v6' || fromUrl === 'v7' || fromUrl === 'v8' || fromUrl === 'v9' || fromUrl === 'v10' || fromUrl === 'v11' || fromUrl === 'v12') return fromUrl;
   const fromStorage = window.localStorage.getItem(ALGORITHM_VERSION_STORAGE_KEY);
-  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9' || fromStorage === 'v10' || fromStorage === 'v11'
+  return fromStorage === 'v1' || fromStorage === 'v2' || fromStorage === 'v3' || fromStorage === 'v4' || fromStorage === 'v5' || fromStorage === 'v6' || fromStorage === 'v7' || fromStorage === 'v8' || fromStorage === 'v9' || fromStorage === 'v10' || fromStorage === 'v11' || fromStorage === 'v12'
     ? fromStorage
     : 'v5';
 }
