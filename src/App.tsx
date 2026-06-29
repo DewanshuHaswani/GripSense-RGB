@@ -471,6 +471,7 @@ export default function App() {
   const rfdetrTrackRef = useRef<RfdetrTrackState>(EMPTY_RFDETR_TRACK);
   const v11DisplayRef = useRef<V11DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null });
   const v12DisplayRef = useRef<V12DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null });
+  const offlineYoloMaxDisplayRef = useRef<V12DisplayState>({ analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null });
   const liveIdentityMemoryRef = useRef<LiveIdentityMemory>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -829,6 +830,7 @@ export default function App() {
     offlineReportRef.current = null;
     lastOfflineTimelineRef.current = 0;
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    offlineYoloMaxDisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null };
     setOfflineTimeline([]);
     setOfflineReport(null);
     setCameraState('live');
@@ -1685,6 +1687,25 @@ export default function App() {
             v11DisplayRef.current = stabilizedV11.state;
             frameAnalysis = stabilizedV11.analysis;
           }
+        } else if (offlineYoloMaxReview) {
+          const offlineYoloTimestamp = Math.max(0, video.currentTime * 1000);
+          const stabilizedOfflineYolo = stabilizeV12DisplayAnalysis(baseFrameAnalysis, offlineYoloMaxDisplayRef.current, offlineYoloTimestamp, {
+            objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
+            contact: rfdetrSelectionMetrics?.contact ?? 0,
+            hasObject: rfdetrSelectionMetrics?.hasObject ?? false,
+            missedFrames: rfdetrSelectionMetrics?.missedFrames ?? 0
+          });
+          offlineYoloMaxDisplayRef.current = stabilizedOfflineYolo.state;
+          frameAnalysis = stabilizedOfflineYolo.analysis;
+          if (!object && hand && previousPalmRef.current && frameAnalysis.gripPercentage > 0) {
+            const heldObject = previousObjectRef.current;
+            const currentPalm = palmCenter(hand);
+            const delta = subtract(currentPalm, previousPalmRef.current);
+            const allowedDrift = Math.max(42, handSize(hand) * 0.95);
+            if (heldObject?.detectorLabel?.startsWith(`${YOLO_PROVIDER.idPrefix}:`) && distance({ x: 0, y: 0 }, delta) <= allowedDrift) {
+              object = translateObjectRegion(heldObject, delta, frameAnalysis.objectLockQuality);
+            }
+          }
         } else {
           frameAnalysis = stabilizerRef.current.stabilizeAnalysis(baseFrameAnalysis, timestamp);
         }
@@ -2368,6 +2389,7 @@ export default function App() {
     offlineReportRef.current = null;
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     rfdetrTrackRef.current = EMPTY_RFDETR_TRACK;
+    offlineYoloMaxDisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null };
     resetRfdetrRuntime(
       version === 'max'
         ? 'Offline Max selected. RF-DETR masks will provide RGB object evidence; D455/RealSense depth will be used if available.'
@@ -4749,14 +4771,63 @@ function smoothOfflineTimeline(points: OfflineTimelinePoint[]) {
   });
 }
 
+function bridgeOfflineTimelineGeometry(points: OfflineTimelinePoint[]) {
+  if (points.length < 3) return points;
+  return points.map((point, index) => {
+    if (offlineTimelinePointHasGeometry(point) && point.lock >= 0.22 && point.objectMatch >= 0.2) return point;
+
+    const previous = findNearestObjectGeometry(points, index, -1);
+    const next = findNearestObjectGeometry(points, index, 1);
+    if (!previous || !next) return point;
+
+    const gap = next.time - previous.time;
+    if (gap <= 0 || gap > 1.15) return point;
+
+    const progress = clampNumber((point.time - previous.time) / gap, 0, 1);
+    const objectX = interpolateNumber(previous.objectX!, next.objectX!, progress);
+    const objectY = interpolateNumber(previous.objectY!, next.objectY!, progress);
+    const objectRadiusX = interpolateNumber(previous.objectRadiusX!, next.objectRadiusX!, progress);
+    const objectRadiusY = interpolateNumber(previous.objectRadiusY!, next.objectRadiusY!, progress);
+    const objectAngle = interpolateAngle(previous.objectAngle ?? 0, next.objectAngle ?? 0, progress);
+    const objectStrength = Math.min(
+      Math.max(previous.objectMatch, previous.lock),
+      Math.max(next.objectMatch, next.lock)
+    );
+    const handEvidence = Math.max(point.contact, point.thumb, point.enclosure, point.closure * 0.55);
+    if (point.palmX !== null && point.palmY !== null) {
+      const maxRadius = Math.max(objectRadiusX, objectRadiusY);
+      const palmDistance = distance({ x: objectX, y: objectY }, { x: point.palmX, y: point.palmY });
+      if (palmDistance > Math.max(285, maxRadius * 2.55) && handEvidence < 0.44) return point;
+    }
+
+    const bridgeStrength = clampUnit(objectStrength * 0.72 + handEvidence * 0.28);
+    return {
+      ...point,
+      objectX,
+      objectY,
+      objectRadiusX,
+      objectRadiusY,
+      objectAngle,
+      objectMatch: Math.max(point.objectMatch, Math.min(0.72, bridgeStrength)),
+      lock: Math.max(point.lock, Math.min(0.74, bridgeStrength * 0.96)),
+      confidence: Math.max(point.confidence, Math.min(0.78, bridgeStrength * 0.82)),
+      contact: Math.max(point.contact, Math.min(0.72, handEvidence)),
+      object: point.object || previous.object || next.object || 'tracked object',
+      guidance: point.guidance === 'Object uncertain' && bridgeStrength >= 0.42 ? 'Improve grip' : point.guidance,
+      state: point.state === 'Object uncertain' && bridgeStrength >= 0.42 ? 'Grip detected' : point.state
+    };
+  });
+}
+
 function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
   const smoothed = smoothOfflineTimeline(points);
-  if (smoothed.length < 3) return smoothed;
-  return smoothed.map((point, index) => {
-    const context = offlineTemporalContext(smoothed, point.time, 0.95);
+  const geometryBridged = bridgeOfflineTimelineGeometry(smoothed);
+  if (geometryBridged.length < 3) return geometryBridged;
+  return geometryBridged.map((point, index) => {
+    const context = offlineTemporalContext(geometryBridged, point.time, 0.95);
     const futurePastObject = context.filter((item) => item.objectMatch > 0.22 || item.lock > 0.24);
     const continuityScore = futurePastObject.length / Math.max(1, context.length);
-    const bridgeScore = offlineObjectBridgeScore(smoothed, index);
+    const bridgeScore = offlineObjectBridgeScore(geometryBridged, index);
     const proximityScore = offlinePointHandObjectProximity(point);
     const contextObjectMatch = average(context.map((item) => item.objectMatch));
     const contextLock = average(context.map((item) => item.lock));
@@ -4798,7 +4869,7 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
     const occlusionDrivenGrip = occlusionAwareHold
       ? Math.round(Math.max(wrapHoldScore * 94, Math.min(82, repairedLock * 84 + continuityScore * 10 + bridgeScore * 8)))
       : point.grip;
-    const slip = Math.max(point.slip, offlineMotionDivergence(smoothed, index));
+    const slip = Math.max(point.slip, offlineMotionDivergence(geometryBridged, index));
     const gripCeiling = slip > 0.62 ? 68 : 100;
     const grip = Math.max(point.grip, contactDrivenGrip, occlusionDrivenGrip);
     const correctedGrip = Math.min(grip, gripCeiling);
@@ -4951,6 +5022,37 @@ function findNearestObjectEvidence(points: OfflineTimelinePoint[], startIndex: n
     if (point.objectMatch > 0.24 || point.lock > 0.32) return point;
   }
   return null;
+}
+
+function findNearestObjectGeometry(points: OfflineTimelinePoint[], startIndex: number, direction: -1 | 1) {
+  for (let index = startIndex + direction; index >= 0 && index < points.length; index += direction) {
+    const point = points[index];
+    if (Math.abs(point.time - points[startIndex].time) > 0.85) return null;
+    if (offlineTimelinePointHasGeometry(point) && (point.objectMatch > 0.22 || point.lock > 0.28)) return point;
+  }
+  return null;
+}
+
+function offlineTimelinePointHasGeometry(point: OfflineTimelinePoint) {
+  return (
+    point.objectX !== null &&
+    point.objectY !== null &&
+    typeof point.objectRadiusX === 'number' &&
+    typeof point.objectRadiusY === 'number' &&
+    point.objectRadiusX > 0 &&
+    point.objectRadiusY > 0
+  );
+}
+
+function interpolateNumber(start: number, end: number, progress: number) {
+  return start + (end - start) * progress;
+}
+
+function interpolateAngle(start: number, end: number, progress: number) {
+  let delta = end - start;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return start + delta * progress;
 }
 
 function offlinePointHandObjectProximity(point: OfflineTimelinePoint) {

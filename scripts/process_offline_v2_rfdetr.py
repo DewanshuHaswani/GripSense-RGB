@@ -17,6 +17,11 @@ import requests
 
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:7867/api/rfdetr/analyze"
+DEFAULT_YOLO_ENDPOINT = "http://127.0.0.1:7867/api/yolo/analyze"
+PROVIDER_LABELS = {
+    "rfdetr": "Offline V2 RF-DETR",
+    "yolo-max": "Offline YOLO Max",
+}
 PERSON_LABELS = {"person"}
 BACKGROUND_LABELS = {
     "bed",
@@ -38,6 +43,7 @@ OBJECT_PRIOR = {
 }
 HANDHELD_AREA_MIN = 0.004
 HANDHELD_AREA_MAX = 0.22
+CONTACT_FLOOR = 0.18
 
 
 @dataclass
@@ -105,6 +111,94 @@ def spatial_continuity(detection: dict[str, Any], previous: dict[str, Any] | Non
 def detection_area_ratio(detection: dict[str, Any], width: int, height: int) -> float:
     _, _, w, h = detection_bbox(detection)
     return clamp((w * h) / max(1.0, width * height), 0.0, 4.0)
+
+
+def hand_contact_evidence(frame: Any, bbox: tuple[float, float, float, float]) -> float:
+    """Estimate hand/object contact from skin-colored pixels touching the object boundary.
+
+    The local YOLO model often keeps detecting a dropped can on the bed. That is useful
+    object evidence, but it should not become grip evidence unless a hand-like skin region
+    is actually adjacent to the object. This intentionally stays heuristic so the batch
+    script works on office laptops without a MediaPipe Python install.
+    """
+    height, width = frame.shape[:2]
+    x, y, w, h = bbox
+    if w <= 2 or h <= 2:
+        return 0.0
+
+    pad_x = max(12, int(w * 0.2))
+    pad_y = max(12, int(h * 0.2))
+    x0 = max(0, int(x) - pad_x)
+    y0 = max(0, int(y) - pad_y)
+    x1 = min(width, int(x + w) + pad_x)
+    y1 = min(height, int(y + h) + pad_y)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+
+    crop = frame[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
+
+    hsv_skin = cv2.inRange(hsv, (0, 22, 38), (28, 190, 255))
+    ycrcb_skin = cv2.inRange(ycrcb, (35, 132, 78), (255, 182, 135))
+    skin = cv2.bitwise_and(hsv_skin, ycrcb_skin)
+    skin = cv2.medianBlur(skin, 5)
+
+    local_x0 = max(0, int(x) - x0)
+    local_y0 = max(0, int(y) - y0)
+    local_x1 = min(x1 - x0, int(x + w) - x0)
+    local_y1 = min(y1 - y0, int(y + h) - y0)
+
+    ring = 255 * (skin >= 0).astype("uint8")
+    ring[local_y0:local_y1, local_x0:local_x1] = 0
+
+    band_pad = max(8, int(min(w, h) * 0.12))
+    bx0 = max(0, local_x0 - band_pad)
+    by0 = max(0, local_y0 - band_pad)
+    bx1 = min(x1 - x0, local_x1 + band_pad)
+    by1 = min(y1 - y0, local_y1 + band_pad)
+    boundary = 255 * (skin >= 0).astype("uint8")
+    boundary[:by0, :] = 0
+    boundary[by1:, :] = 0
+    boundary[:, :bx0] = 0
+    boundary[:, bx1:] = 0
+    boundary[local_y0:local_y1, local_x0:local_x1] = 0
+
+    ring_area = max(1, int((ring > 0).sum()))
+    boundary_area = max(1, int((boundary > 0).sum()))
+    ring_skin = float(((skin > 0) & (ring > 0)).sum()) / ring_area
+    boundary_skin = float(((skin > 0) & (boundary > 0)).sum()) / boundary_area
+    inside_skin = float((skin[local_y0:local_y1, local_x0:local_x1] > 0).sum()) / max(
+        1, (local_y1 - local_y0) * (local_x1 - local_x0)
+    )
+
+    def band_ratio(xa: int, ya: int, xb: int, yb: int) -> float:
+        xa = max(0, min(x1 - x0, xa))
+        xb = max(0, min(x1 - x0, xb))
+        ya = max(0, min(y1 - y0, ya))
+        yb = max(0, min(y1 - y0, yb))
+        if xb <= xa or yb <= ya:
+            return 0.0
+        region = skin[ya:yb, xa:xb]
+        return float((region > 0).sum()) / max(1, region.size)
+
+    left_skin = band_ratio(bx0, local_y0, local_x0, local_y1)
+    right_skin = band_ratio(local_x1, local_y0, bx1, local_y1)
+    top_skin = band_ratio(local_x0, by0, local_x1, local_y0)
+    bottom_skin = band_ratio(local_x0, local_y1, local_x1, by1)
+    side_hits = sum(1 for value in (left_skin, right_skin, top_skin, bottom_skin) if value > 0.045)
+
+    adjacent = clamp((boundary_skin - 0.025) / 0.18)
+    nearby = clamp((ring_skin - 0.015) / 0.13)
+    occluding = clamp((inside_skin - 0.055) / 0.18)
+    contact = clamp(adjacent * 0.42 + nearby * 0.18 + occluding * 0.4)
+    if side_hits <= 1 and occluding < 0.35:
+        contact = min(contact, 0.16)
+    elif side_hits <= 1:
+        contact = min(contact, 0.42)
+    elif side_hits == 2 and occluding < 0.18:
+        contact = min(contact, 0.62)
+    return contact
 
 
 def score_detection(detection: dict[str, Any], previous: dict[str, Any] | None, width: int, height: int) -> float:
@@ -288,7 +382,21 @@ def smooth_points(points: list[TrackPoint]) -> list[TrackPoint]:
         return points
     smoothed: list[TrackPoint] = []
     for index, point in enumerate(points):
-        neighbors = points[max(0, index - 2) : min(len(points), index + 3)]
+        neighbors = []
+        point_has_contact = point.contact >= CONTACT_FLOOR
+        for neighbor in points[max(0, index - 2) : min(len(points), index + 3)]:
+            neighbor_has_contact = neighbor.contact >= CONTACT_FLOOR
+            if neighbor_has_contact != point_has_contact:
+                continue
+            if has_geometry(point) and has_geometry(neighbor):
+                px, py = point_center(point)
+                nx, ny = point_center(neighbor)
+                max_span = max(float(point.width or 0.0), float(point.height or 0.0), 1.0) * 1.7
+                if math.hypot(px - nx, py - ny) > max_span:
+                    continue
+            neighbors.append(neighbor)
+        if not neighbors:
+            neighbors = [point]
         object_scores = [neighbor.object_score for neighbor in neighbors]
         contacts = [neighbor.contact for neighbor in neighbors]
         grip = [neighbor.grip for neighbor in neighbors]
@@ -296,9 +404,44 @@ def smooth_points(points: list[TrackPoint]) -> list[TrackPoint]:
         next_point.object_score = sum(object_scores) / len(object_scores)
         next_point.contact = sum(contacts) / len(contacts)
         next_point.grip = sum(grip) / len(grip)
-        next_point.weak = next_point.grip < 0.45 or next_point.object_score < 0.28
+        if next_point.contact < CONTACT_FLOOR:
+            next_point.grip = min(next_point.grip, next_point.contact * 0.7)
+        next_point.weak = next_point.grip < 0.45 or next_point.object_score < 0.28 or next_point.contact < CONTACT_FLOOR
         smoothed.append(next_point)
     return smoothed
+
+
+def suppress_isolated_contact_spikes(points: list[TrackPoint]) -> list[TrackPoint]:
+    if len(points) < 3:
+        return points
+    debounced = [copy_point(point) for point in points]
+    for index in range(1, len(points) - 1):
+        point = points[index]
+        previous = points[index - 1]
+        following = points[index + 1]
+        if point.contact < 0.45 or point.grip < 0.45:
+            continue
+        previous_low = previous.contact < 0.25 or previous.grip < 0.28
+        following_low = following.contact < 0.25 or following.grip < 0.28
+        if not (previous_low and following_low):
+            continue
+        if has_geometry(previous) and has_geometry(point) and has_geometry(following):
+            px, py = point_center(previous)
+            cx, cy = point_center(point)
+            fx, fy = point_center(following)
+            span = max(float(point.width or 1.0), float(point.height or 1.0), 1.0)
+            near_previous = math.hypot(cx - px, cy - py) < span * 0.55
+            near_following = math.hypot(cx - fx, cy - fy) < span * 0.55
+            if near_previous and near_following:
+                continue
+        next_point = debounced[index]
+        next_point.source = "isolated"
+        next_point.object_score = min(next_point.object_score, 0.2)
+        next_point.contact = min(next_point.contact, 0.08)
+        next_point.grip = min(next_point.grip, 0.08)
+        next_point.slip = max(next_point.slip, 0.65)
+        next_point.weak = True
+    return debounced
 
 
 def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: float, max_width: int) -> tuple[list[TrackPoint], dict[str, Any]]:
@@ -322,7 +465,7 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
             break
         detections, latency_ms = analyze_frame(endpoint, frame, threshold, max_width)
         selected = choose_object(detections, previous, width, height)
-        source = "rfdetr"
+        source = "detector"
         label = "none"
         score = 0.0
         object_score = 0.0
@@ -333,19 +476,25 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
             score = float(selected.get("score", 0.0))
             continuity = spatial_continuity(selected, previous, width, height)
             object_score = clamp(score * 0.68 + continuity * 0.22 + OBJECT_PRIOR.get(label.lower(), 0.0))
-            contact = clamp(object_score * 0.78 + continuity * 0.22)
             x, y, w, h = detection_bbox(selected)
+            contact_evidence = hand_contact_evidence(frame, (x, y, w, h))
+            contact = clamp(contact_evidence * 0.74 + continuity * 0.12 + object_score * 0.14)
+            if contact_evidence < CONTACT_FLOOR:
+                contact = min(contact, contact_evidence * 0.8)
+                object_score = min(object_score, max(0.18, score * 0.42))
             previous = selected
         elif last_seen and sample_time - last_seen.time <= 1.25:
             source = "held"
             label = last_seen.label
             age = sample_time - last_seen.time
-            decay = clamp(1.0 - age / 1.25)
-            object_score = last_seen.object_score * 0.62 * decay
-            contact = last_seen.contact * 0.5 * decay
-            score = last_seen.score * 0.55 * decay
+            decay = clamp(1.0 - age / 0.85)
+            object_score = last_seen.object_score * 0.42 * decay
+            contact = last_seen.contact * 0.34 * decay
+            score = last_seen.score * 0.38 * decay
             x, y, w, h = last_seen.x, last_seen.y, last_seen.width, last_seen.height
-        grip = clamp(object_score * 0.58 + contact * 0.42)
+        grip = clamp(object_score * 0.38 + contact * 0.62)
+        if contact < CONTACT_FLOOR:
+            grip = min(grip, contact * 0.7)
         slip = clamp(max(0.0, 0.42 - contact) + (0.16 if source == "held" else 0.0))
         point = TrackPoint(
             time=round(sample_time, 3),
@@ -355,7 +504,7 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
             object_score=object_score,
             contact=contact,
             grip=grip,
-            weak=grip < 0.45 or object_score < 0.28,
+            weak=grip < 0.45 or object_score < 0.28 or contact < CONTACT_FLOOR,
             slip=slip,
             x=x,
             y=y,
@@ -369,7 +518,7 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
         sample_time += interval
     cap.release()
     metadata = {"fps": fps, "frameCount": frame_count, "width": width, "height": height, "duration": duration}
-    return smooth_geometry(smooth_points(points), metadata), metadata
+    return smooth_geometry(smooth_points(suppress_isolated_contact_spikes(points)), metadata), metadata
 
 
 def interpolate_point(points: list[TrackPoint], time_value: float) -> TrackPoint:
@@ -383,6 +532,14 @@ def interpolate_point(points: list[TrackPoint], time_value: float) -> TrackPoint
         if time_value <= right.time:
             span = max(0.001, right.time - left.time)
             t = clamp((time_value - left.time) / span)
+            left_contact = left.contact >= CONTACT_FLOOR and left.grip >= 0.28
+            right_contact = right.contact >= CONTACT_FLOOR and right.grip >= 0.28
+            if left_contact != right_contact:
+                # Do not visually smear object evidence across a true contact boundary.
+                # Offline samples are sparse by design, so a hard state boundary is less
+                # misleading than interpolating a fake half-grip through empty frames.
+                chosen = left if t < 0.5 else right
+                return TrackPoint(**asdict(chosen))
             base = TrackPoint(**asdict(left))
             for key in ("score", "object_score", "contact", "grip", "slip"):
                 setattr(base, key, lerp(float(getattr(left, key)), float(getattr(right, key)), t))
@@ -398,7 +555,7 @@ def interpolate_point(points: list[TrackPoint], time_value: float) -> TrackPoint
     return points[-1]
 
 
-def draw_overlay(frame: Any, point: TrackPoint) -> Any:
+def draw_overlay(frame: Any, point: TrackPoint, provider_label: str) -> Any:
     out = frame.copy()
     height, width = out.shape[:2]
     grip_pct = round(point.grip * 100)
@@ -417,7 +574,7 @@ def draw_overlay(frame: Any, point: TrackPoint) -> Any:
     overlay = out.copy()
     cv2.rectangle(overlay, (24, 24), (panel_w, 214), (14, 20, 31), -1)
     cv2.addWeighted(overlay, 0.78, out, 0.22, 0, out)
-    cv2.putText(out, "Offline V2 RF-DETR", (46, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (147, 235, 255), 2)
+    cv2.putText(out, provider_label, (46, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (147, 235, 255), 2)
     cv2.putText(out, f"{grip_pct}%", (46, 134), cv2.FONT_HERSHEY_SIMPLEX, 2.2, (245, 248, 255), 5)
     state = "Strong grip" if point.grip >= 0.68 else "Improve grip" if point.grip >= 0.38 else "Object uncertain"
     cv2.putText(out, state, (46, 176), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
@@ -429,7 +586,7 @@ def draw_overlay(frame: Any, point: TrackPoint) -> Any:
     return out
 
 
-def render_video(video_path: Path, points: list[TrackPoint], out_path: Path, output_fps: float) -> None:
+def render_video(video_path: Path, points: list[TrackPoint], out_path: Path, output_fps: float, provider_label: str) -> None:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -446,20 +603,29 @@ def render_video(video_path: Path, points: list[TrackPoint], out_path: Path, out
         if not ok:
             break
         point = interpolate_point(points, frame_index / output_fps)
-        writer.write(draw_overlay(frame, point))
+        writer.write(draw_overlay(frame, point, provider_label))
         frame_index += 1
     writer.release()
     cap.release()
 
 
-def write_outputs(video_path: Path, out_dir: Path, points: list[TrackPoint], metadata: dict[str, Any], output_fps: float) -> dict[str, Path]:
+def write_outputs(
+    video_path: Path,
+    out_dir: Path,
+    points: list[TrackPoint],
+    metadata: dict[str, Any],
+    output_fps: float,
+    provider: str,
+) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = video_path.stem
-    json_path = out_dir / f"{stem}-offline-v2-rfdetr-timeline.json"
-    csv_path = out_dir / f"{stem}-offline-v2-rfdetr-timeline.csv"
-    report_path = out_dir / f"{stem}-offline-v2-rfdetr-report.md"
-    mp4_path = out_dir / f"{stem}-offline-v2-rfdetr-annotated.mp4"
-    payload = {"video": str(video_path), "metadata": metadata, "timeline": [asdict(point) for point in points]}
+    suffix = "offline-yolo-max" if provider == "yolo-max" else "offline-v2-rfdetr"
+    provider_label = PROVIDER_LABELS.get(provider, provider)
+    json_path = out_dir / f"{stem}-{suffix}-timeline.json"
+    csv_path = out_dir / f"{stem}-{suffix}-timeline.csv"
+    report_path = out_dir / f"{stem}-{suffix}-report.md"
+    mp4_path = out_dir / f"{stem}-{suffix}-annotated.mp4"
+    payload = {"video": str(video_path), "provider": provider, "metadata": metadata, "timeline": [asdict(point) for point in points]}
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(asdict(points[0]).keys()) if points else ["time"])
@@ -473,7 +639,7 @@ def write_outputs(video_path: Path, out_dir: Path, points: list[TrackPoint], met
     report_path.write_text(
         "\n".join(
             [
-                "# Offline V2 RF-DETR Batch Report",
+                f"# {provider_label} Batch Report",
                 "",
                 f"- Video: `{video_path.name}`",
                 f"- Duration: {metadata['duration']:.2f}s",
@@ -483,12 +649,12 @@ def write_outputs(video_path: Path, out_dir: Path, points: list[TrackPoint], met
                 f"- Weak samples: {weak_count}",
                 f"- Slip-risk samples: {slip_count}",
                 "",
-                "Notes: person detections are rejected; large background furniture detections are penalized; brief RF-DETR misses are bridged with decaying previous-object evidence.",
+                "Notes: person detections are rejected; large background furniture detections are penalized; brief detector misses are bridged only when contact is sustained.",
             ]
         ),
         encoding="utf-8",
     )
-    render_video(video_path, points, mp4_path, output_fps)
+    render_video(video_path, points, mp4_path, output_fps, provider_label)
     return {"json": json_path, "csv": csv_path, "report": report_path, "mp4": mp4_path}
 
 
@@ -496,7 +662,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("video", type=Path)
     parser.add_argument("--out-dir", type=Path, default=Path("process"))
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    parser.add_argument("--provider", choices=["rfdetr", "yolo-max"], default="rfdetr")
+    parser.add_argument("--endpoint", default=None)
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--threshold", type=float, default=0.18)
     parser.add_argument("--max-width", type=int, default=640)
@@ -504,8 +671,9 @@ def main() -> None:
     args = parser.parse_args()
 
     start = time.perf_counter()
-    points, metadata = build_timeline(args.video, args.endpoint, args.interval, args.threshold, args.max_width)
-    paths = write_outputs(args.video, args.out_dir, points, metadata, args.output_fps)
+    endpoint = args.endpoint or (DEFAULT_YOLO_ENDPOINT if args.provider == "yolo-max" else DEFAULT_ENDPOINT)
+    points, metadata = build_timeline(args.video, endpoint, args.interval, args.threshold, args.max_width)
+    paths = write_outputs(args.video, args.out_dir, points, metadata, args.output_fps, args.provider)
     elapsed = time.perf_counter() - start
     print(json.dumps({"elapsedSeconds": round(elapsed, 2), "outputs": {key: str(value) for key, value in paths.items()}}, indent=2))
 
