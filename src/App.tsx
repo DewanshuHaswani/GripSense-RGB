@@ -544,6 +544,7 @@ export default function App() {
   const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'ready' | 'unsupported'>('idle');
   const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
   const [recordedClip, setRecordedClip] = useState<RecordedClip | null>(null);
+  const [yoloMaxChooserOpen, setYoloMaxChooserOpen] = useState(false);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [rfdetrRuntime, setRfdetrRuntime] = useState<RfdetrRuntime>(() => rfdetrRuntimeRef.current);
   const [realsenseRuntime, setRealSenseRuntime] = useState<RealSenseRuntime>(() => realsenseRuntimeRef.current);
@@ -1018,6 +1019,24 @@ export default function App() {
     setAnalysis(createEmptyAnalysis('Recording live camera. Stop recording to process this clip offline.'));
   }, [recordingState, startCamera]);
 
+  const openYoloMaxChooser = useCallback(() => {
+    setYoloMaxChooserOpen((value) => !value);
+  }, []);
+
+  const chooseYoloMaxUpload = useCallback(() => {
+    setYoloMaxChooserOpen(false);
+    offlineYoloMaxInputRef.current?.click();
+  }, []);
+
+  const chooseYoloMaxRecord = useCallback(() => {
+    setYoloMaxChooserOpen(false);
+    offlineReviewVersionRef.current = 'yoloMax';
+    setOfflineReviewVersion('yoloMax');
+    resetRfdetrRuntime('Offline YOLO Max selected. YOLO will provide mask evidence for RGB review.', YOLO_ENDPOINT);
+    resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
+    void startLiveRecording();
+  }, [resetRealSenseRuntime, resetRfdetrRuntime, startLiveRecording]);
+
   const stopLiveRecording = useCallback(() => {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== 'recording') return;
@@ -1301,6 +1320,20 @@ export default function App() {
         const targetDetectorAlgorithm = activeAlgorithmVersion === 'v5' || activeAlgorithmVersion === 'v6' || liveOfflineV1Review;
         const liveV6Review = activeAlgorithmVersion === 'v6' && !offlineReview;
         const trackFirstReview = offlineEnhancedReview || liveV6Review;
+        if (offlineYoloMaxReview && offlineReportRef.current && offlineTimelineRef.current.length > 0) {
+          const timelinePoint = nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime);
+          if (timelinePoint) {
+            frameAnalysis = analysisFromOfflineTimelinePoint(analysisRef.current, timelinePoint);
+            object = objectRegionFromOfflineTimelinePoint(timelinePoint, video.videoWidth, video.videoHeight, true);
+            previousObjectRef.current = object;
+            previousPalmRef.current = timelinePoint.palmX !== null && timelinePoint.palmY !== null ? { x: timelinePoint.palmX, y: timelinePoint.palmY } : null;
+            setAnalysis(frameAnalysis);
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            drawOfflineYoloMaxProcessOverlay(context, canvas.width, canvas.height, mirroredRef.current, timelinePoint, object);
+            animationRef.current = requestAnimationFrame(tick);
+            return;
+          }
+        }
         const profileFirstAlgorithm =
           activeAlgorithmVersion === 'v3' || activeAlgorithmVersion === 'v4' || targetDetectorAlgorithm;
         const fallbackAlgorithmVersion: AlgorithmVersion =
@@ -2511,9 +2544,11 @@ export default function App() {
         videoRef.current?.videoHeight ?? 0
       );
       const smoothed =
-        isOfflineDepthVersion(offlineReviewVersionRef.current)
-          ? refineOfflineTimeline(refineRealSenseOfflineTimeline(refineRfdetrOfflineTimeline(sanitized)))
-          : refineOfflineTimeline(refineRfdetrOfflineTimeline(sanitized));
+        offlineReviewVersionRef.current === 'yoloMax'
+          ? refineOfflineYoloMaxTimeline(sanitized, videoRef.current?.videoWidth ?? 0, videoRef.current?.videoHeight ?? 0)
+          : isOfflineDepthVersion(offlineReviewVersionRef.current)
+            ? refineOfflineTimeline(refineRealSenseOfflineTimeline(refineRfdetrOfflineTimeline(sanitized)))
+            : refineOfflineTimeline(refineRfdetrOfflineTimeline(sanitized));
       offlineTimelineRef.current = smoothed;
       setOfflineTimeline(smoothed);
     }
@@ -2611,15 +2646,21 @@ export default function App() {
           : null;
       const exportAnalysis = refinedPoint ? analysisFromOfflineTimelinePoint(analysisRef.current, refinedPoint) : analysisRef.current;
       if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && refinedPoint) {
-        const timelineObject = objectRegionFromOfflineTimelinePoint(refinedPoint, composite.width, composite.height);
-        drawOfflineV2TimelineOverlay(ctx, composite.width, composite.height, mirroredRef.current, refinedPoint, timelineObject, exportAnalysis);
+        const timelineObject = objectRegionFromOfflineTimelinePoint(refinedPoint, composite.width, composite.height, offlineReviewVersionRef.current === 'yoloMax');
+        if (offlineReviewVersionRef.current === 'yoloMax') {
+          drawOfflineYoloMaxProcessOverlay(ctx, composite.width, composite.height, mirroredRef.current, refinedPoint, timelineObject);
+        } else {
+          drawOfflineV2TimelineOverlay(ctx, composite.width, composite.height, mirroredRef.current, refinedPoint, timelineObject, exportAnalysis);
+        }
       } else {
         ctx.drawImage(overlay, 0, 0, composite.width, composite.height);
       }
-      if (layout === 'compact') {
-        drawCompactOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
-      } else {
-        drawOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+      if (offlineReviewVersionRef.current !== 'yoloMax') {
+        if (layout === 'compact') {
+          drawCompactOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+        } else {
+          drawOfflineExportOverlay(ctx, composite.width, composite.height, exportAnalysis, offlineTimelineRef.current, offlineVideoName, offlineReportRef.current);
+        }
       }
       if (!video.ended && video.currentTime < video.duration - 0.04) {
         raf = requestAnimationFrame(drawFrame);
@@ -2785,10 +2826,24 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineMaxUpload}
             />
-            <button className="tool-button primary" onClick={() => offlineYoloMaxInputRef.current?.click()} aria-label="Upload Offline YOLO Max review video">
-              <Sparkles size={17} />
-              <span>YOLO Max</span>
-            </button>
+            <div className="toolbar-menu-wrap">
+              <button className="tool-button primary" onClick={openYoloMaxChooser} aria-label="Choose Offline YOLO Max source" aria-expanded={yoloMaxChooserOpen}>
+                <Sparkles size={17} />
+                <span>YOLO Max</span>
+              </button>
+              {yoloMaxChooserOpen && (
+                <div className="toolbar-choice-menu" role="menu" aria-label="Offline YOLO Max source">
+                  <button type="button" onClick={chooseYoloMaxUpload} role="menuitem">
+                    <Upload size={16} />
+                    <span>Upload gallery</span>
+                  </button>
+                  <button type="button" onClick={chooseYoloMaxRecord} role="menuitem" disabled={recordingState === 'recording' || recordingState === 'unsupported'}>
+                    <Video size={16} />
+                    <span>Record live</span>
+                  </button>
+                </div>
+              )}
+            </div>
             <input
               ref={offlineYoloMaxInputRef}
               className="hidden-file-input"
@@ -3051,6 +3106,12 @@ export default function App() {
                   <span>Report</span>
                   <strong>{offlineReport.summary}</strong>
                 </div>
+              )}
+              {isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'complete' && offlineTimeline.length > 0 && (
+                <button type="button" className="offline-review-play-button" onClick={playOfflineReview}>
+                  <Play size={16} />
+                  <span>Play processed review</span>
+                </button>
               )}
             </div>
             <div className="offline-glass-panel offline-right">
@@ -4061,7 +4122,7 @@ function analysisFromOfflineTimelinePoint(base: GripAnalysis, point: OfflineTime
   };
 }
 
-function objectRegionFromOfflineTimelinePoint(point: OfflineTimelinePoint, frameWidth: number, frameHeight: number): ObjectRegion | null {
+function objectRegionFromOfflineTimelinePoint(point: OfflineTimelinePoint, frameWidth: number, frameHeight: number, allowWeakGripObject = false): ObjectRegion | null {
   if (point.objectX === null || point.objectY === null || point.lock < 0.22 || point.objectMatch < 0.2) return null;
   const radiusX = point.objectRadiusX ?? 0;
   const radiusY = point.objectRadiusY ?? 0;
@@ -4070,7 +4131,7 @@ function objectRegionFromOfflineTimelinePoint(point: OfflineTimelinePoint, frame
   const minRadius = Math.min(radiusX, radiusY);
   if (maxRadius < 10 || minRadius < 8) return null;
   if (maxRadius > Math.min(frameWidth, frameHeight) * 0.28 || radiusX > frameWidth * 0.22 || radiusY > frameHeight * 0.34) return null;
-  if (point.palmX !== null && point.palmY !== null) {
+  if (!allowWeakGripObject && point.palmX !== null && point.palmY !== null) {
     const palmDistance = distance({ x: point.objectX, y: point.objectY }, { x: point.palmX, y: point.palmY });
     if (palmDistance > Math.max(260, maxRadius * 2.35)) return null;
   }
@@ -4102,6 +4163,88 @@ function objectRegionFromOfflineTimelinePoint(point: OfflineTimelinePoint, frame
     independentEvidenceScore: point.objectMatch,
     relativeDriftScore: point.slip
   };
+}
+
+function drawOfflineYoloMaxProcessOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  mirrored: boolean,
+  point: OfflineTimelinePoint,
+  object: ObjectRegion | null
+) {
+  const color = offlineYoloMaxGripColor(point.grip);
+  ctx.save();
+  if (mirrored) {
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+  }
+  if (object) {
+    ctx.save();
+    ctx.translate(object.center.x, object.center.y);
+    ctx.rotate(object.angle);
+    ctx.fillStyle = `rgba(${color.rgb}, 0.16)`;
+    ctx.strokeStyle = `rgba(${color.rgb}, 0.92)`;
+    ctx.lineWidth = Math.max(3, Math.round(Math.min(width, height) * 0.002));
+    ctx.beginPath();
+    ctx.ellipse(0, 0, object.radiusX, object.radiusY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(${color.rgb}, 0.34)`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, Math.max(4, object.radiusX * 0.58), Math.max(4, object.radiusY * 0.58), 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = `rgba(${color.rgb}, 0.95)`;
+    ctx.beginPath();
+    ctx.arc(object.center.x, object.center.y, Math.max(7, Math.min(width, height) * 0.007), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+
+  const panelX = Math.max(18, Math.round(width * 0.012));
+  const panelY = Math.max(18, Math.round(height * 0.018));
+  const panelW = Math.min(420, Math.max(330, width * 0.22));
+  const panelH = Math.min(162, Math.max(146, height * 0.145));
+  ctx.save();
+  ctx.fillStyle = 'rgba(18, 14, 12, 0.78)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, panelX, panelY, panelW, panelH, 0);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = '700 18px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = '#fef08a';
+  ctx.fillText('Offline YOLO Max', panelX + 24, panelY + 34);
+  ctx.font = '900 58px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${Math.round(point.grip)}%`, panelX + 24, panelY + 88);
+  ctx.font = '800 24px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = color.text;
+  ctx.fillText(offlineYoloMaxGripLabel(point), panelX + 24, panelY + 118);
+  ctx.font = '500 15px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.78)';
+  const objectScore = Math.round(Math.max(point.objectMatch, point.rfdetrObjectScore ?? 0) * 100);
+  const contactScore = Math.round(Math.max(point.contact, point.rfdetrContact ?? 0) * 100);
+  ctx.fillText(`object ${objectScore}%  contact ${contactScore}%  detector`, panelX + 24, panelY + panelH - 16);
+  ctx.restore();
+}
+
+function offlineYoloMaxGripColor(grip: number) {
+  if (grip >= 68) return { rgb: '132, 204, 22', text: '#86efac' };
+  if (grip >= 32) return { rgb: '250, 204, 21', text: '#fde047' };
+  if (grip >= 8) return { rgb: '251, 113, 133', text: '#fb7185' };
+  return { rgb: '251, 113, 133', text: '#fb7f5f' };
+}
+
+function offlineYoloMaxGripLabel(point: OfflineTimelinePoint) {
+  if (point.grip >= 68) return 'Strong grip';
+  if (point.grip >= 32) return 'Moderate grip';
+  if (point.grip >= 8) return 'Mild grip';
+  return point.objectMatch > 0.18 ? 'Object uncertain' : 'No grip';
 }
 
 function drawOfflineV2TimelineOverlay(
@@ -4900,6 +5043,92 @@ function refineOfflineTimeline(points: OfflineTimelinePoint[]) {
       object: point.object || (repairedObjectMatch > 0.22 ? 'tracked object' : '')
     };
   });
+}
+
+function refineOfflineYoloMaxTimeline(points: OfflineTimelinePoint[], frameWidth: number, frameHeight: number) {
+  if (points.length < 3) return points.map((point) => gateOfflineYoloMaxPoint(point, point, frameWidth, frameHeight));
+  const base = refineOfflineTimeline(refineRfdetrOfflineTimeline(points));
+  return base.map((point, index) => {
+    const raw = points[index] ?? nearestOfflineTimelinePoint(points, point.time) ?? point;
+    const gated = gateOfflineYoloMaxPoint(point, raw, frameWidth, frameHeight);
+    if (gated.grip <= 8) return gated;
+
+    const previousRaw = points[index - 1];
+    const nextRaw = points[index + 1];
+    const rawContact = offlineYoloRawContactScore(raw);
+    const contactBoundary =
+      (previousRaw && Math.abs(offlineYoloRawContactScore(previousRaw) - rawContact) > 0.42) ||
+      (nextRaw && Math.abs(offlineYoloRawContactScore(nextRaw) - rawContact) > 0.42);
+    if (!contactBoundary) return gated;
+    return {
+      ...gated,
+      grip: Math.min(gated.grip, 42),
+      confidence: Math.min(gated.confidence, 0.54),
+      weak: true,
+      guidance: 'Improve grip',
+      state: 'Grip detected'
+    };
+  });
+}
+
+function gateOfflineYoloMaxPoint(point: OfflineTimelinePoint, raw: OfflineTimelinePoint, frameWidth: number, frameHeight: number): OfflineTimelinePoint {
+  const hasObjectGeometry = offlineTimelinePointHasSafeObjectGeometry(raw, frameWidth, frameHeight) && raw.objectX !== null && raw.objectY !== null;
+  const hasPalm = raw.palmX !== null && raw.palmY !== null;
+  const objectScore = Math.max(raw.objectMatch, raw.rfdetrObjectScore ?? 0);
+  const detectorContact = raw.rfdetrContact ?? 0;
+  const visibleContact = raw.contact;
+  const rawContact = offlineYoloRawContactScore(raw);
+  const radius = Math.max(raw.objectRadiusX ?? 0, raw.objectRadiusY ?? 0);
+  const palmDistance =
+    hasPalm && raw.objectX !== null && raw.objectY !== null
+      ? distance({ x: raw.objectX, y: raw.objectY }, { x: raw.palmX as number, y: raw.palmY as number })
+      : Number.POSITIVE_INFINITY;
+  const palmNearObject = hasPalm && hasObjectGeometry && palmDistance <= Math.max(86, radius * 1.75);
+  const detectorBackedContact = detectorContact >= 0.12 || (detectorContact >= 0.08 && visibleContact >= 0.42);
+  const heldEvidence = hasObjectGeometry && palmNearObject && objectScore >= 0.2 && rawContact >= 0.22 && detectorBackedContact;
+
+  if (heldEvidence) {
+    const contactBoost = clampUnit(rawContact * 0.62 + objectScore * 0.22 + (palmNearObject ? 0.16 : 0));
+    const gripFloor = Math.round(contactBoost * 78);
+    const nextGrip = Math.max(point.grip, gripFloor);
+    return {
+      ...point,
+      grip: nextGrip,
+      confidence: Math.max(point.confidence, Math.min(0.92, contactBoost * 0.9)),
+      objectMatch: Math.max(point.objectMatch, objectScore),
+      lock: Math.max(point.lock, Math.min(0.95, objectScore * 0.72 + rawContact * 0.28)),
+      contact: Math.max(point.contact, rawContact),
+      weak: nextGrip < 42,
+      guidance: nextGrip >= 68 ? 'Strong grip' : nextGrip >= 32 ? 'Improve grip' : point.guidance,
+      state: nextGrip >= 68 ? 'Strong hold' : nextGrip >= 32 ? 'Grip detected' : point.state
+    };
+  }
+
+  const objectAlone = hasObjectGeometry && objectScore >= 0.2 && (!hasPalm || !palmNearObject || rawContact < 0.12);
+  const cap = objectAlone ? 2 : hasObjectGeometry && hasPalm ? 8 : 2;
+  const lockCap = objectAlone ? Math.max(0.28, Math.min(0.42, objectScore)) : 0.14;
+  const objectCap = objectAlone ? Math.max(0.24, Math.min(0.48, objectScore)) : 0.14;
+  return {
+    ...point,
+    grip: Math.min(point.grip, cap),
+    confidence: Math.min(point.confidence, objectAlone ? 0.18 : 0.12),
+    objectMatch: Math.min(Math.max(point.objectMatch, objectScore), objectCap),
+    lock: Math.min(Math.max(point.lock, objectScore * 0.72), lockCap),
+    contact: Math.min(Math.max(detectorContact, visibleContact), objectAlone ? 0.06 : 0.04),
+    closure: Math.min(point.closure, hasPalm ? 0.28 : 0.04),
+    thumb: Math.min(point.thumb, hasPalm ? 0.24 : 0.04),
+    enclosure: Math.min(point.enclosure, hasPalm ? 0.24 : 0.04),
+    slip: Math.max(point.slip, objectAlone ? 0.18 : point.slip),
+    weak: true,
+    guidance: objectAlone ? 'Object uncertain' : 'Object not locked',
+    state: objectAlone ? 'Object uncertain' : 'No Hand',
+    mode: objectAlone ? 'uncertain' : point.mode,
+    object: hasObjectGeometry ? point.object || raw.object || 'tracked object' : ''
+  };
+}
+
+function offlineYoloRawContactScore(point: OfflineTimelinePoint) {
+  return Math.max(point.rfdetrContact ?? 0, point.contact * 0.82);
 }
 
 function sanitizeOfflineV2TimelineGeometry(points: OfflineTimelinePoint[], frameWidth: number, frameHeight: number) {

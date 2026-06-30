@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 import requests
 
 
@@ -43,7 +44,7 @@ OBJECT_PRIOR = {
 }
 HANDHELD_AREA_MIN = 0.004
 HANDHELD_AREA_MAX = 0.22
-CONTACT_FLOOR = 0.18
+CONTACT_FLOOR = 0.32
 
 
 @dataclass
@@ -113,7 +114,7 @@ def detection_area_ratio(detection: dict[str, Any], width: int, height: int) -> 
     return clamp((w * h) / max(1.0, width * height), 0.0, 4.0)
 
 
-def hand_contact_evidence(frame: Any, bbox: tuple[float, float, float, float]) -> float:
+def hand_contact_evidence(frame: Any, detection: dict[str, Any]) -> float:
     """Estimate hand/object contact from skin-colored pixels touching the object boundary.
 
     The local YOLO model often keeps detecting a dropped can on the bed. That is useful
@@ -122,12 +123,12 @@ def hand_contact_evidence(frame: Any, bbox: tuple[float, float, float, float]) -
     script works on office laptops without a MediaPipe Python install.
     """
     height, width = frame.shape[:2]
-    x, y, w, h = bbox
+    x, y, w, h = detection_bbox(detection)
     if w <= 2 or h <= 2:
         return 0.0
 
-    pad_x = max(12, int(w * 0.2))
-    pad_y = max(12, int(h * 0.2))
+    pad_x = max(14, int(w * 0.24))
+    pad_y = max(14, int(h * 0.24))
     x0 = max(0, int(x) - pad_x)
     y0 = max(0, int(y) - pad_y)
     x1 = min(width, int(x + w) + pad_x)
@@ -144,60 +145,86 @@ def hand_contact_evidence(frame: Any, bbox: tuple[float, float, float, float]) -
     skin = cv2.bitwise_and(hsv_skin, ycrcb_skin)
     skin = cv2.medianBlur(skin, 5)
 
-    local_x0 = max(0, int(x) - x0)
-    local_y0 = max(0, int(y) - y0)
-    local_x1 = min(x1 - x0, int(x + w) - x0)
-    local_y1 = min(y1 - y0, int(y + h) - y0)
+    crop_h, crop_w = skin.shape[:2]
+    object_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    polygon = detection.get("maskPolygon") or []
+    if len(polygon) >= 3:
+        pts = np.array(
+            [
+                [
+                    int(round(float(point.get("x", 0.0)) - x0)),
+                    int(round(float(point.get("y", 0.0)) - y0)),
+                ]
+                for point in polygon
+            ],
+            dtype=np.int32,
+        )
+        pts[:, 0] = np.clip(pts[:, 0], 0, max(0, crop_w - 1))
+        pts[:, 1] = np.clip(pts[:, 1], 0, max(0, crop_h - 1))
+        cv2.fillPoly(object_mask, [pts], 255)
+    if int((object_mask > 0).sum()) < 24:
+        local_x0 = max(0, int(x) - x0)
+        local_y0 = max(0, int(y) - y0)
+        local_x1 = min(crop_w, int(x + w) - x0)
+        local_y1 = min(crop_h, int(y + h) - y0)
+        object_mask[local_y0:local_y1, local_x0:local_x1] = 255
 
-    ring = 255 * (skin >= 0).astype("uint8")
-    ring[local_y0:local_y1, local_x0:local_x1] = 0
+    kernel_size = max(7, int(min(w, h) * 0.1) | 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    near_kernel_size = max(kernel_size + 6, int(min(w, h) * 0.18) | 1)
+    near_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_kernel_size, near_kernel_size))
+    boundary = cv2.subtract(cv2.dilate(object_mask, kernel), object_mask)
+    ring = cv2.subtract(cv2.dilate(object_mask, near_kernel), object_mask)
 
-    band_pad = max(8, int(min(w, h) * 0.12))
-    bx0 = max(0, local_x0 - band_pad)
-    by0 = max(0, local_y0 - band_pad)
-    bx1 = min(x1 - x0, local_x1 + band_pad)
-    by1 = min(y1 - y0, local_y1 + band_pad)
-    boundary = 255 * (skin >= 0).astype("uint8")
-    boundary[:by0, :] = 0
-    boundary[by1:, :] = 0
-    boundary[:, :bx0] = 0
-    boundary[:, bx1:] = 0
-    boundary[local_y0:local_y1, local_x0:local_x1] = 0
-
-    ring_area = max(1, int((ring > 0).sum()))
+    object_area = max(1, int((object_mask > 0).sum()))
     boundary_area = max(1, int((boundary > 0).sum()))
-    ring_skin = float(((skin > 0) & (ring > 0)).sum()) / ring_area
+    ring_area = max(1, int((ring > 0).sum()))
     boundary_skin = float(((skin > 0) & (boundary > 0)).sum()) / boundary_area
-    inside_skin = float((skin[local_y0:local_y1, local_x0:local_x1] > 0).sum()) / max(
-        1, (local_y1 - local_y0) * (local_x1 - local_x0)
-    )
+    ring_skin = float(((skin > 0) & (ring > 0)).sum()) / ring_area
+    object_skin = float(((skin > 0) & (object_mask > 0)).sum()) / object_area
 
-    def band_ratio(xa: int, ya: int, xb: int, yb: int) -> float:
-        xa = max(0, min(x1 - x0, xa))
-        xb = max(0, min(x1 - x0, xb))
-        ya = max(0, min(y1 - y0, ya))
-        yb = max(0, min(y1 - y0, yb))
-        if xb <= xa or yb <= ya:
-            return 0.0
-        region = skin[ya:yb, xa:xb]
-        return float((region > 0).sum()) / max(1, region.size)
+    moments = cv2.moments(object_mask)
+    if moments["m00"]:
+        cx = int(moments["m10"] / moments["m00"])
+        cy = int(moments["m01"] / moments["m00"])
+    else:
+        cx = crop_w // 2
+        cy = crop_h // 2
 
-    left_skin = band_ratio(bx0, local_y0, local_x0, local_y1)
-    right_skin = band_ratio(local_x1, local_y0, bx1, local_y1)
-    top_skin = band_ratio(local_x0, by0, local_x1, local_y0)
-    bottom_skin = band_ratio(local_x0, local_y1, local_x1, by1)
-    side_hits = sum(1 for value in (left_skin, right_skin, top_skin, bottom_skin) if value > 0.045)
+    def side_ratio(mask: Any) -> float:
+        area = max(1, int((mask > 0).sum()))
+        return float(((skin > 0) & (mask > 0)).sum()) / area
 
-    adjacent = clamp((boundary_skin - 0.025) / 0.18)
-    nearby = clamp((ring_skin - 0.015) / 0.13)
-    occluding = clamp((inside_skin - 0.055) / 0.18)
-    contact = clamp(adjacent * 0.42 + nearby * 0.18 + occluding * 0.4)
-    if side_hits <= 1 and occluding < 0.35:
-        contact = min(contact, 0.16)
-    elif side_hits <= 1:
-        contact = min(contact, 0.42)
-    elif side_hits == 2 and occluding < 0.18:
-        contact = min(contact, 0.62)
+    left_mask = boundary.copy()
+    left_mask[:, cx:] = 0
+    right_mask = boundary.copy()
+    right_mask[:, :cx] = 0
+    top_mask = boundary.copy()
+    top_mask[cy:, :] = 0
+    bottom_mask = boundary.copy()
+    bottom_mask[:cy, :] = 0
+    side_values = [side_ratio(mask) for mask in (left_mask, right_mask, top_mask, bottom_mask)]
+    side_hits = sum(1 for value in side_values if value > 0.04)
+
+    adjacent = clamp((boundary_skin - 0.025) / 0.16)
+    nearby = clamp((ring_skin - 0.015) / 0.12)
+    occluding = clamp((object_skin - 0.045) / 0.16)
+    contact = clamp(adjacent * 0.5 + nearby * 0.14 + occluding * 0.36)
+    # Object labels, can graphics, and wood/skin-like surfaces can satisfy the
+    # broad skin heuristic inside the object mask. Require real boundary skin
+    # before allowing that interior occlusion signal to become grip evidence.
+    if boundary_skin < 0.075:
+        contact = min(contact, 0.06)
+    elif boundary_skin < 0.11 and ring_skin < 0.13:
+        contact = min(contact, 0.3)
+    if side_hits <= 1:
+        contact = min(contact, 0.08)
+    elif side_hits == 2 and occluding < 0.2 and boundary_skin < 0.1:
+        contact = min(contact, 0.2)
+    elif side_hits == 2 and occluding < 0.32:
+        contact = min(contact, 0.5)
+    if boundary_skin < 0.018 and object_skin < 0.05:
+        contact = min(contact, 0.06)
     return contact
 
 
@@ -405,7 +432,7 @@ def smooth_points(points: list[TrackPoint]) -> list[TrackPoint]:
         next_point.contact = sum(contacts) / len(contacts)
         next_point.grip = sum(grip) / len(grip)
         if next_point.contact < CONTACT_FLOOR:
-            next_point.grip = min(next_point.grip, next_point.contact * 0.7)
+            next_point.grip = min(next_point.grip, next_point.contact * 0.22)
         next_point.weak = next_point.grip < 0.45 or next_point.object_score < 0.28 or next_point.contact < CONTACT_FLOOR
         smoothed.append(next_point)
     return smoothed
@@ -477,11 +504,15 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
             continuity = spatial_continuity(selected, previous, width, height)
             object_score = clamp(score * 0.68 + continuity * 0.22 + OBJECT_PRIOR.get(label.lower(), 0.0))
             x, y, w, h = detection_bbox(selected)
-            contact_evidence = hand_contact_evidence(frame, (x, y, w, h))
+            contact_evidence = hand_contact_evidence(frame, selected)
             contact = clamp(contact_evidence * 0.74 + continuity * 0.12 + object_score * 0.14)
             if contact_evidence < CONTACT_FLOOR:
                 contact = min(contact, contact_evidence * 0.8)
                 object_score = min(object_score, max(0.18, score * 0.42))
+            elif contact_evidence < 0.34:
+                contact = min(contact, contact_evidence * 0.95)
+            elif contact_evidence < 0.55:
+                contact = min(contact, contact_evidence * 1.05)
             previous = selected
         elif last_seen and sample_time - last_seen.time <= 1.25:
             source = "held"
@@ -494,7 +525,7 @@ def build_timeline(video_path: Path, endpoint: str, interval: float, threshold: 
             x, y, w, h = last_seen.x, last_seen.y, last_seen.width, last_seen.height
         grip = clamp(object_score * 0.38 + contact * 0.62)
         if contact < CONTACT_FLOOR:
-            grip = min(grip, contact * 0.7)
+            grip = min(grip, contact * 0.22)
         slip = clamp(max(0.0, 0.42 - contact) + (0.16 if source == "held" else 0.0))
         point = TrackPoint(
             time=round(sample_time, 3),
