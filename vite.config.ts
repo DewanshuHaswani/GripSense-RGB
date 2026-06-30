@@ -25,6 +25,18 @@ export default defineConfig({
         secure: false,
         rewrite: () => '/api/yolo/analyze'
       },
+      '/api/gripsense/yolo/offline-max/process': {
+        target: inferenceTarget,
+        changeOrigin: true,
+        secure: false,
+        rewrite: () => '/api/yolo/offline-max/process'
+      },
+      '/api/gripsense/yolo/offline-max/artifact': {
+        target: inferenceTarget,
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace('/api/gripsense/yolo/offline-max/artifact', '/api/yolo/offline-max/artifact')
+      },
       '/api/gripsense/realsense/depth-signal': {
         target: inferenceTarget,
         changeOrigin: true,

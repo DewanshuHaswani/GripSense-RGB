@@ -1,12 +1,17 @@
+import hashlib
 import json
 import os
+import sys
 import time
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from PIL import Image
 
@@ -211,6 +216,9 @@ _YOLO_DEVICE = os.environ.get("GRIPSENSE_YOLO_DEVICE", "cpu").lower()
 _REALSENSE_PIPELINE: Any | None = None
 _REALSENSE_ALIGN: Any | None = None
 _REALSENSE_RS: Any | None = None
+_ROOT_DIR = Path(__file__).resolve().parents[1]
+_PROCESS_DIR = _ROOT_DIR / "process"
+_YOLO_MAX_JOBS: dict[str, dict[str, Path]] = {}
 
 if _RFDETR_DEVICE == "cpu":
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -221,7 +229,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=False,
-    allow_methods=["POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -385,6 +393,70 @@ async def analyze_yolo_frame(
     )
 
 
+@app.post("/api/yolo/offline-max/process")
+async def process_yolo_offline_max_video(
+    video: UploadFile = File(...),
+    interval: float = Form(default=0.5),
+    threshold: float = Form(default=0.18),
+    maxWidth: int = Form(default=640),
+    outputFps: float = Form(default=30.0),
+) -> dict[str, Any]:
+    """Run the production Offline YOLO Max batch renderer used by process/*.mp4.
+
+    The web app previously rebuilt YOLO Max exports inside the browser, which
+    could diverge from the OpenCV batch output. This endpoint keeps upload,
+    preview, and download on the same full-video pipeline.
+    """
+
+    safe_name = safe_upload_filename(video.filename or "offline-yolo-max-video.mp4")
+    suffix = Path(safe_name).suffix.lower()
+    known_video_suffixes = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".mpeg", ".mpg"}
+    if video.content_type and not video.content_type.startswith("video/") and suffix not in known_video_suffixes:
+        raise HTTPException(status_code=400, detail="Upload must be a video file")
+
+    contents = await video.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded video is empty")
+
+    _PROCESS_DIR.mkdir(parents=True, exist_ok=True)
+    upload_dir = _PROCESS_DIR / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(contents[:1048576] + str(time.time()).encode("utf-8")).hexdigest()[:12]
+    upload_path = upload_dir / f"{digest}-{safe_name}"
+    upload_path.write_bytes(contents)
+
+    try:
+        result = await run_in_threadpool(
+            run_yolo_offline_max_batch,
+            upload_path,
+            float(interval),
+            float(threshold),
+            int(maxWidth),
+            float(outputFps),
+        )
+    except Exception as exc:  # pragma: no cover - depends on local codecs/model/runtime.
+        raise HTTPException(status_code=500, detail=f"Offline YOLO Max processing failed: {exc}") from exc
+
+    return result
+
+
+@app.get("/api/yolo/offline-max/artifact/{job_id}/{kind}")
+async def get_yolo_offline_max_artifact(job_id: str, kind: Literal["mp4", "csv", "json", "report"]) -> FileResponse:
+    paths = _YOLO_MAX_JOBS.get(job_id)
+    if not paths or kind not in paths:
+        raise HTTPException(status_code=404, detail="Offline YOLO Max artifact not found")
+    path = paths[kind]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Offline YOLO Max artifact was removed")
+    media_type = {
+        "mp4": "video/mp4",
+        "csv": "text/csv",
+        "json": "application/json",
+        "report": "text/markdown",
+    }[kind]
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
 @app.post("/api/realsense/depth-signal", response_model=RealSenseDepthResponse)
 async def analyze_realsense_depth(request: RealSenseDepthRequest) -> RealSenseDepthResponse:
     """Sample aligned Intel RealSense depth for the current hand/object geometry.
@@ -437,6 +509,54 @@ async def analyze_realsense_depth(request: RealSenseDepthRequest) -> RealSenseDe
         surfaceContinuity=object_continuity,
         source="intel-realsense-depth",
     )
+
+
+def safe_upload_filename(filename: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in ("-", "_", ".", " ") else "-" for char in filename).strip()
+    cleaned = "-".join(cleaned.split())
+    return cleaned or "offline-yolo-max-video.mp4"
+
+
+def run_yolo_offline_max_batch(
+    upload_path: Path,
+    interval: float,
+    threshold: float,
+    max_width: int,
+    output_fps: float,
+) -> dict[str, Any]:
+    from dataclasses import asdict
+
+    scripts_dir = _ROOT_DIR / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from process_offline_v2_rfdetr import DEFAULT_YOLO_ENDPOINT, build_timeline, write_outputs  # type: ignore
+
+    endpoint = os.environ.get("GRIPSENSE_YOLO_BATCH_FRAME_ENDPOINT", DEFAULT_YOLO_ENDPOINT)
+    points, metadata = build_timeline(upload_path, endpoint, interval, threshold, max_width)
+    output_paths = write_outputs(upload_path, _PROCESS_DIR, points, metadata, output_fps, "yolo-max")
+    job_id = hashlib.sha256(f"{upload_path}:{time.time()}".encode("utf-8")).hexdigest()[:16]
+    _YOLO_MAX_JOBS[job_id] = output_paths
+    artifact_base = f"/api/yolo/offline-max/artifact/{job_id}"
+    avg_grip = sum(point.grip for point in points) / max(1, len(points))
+    peak_grip = max((point.grip for point in points), default=0.0)
+    return {
+        "jobId": job_id,
+        "videoName": upload_path.name,
+        "metadata": metadata,
+        "summary": {
+            "averageGrip": round(avg_grip * 100),
+            "peakGrip": round(peak_grip * 100),
+            "samples": len(points),
+        },
+        "timeline": [asdict(point) for point in points],
+        "artifacts": {
+            "mp4": f"{artifact_base}/mp4",
+            "csv": f"{artifact_base}/csv",
+            "json": f"{artifact_base}/json",
+            "report": f"{artifact_base}/report",
+        },
+        "filenames": {key: path.name for key, path in output_paths.items()},
+    }
 
 
 def clamp(value: float) -> float:

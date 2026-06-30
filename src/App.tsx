@@ -119,6 +119,7 @@ const V3_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_V3_ENDPOINT ?? DEFAULT_V3_ENDPOINT;
 const RFDETR_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_ENDPOINT ?? DEFAULT_RFDETR_ENDPOINT;
 const RFDETR_PROXY_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_RFDETR_PROXY_ENDPOINT ?? DEFAULT_RFDETR_PROXY_ENDPOINT;
 const YOLO_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_YOLO_ENDPOINT ?? DEFAULT_YOLO_ENDPOINT;
+const YOLO_MAX_BATCH_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_YOLO_MAX_BATCH_ENDPOINT ?? '/api/gripsense/yolo/offline-max/process';
 const REALSENSE_ENDPOINT = VITE_ENV?.VITE_GRIPSENSE_REALSENSE_ENDPOINT ?? DEFAULT_REALSENSE_ENDPOINT;
 const V3_REQUEST_INTERVAL_MS = 420;
 const V3_PROFILE_SEARCH_INTERVAL_MS = 520;
@@ -259,6 +260,48 @@ type OfflineTimelinePoint = {
   realsenseDepthContact?: number;
   realsenseDepthSeparation?: number;
   realsenseStereoConfidence?: number;
+};
+
+type YoloMaxBatchTrackPoint = {
+  time: number;
+  source: string;
+  label: string;
+  score: number;
+  object_score: number;
+  contact: number;
+  grip: number;
+  weak: boolean;
+  slip: number;
+  x: number | null;
+  y: number | null;
+  width: number | null;
+  height: number | null;
+  latency_ms: number | null;
+};
+
+type YoloMaxBatchResponse = {
+  jobId: string;
+  videoName: string;
+  metadata: {
+    fps?: number;
+    frameCount?: number;
+    width?: number;
+    height?: number;
+    duration?: number;
+  };
+  summary?: {
+    averageGrip?: number;
+    peakGrip?: number;
+    samples?: number;
+  };
+  timeline: YoloMaxBatchTrackPoint[];
+  artifacts: {
+    mp4: string;
+    csv: string;
+    json: string;
+    report: string;
+  };
+  filenames?: Partial<Record<'mp4' | 'csv' | 'json' | 'report', string>>;
 };
 
 type OfflineReviewVersion = 'v1' | 'v2' | 'v3' | 'max' | 'yoloMax';
@@ -478,6 +521,8 @@ export default function App() {
   const lastOfflineTimelineRef = useRef(0);
   const offlineReviewVersionRef = useRef<OfflineReviewVersion>('v2');
   const offlineBatchProcessingRef = useRef(false);
+  const offlineYoloMaxBatchRef = useRef<YoloMaxBatchResponse | null>(null);
+  const offlineYoloMaxServerPreviewRef = useRef(false);
   const uploadOnlyExportStartedRef = useRef(false);
   const offlineV2TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
   const liveV6TrackRef = useRef<OfflineV2TrackState>({ candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 });
@@ -802,6 +847,8 @@ export default function App() {
       setOfflineAnalysisPhase('idle');
       offlineTimelineRef.current = [];
       offlineReportRef.current = null;
+      offlineYoloMaxBatchRef.current = null;
+      offlineYoloMaxServerPreviewRef.current = false;
       setOfflineTimeline([]);
       setOfflineReport(null);
       resetTrackingRefs();
@@ -843,6 +890,8 @@ export default function App() {
     setOfflineAnalysisPhase('processing');
     offlineTimelineRef.current = [];
     offlineReportRef.current = null;
+    offlineYoloMaxBatchRef.current = null;
+    offlineYoloMaxServerPreviewRef.current = false;
     lastOfflineTimelineRef.current = 0;
     offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
     offlineYoloMaxDisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null };
@@ -925,6 +974,89 @@ export default function App() {
     void startOfflineVideo(file);
   }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
+  const processOfflineYoloMaxBatch = useCallback(async (file: File) => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (offlineVideoUrlRef.current) {
+      URL.revokeObjectURL(offlineVideoUrlRef.current);
+      offlineVideoUrlRef.current = null;
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.pause();
+    video.srcObject = null;
+    video.removeAttribute('src');
+    video.loop = false;
+    video.muted = true;
+    video.playbackRate = 1;
+
+    mediaModeRef.current = 'offline';
+    setMediaMode('offline');
+    setCameraState('live');
+    setPaused(true);
+    setOfflineVideoName(file.name);
+    setOfflineAnalysisPhase('processing');
+    setOfflineVideoExportStatus('');
+    offlineBatchProcessingRef.current = true;
+    offlineYoloMaxBatchRef.current = null;
+    offlineYoloMaxServerPreviewRef.current = false;
+    offlineTimelineRef.current = [];
+    offlineReportRef.current = null;
+    lastOfflineTimelineRef.current = 0;
+    offlineV2TrackRef.current = { candidate: null, confidence: 0, ageFrames: 0, missedFrames: 0, lastSeenAt: 0 };
+    offlineYoloMaxDisplayRef.current = { analysis: null, timestamp: 0, softLossStartedAt: null, lastStableAt: null };
+    setOfflineTimeline([]);
+    setOfflineReport(null);
+    resetTrackingRefs();
+    setAnalysis(createEmptyAnalysis('Offline YOLO Max is processing with the local batch server. The review video will appear after processing finishes.'));
+
+    try {
+      const form = new FormData();
+      form.append('video', file);
+      form.append('interval', '0.5');
+      form.append('threshold', '0.18');
+      form.append('maxWidth', '640');
+      form.append('outputFps', '30');
+
+      const response = await fetch(YOLO_MAX_BATCH_ENDPOINT, {
+        method: 'POST',
+        body: form
+      });
+      if (!response.ok) {
+        throw new Error(`YOLO Max batch failed with ${response.status}`);
+      }
+      const batch = normalizeYoloMaxBatchResponse((await response.json()) as YoloMaxBatchResponse);
+      const timeline = mapYoloMaxBatchTimeline(batch.timeline);
+      const report = buildOfflineReport(timeline, file.name, batch.metadata.duration ?? video.duration ?? 0);
+      offlineYoloMaxBatchRef.current = batch;
+      offlineYoloMaxServerPreviewRef.current = true;
+      offlineTimelineRef.current = timeline;
+      offlineReportRef.current = report;
+      offlineBatchProcessingRef.current = false;
+      setOfflineTimeline(timeline);
+      setOfflineReport(report);
+      setOfflineAnalysisPhase('complete');
+
+      video.src = batch.artifacts.mp4;
+      await waitForVideoMetadata(video).catch(() => undefined);
+      video.currentTime = 0;
+      const firstPoint = timeline[0];
+      if (firstPoint) setAnalysis(analysisFromOfflineTimelinePoint(analysisRef.current, firstPoint));
+      setOfflineVideoExportStatus('YOLO Max batch review is ready. Play or download the finalized MP4.');
+      runLoop();
+    } catch (error) {
+      console.warn('Offline YOLO Max batch processing failed', error);
+      offlineBatchProcessingRef.current = false;
+      offlineYoloMaxBatchRef.current = null;
+      offlineYoloMaxServerPreviewRef.current = false;
+      setOfflineAnalysisPhase('idle');
+      setOfflineVideoExportStatus('YOLO Max batch server unavailable. Start the local inference server and upload again.');
+      setAnalysis(createEmptyAnalysis('YOLO Max batch server unavailable. Start the local inference server and upload again.'));
+    }
+  }, [resetTrackingRefs]);
+
   const handleOfflineYoloMaxUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -942,8 +1074,8 @@ export default function App() {
     setOfflineVideoExportStatus('');
     resetRfdetrRuntime('Offline YOLO Max selected. YOLO will provide mask evidence for RGB review.', YOLO_ENDPOINT);
     resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
-    void startOfflineVideo(file);
-  }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
+    void processOfflineYoloMaxBatch(file);
+  }, [processOfflineYoloMaxBatch, resetRealSenseRuntime, resetRfdetrRuntime]);
 
   const handleUploadV1Video = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1341,12 +1473,14 @@ export default function App() {
           const timelinePoint = nearestOfflineTimelinePoint(offlineTimelineRef.current, video.currentTime);
           if (timelinePoint) {
             frameAnalysis = analysisFromOfflineTimelinePoint(analysisRef.current, timelinePoint);
-            object = objectRegionFromOfflineTimelinePoint(timelinePoint, video.videoWidth, video.videoHeight, true);
-            previousObjectRef.current = object;
-            previousPalmRef.current = timelinePoint.palmX !== null && timelinePoint.palmY !== null ? { x: timelinePoint.palmX, y: timelinePoint.palmY } : null;
             setAnalysis(frameAnalysis);
             context.clearRect(0, 0, canvas.width, canvas.height);
-            drawOfflineYoloMaxProcessOverlay(context, canvas.width, canvas.height, mirroredRef.current, timelinePoint, object);
+            if (!offlineYoloMaxServerPreviewRef.current) {
+              object = objectRegionFromOfflineTimelinePoint(timelinePoint, video.videoWidth, video.videoHeight, true);
+              previousObjectRef.current = object;
+              previousPalmRef.current = timelinePoint.palmX !== null && timelinePoint.palmY !== null ? { x: timelinePoint.palmX, y: timelinePoint.palmY } : null;
+              drawOfflineYoloMaxProcessOverlay(context, canvas.width, canvas.height, mirroredRef.current, timelinePoint, object);
+            }
             animationRef.current = requestAnimationFrame(tick);
             return;
           }
@@ -2440,6 +2574,17 @@ export default function App() {
     const video = videoRef.current;
     if (mediaModeRef.current !== 'offline' || !video || !video.src) return;
 
+    if (offlineYoloMaxServerPreviewRef.current) {
+      if (version === 'yoloMax') {
+        offlineBatchProcessingRef.current = false;
+        video.playbackRate = 1;
+        setOfflineAnalysisPhase('complete');
+        return;
+      }
+      offlineYoloMaxBatchRef.current = null;
+      offlineYoloMaxServerPreviewRef.current = false;
+    }
+
     if (version === 'v1') {
       offlineBatchProcessingRef.current = false;
       video.playbackRate = 1;
@@ -2522,6 +2667,14 @@ export default function App() {
   const exportOfflineTimeline = useCallback((format: 'csv' | 'json') => {
     if (!offlineTimelineRef.current.length) return;
     const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const yoloMaxBatch = offlineReviewVersionRef.current === 'yoloMax' ? offlineYoloMaxBatchRef.current : null;
+    if (yoloMaxBatch?.artifacts?.[format]) {
+      downloadUrlFile(
+        yoloMaxBatch.artifacts[format],
+        yoloMaxBatch.filenames?.[format] ?? `${fileBase}-offline-yolo-max-timeline.${format}`
+      );
+      return;
+    }
     const report = offlineReportRef.current ?? buildOfflineReport(offlineTimelineRef.current, offlineVideoName, videoRef.current?.duration ?? 0);
     const payload =
       format === 'json'
@@ -2620,6 +2773,19 @@ export default function App() {
       return;
     }
 
+    const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const yoloMaxBatch = offlineReviewVersionRef.current === 'yoloMax' ? offlineYoloMaxBatchRef.current : null;
+    if (yoloMaxBatch?.artifacts?.mp4) {
+      if (format === 'webm') {
+        setOfflineVideoExportStatus('YOLO Max batch output is finalized as MP4. Use MP4 or MP4 Compact for the same processed result.');
+        return;
+      }
+      const suffix = layout === 'compact' ? 'annotated-compact' : 'annotated';
+      downloadUrlFile(yoloMaxBatch.artifacts.mp4, yoloMaxBatch.filenames?.mp4 ?? `${fileBase}-${suffix}.mp4`);
+      setOfflineVideoExportStatus(`Downloaded ${yoloMaxBatch.filenames?.mp4 ?? `${fileBase}-${suffix}.mp4`}`);
+      return;
+    }
+
     const composite = document.createElement('canvas');
     composite.width = video.videoWidth || overlay.width;
     composite.height = video.videoHeight || overlay.height;
@@ -2641,7 +2807,6 @@ export default function App() {
     }
     const recorder = new MediaRecorder(captureStream, supportedType ? { mimeType: supportedType } : undefined);
     const chunks: BlobPart[] = [];
-    const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
     const previousTime = video.currentTime;
     const wasPaused = video.paused;
     let raf = 0;
@@ -2776,8 +2941,12 @@ export default function App() {
           onPlay={() => {
             if (mediaMode !== 'offline') return;
             if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineBatchProcessingRef.current) return;
-            if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineAnalysisPhase === 'complete') return;
+            if (isOfflineEnhancedVersion(offlineReviewVersionRef.current) && offlineAnalysisPhase === 'complete') {
+              setPaused(false);
+              return;
+            }
             setOfflineAnalysisPhase('reviewing');
+            setPaused(false);
           }}
           onEnded={finalizeOfflineReview}
         />
@@ -4095,6 +4264,76 @@ function downloadBlobFile(filename: string, blob: Blob) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function downloadUrlFile(url: string, filename: string) {
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+}
+
+function normalizeYoloMaxBatchResponse(response: YoloMaxBatchResponse): YoloMaxBatchResponse {
+  return {
+    ...response,
+    artifacts: {
+      mp4: normalizeYoloMaxArtifactUrl(response.artifacts.mp4),
+      csv: normalizeYoloMaxArtifactUrl(response.artifacts.csv),
+      json: normalizeYoloMaxArtifactUrl(response.artifacts.json),
+      report: normalizeYoloMaxArtifactUrl(response.artifacts.report)
+    }
+  };
+}
+
+function normalizeYoloMaxArtifactUrl(url: string) {
+  if (!url.startsWith('/api/yolo/offline-max/artifact')) return url;
+  const batchPath = new URL(YOLO_MAX_BATCH_ENDPOINT, window.location.origin).pathname;
+  return batchPath.startsWith('/api/gripsense/yolo/')
+    ? url.replace('/api/yolo/offline-max/artifact', '/api/gripsense/yolo/offline-max/artifact')
+    : url;
+}
+
+function mapYoloMaxBatchTimeline(points: YoloMaxBatchTrackPoint[]): OfflineTimelinePoint[] {
+  return points.map((point) => {
+    const objectScore = clampNumber(point.object_score ?? point.score ?? 0, 0, 1);
+    const contact = clampNumber(point.contact ?? 0, 0, 1);
+    const grip = clampNumber(point.grip ?? 0, 0, 1);
+    const width = point.width ?? 0;
+    const height = point.height ?? 0;
+    const hasObjectGeometry = point.x !== null && point.y !== null && width > 0 && height > 0;
+    const centerX = hasObjectGeometry ? (point.x ?? 0) + width / 2 : null;
+    const centerY = hasObjectGeometry ? (point.y ?? 0) + height / 2 : null;
+    const state = grip >= 0.68 ? 'strong-hold' : grip >= 0.34 ? 'grip-detected' : objectScore >= 0.2 ? 'object-uncertain' : 'no-hand';
+    const guidance = grip >= 0.68 ? 'Strong grip' : grip >= 0.34 ? 'Improve grip' : objectScore >= 0.2 ? 'Object not locked' : 'Object not locked';
+
+    return {
+      time: point.time,
+      grip: Math.round(grip * 100),
+      confidence: Math.max(grip, contact * 0.9, objectScore * 0.55),
+      objectMatch: objectScore,
+      lock: objectScore,
+      contact,
+      closure: contact,
+      thumb: contact > 0.2 ? clampNumber(contact * 0.72, 0, 1) : 0,
+      enclosure: contact,
+      slip: clampNumber(point.slip ?? 0, 0, 1),
+      weak: Boolean(point.weak),
+      guidance,
+      object: '',
+      mode: grip >= 0.68 ? 'Power Grip' : grip >= 0.34 ? 'Uncertain' : 'Uncertain',
+      state,
+      objectX: centerX,
+      objectY: centerY,
+      objectRadiusX: hasObjectGeometry ? width / 2 : null,
+      objectRadiusY: hasObjectGeometry ? height / 2 : null,
+      objectAngle: 0,
+      palmX: null,
+      palmY: null,
+      rfdetrObjectScore: objectScore,
+      rfdetrContact: contact,
+      rfdetrLatencyMs: point.latency_ms
+    };
+  });
 }
 
 function mediaRecorderTypeFor(format: 'mp4' | 'webm') {
