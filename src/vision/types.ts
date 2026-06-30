@@ -12,7 +12,20 @@ export type MotionState = 'idle' | 'moving-with-hand' | 'slipping' | 'uncertain'
 
 export type GripGuidance = 'Strong grip' | 'Improve grip' | 'Reposition' | 'Object not locked' | 'Object uncertain';
 
-export type AlgorithmVersion = 'v1' | 'v2' | 'v3' | 'v4' | 'v5' | 'v6' | 'v7' | 'v8' | 'v9' | 'v10' | 'v11' | 'v12';
+export type AlgorithmVersion =
+  | 'v1'
+  | 'v2'
+  | 'v3'
+  | 'v4'
+  | 'v5'
+  | 'v6'
+  | 'v7'
+  | 'v8'
+  | 'v9'
+  | 'v10'
+  | 'v11'
+  | 'v12'
+  | 'v13';
 
 export type GripMode = 'phone-side grip' | 'pinch grip' | 'power grip' | 'hook grip' | 'open hand' | 'uncertain';
 

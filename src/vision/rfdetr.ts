@@ -27,7 +27,7 @@ export const RFDETR_PROVIDER: DetectorProvider = {
 export const YOLO_PROVIDER: DetectorProvider = {
   idPrefix: 'yolo',
   displayName: 'YOLO',
-  idleMessage: 'YOLO server idle. Select V11, V12, or Offline YOLO Max to begin YOLO mask analysis.',
+  idleMessage: 'YOLO server idle. Select V11, V12, V13, or Offline YOLO Max to begin YOLO mask analysis.',
   unavailableMessage: 'YOLO unavailable. Start the local Python YOLO server to use mask analysis.',
   heldObjectName: 'YOLO held object'
 };
