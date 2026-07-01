@@ -305,6 +305,7 @@ type YoloMaxBatchResponse = {
 };
 
 type OfflineReviewVersion = 'v1' | 'v2' | 'v3' | 'max' | 'yoloMax';
+type OfflineSourceChoice = 'offlineVideo' | 'offlineMax' | 'yoloMax';
 
 function isOfflineEnhancedVersion(version: OfflineReviewVersion) {
   return version === 'v2' || version === 'v3' || version === 'max' || version === 'yoloMax';
@@ -386,7 +387,21 @@ type RecordedClip = {
   file: File;
   url: string;
   durationMs: number;
+  intent: RecordingIntent;
 };
+
+type RecordingIntent = 'offlineClip' | 'liveVisual';
+
+const OFFLINE_RECORDING_DURATION_MS = 15_000;
+
+const LIVE_VISUAL_RECORD_VERSIONS: Array<{ version: AlgorithmVersion; label: string; note: string }> = [
+  { version: 'v13', label: 'V13 · YOLO stable live', note: 'Best current YOLO live lock with occlusion smoothing.' },
+  { version: 'v12', label: 'V12 · YOLO production', note: 'Strict YOLO object-in-hand validation.' },
+  { version: 'v11', label: 'V11 · YOLO live', note: 'YOLO live masks with label display.' },
+  { version: 'v10', label: 'V10 · RF-DETR proxy', note: 'RF-DETR via frontend proxy for stricter networks.' },
+  { version: 'v8', label: 'V8 · RF-DETR live', note: 'RF-DETR live masks from the local server.' },
+  { version: 'v9', label: 'V9 · RealSense live', note: 'RealSense RGB-D live mode when depth is available.' }
+];
 
 type OfflineSegment = {
   start: number;
@@ -487,6 +502,7 @@ export default function App() {
   const animationRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const offlineVideoUrlRef = useRef<string | null>(null);
+  const offlineSourceFileRef = useRef<File | null>(null);
   const previousObjectRef = useRef<ObjectRegion | null>(null);
   const previousPalmRef = useRef<Point | null>(null);
   const manualPointRef = useRef<Point | null>(null);
@@ -535,6 +551,10 @@ export default function App() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
   const recordingStartedAtRef = useRef(0);
+  const recordingIntentRef = useRef<RecordingIntent>('offlineClip');
+  const recordingStopTimerRef = useRef<number | null>(null);
+  const visualRecordingFrameRef = useRef<number | null>(null);
+  const visualRecordingStreamRef = useRef<MediaStream | null>(null);
   const recordedClipUrlRef = useRef<string | null>(null);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
@@ -601,9 +621,12 @@ export default function App() {
   const [offlineTimeline, setOfflineTimeline] = useState<OfflineTimelinePoint[]>([]);
   const [offlineReport, setOfflineReport] = useState<OfflineReport>(null);
   const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'ready' | 'unsupported'>('idle');
+  const [recordingIntent, setRecordingIntent] = useState<RecordingIntent>('offlineClip');
   const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
   const [recordedClip, setRecordedClip] = useState<RecordedClip | null>(null);
-  const [yoloMaxChooserOpen, setYoloMaxChooserOpen] = useState(false);
+  const [recordSourceChooserOpen, setRecordSourceChooserOpen] = useState(false);
+  const [liveRecordVersionChooserOpen, setLiveRecordVersionChooserOpen] = useState(false);
+  const [offlineSourceChooser, setOfflineSourceChooser] = useState<OfflineSourceChoice | null>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [rfdetrRuntime, setRfdetrRuntime] = useState<RfdetrRuntime>(() => rfdetrRuntimeRef.current);
   const [realsenseRuntime, setRealSenseRuntime] = useState<RealSenseRuntime>(() => realsenseRuntimeRef.current);
@@ -679,7 +702,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (recordingStopTimerRef.current) window.clearTimeout(recordingStopTimerRef.current);
+      if (visualRecordingFrameRef.current) cancelAnimationFrame(visualRecordingFrameRef.current);
       if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+      visualRecordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       engineRef.current?.dispose();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
@@ -845,6 +871,7 @@ export default function App() {
       setMediaMode('live');
       setOfflineVideoName('');
       setOfflineAnalysisPhase('idle');
+      offlineSourceFileRef.current = null;
       offlineTimelineRef.current = [];
       offlineReportRef.current = null;
       offlineYoloMaxBatchRef.current = null;
@@ -871,6 +898,7 @@ export default function App() {
       setAnalysis(createEmptyAnalysis('Upload a video file to start offline review.'));
       return;
     }
+    offlineSourceFileRef.current = file;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
@@ -975,6 +1003,7 @@ export default function App() {
   }, [resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
   const processOfflineYoloMaxBatch = useCallback(async (file: File) => {
+    offlineSourceFileRef.current = file;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (offlineVideoUrlRef.current) {
@@ -1096,19 +1125,36 @@ export default function App() {
     void startOfflineVideo(file);
   }, [startOfflineVideo]);
 
+  const stopVisualRecordingCapture = useCallback(() => {
+    if (visualRecordingFrameRef.current) {
+      cancelAnimationFrame(visualRecordingFrameRef.current);
+      visualRecordingFrameRef.current = null;
+    }
+    visualRecordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    visualRecordingStreamRef.current = null;
+  }, []);
+
+  const clearRecordingStopTimer = useCallback(() => {
+    if (recordingStopTimerRef.current) {
+      window.clearTimeout(recordingStopTimerRef.current);
+      recordingStopTimerRef.current = null;
+    }
+  }, []);
+
   const clearRecordedClip = useCallback(() => {
     if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
     recordedClipUrlRef.current = null;
     setRecordedClip(null);
     setRecordingElapsedMs(0);
+    setRecordingIntent('offlineClip');
     setRecordingState('idle');
   }, []);
 
-  const startLiveRecording = useCallback(async () => {
+  const startLiveRecording = useCallback(async (intent: RecordingIntent = 'offlineClip') => {
     if (recordingState === 'recording') return;
     if (typeof MediaRecorder === 'undefined') {
       setRecordingState('unsupported');
-      setAnalysis(createEmptyAnalysis('This browser cannot record camera clips for offline review.'));
+      setAnalysis(createEmptyAnalysis('This browser cannot record camera clips.'));
       return;
     }
 
@@ -1118,30 +1164,71 @@ export default function App() {
 
     const stream = streamRef.current;
     if (!stream) {
-      setAnalysis(createEmptyAnalysis('Start the camera before recording an offline clip.'));
+      setAnalysis(createEmptyAnalysis('Start the camera before recording a clip.'));
       return;
     }
 
     const mimeType = mediaRecorderTypeFor('webm');
     if (!mimeType) {
       setRecordingState('unsupported');
-      setAnalysis(createEmptyAnalysis('This browser cannot record WebM clips for offline review.'));
+      setAnalysis(createEmptyAnalysis('This browser cannot record WebM clips.'));
       return;
     }
 
+    stopVisualRecordingCapture();
+    clearRecordingStopTimer();
     if (recordedClipUrlRef.current) URL.revokeObjectURL(recordedClipUrlRef.current);
     recordedClipUrlRef.current = null;
     setRecordedClip(null);
     recordedChunksRef.current = [];
     recordingStartedAtRef.current = Date.now();
+    recordingIntentRef.current = intent;
+    setRecordingIntent(intent);
     setRecordingElapsedMs(0);
 
-    const recorder = new MediaRecorder(stream, { mimeType });
+    let recordingStream: MediaStream = stream;
+    if (intent === 'liveVisual') {
+      const video = videoRef.current;
+      const overlay = canvasRef.current;
+      const canvasWithCapture = document.createElement('canvas') as HTMLCanvasElement & {
+        captureStream?: (frameRate?: number) => MediaStream;
+      };
+      if (!video || !overlay || !canvasWithCapture.captureStream) {
+        setAnalysis(createEmptyAnalysis('Visual recording is not supported in this browser. Try the offline recording path.'));
+        return;
+      }
+      const composite = canvasWithCapture;
+      composite.width = video.videoWidth || overlay.width || 1280;
+      composite.height = video.videoHeight || overlay.height || 720;
+      const ctx = composite.getContext('2d');
+      if (!ctx) {
+        setAnalysis(createEmptyAnalysis('Visual recording canvas could not start. Try again.'));
+        return;
+      }
+
+      const drawCompositeFrame = () => {
+        const liveVideo = videoRef.current;
+        const liveOverlay = canvasRef.current;
+        if (!liveVideo || !liveOverlay) return;
+        if (liveVideo.readyState >= 2) {
+          drawExportVideoFrame(ctx, liveVideo, composite.width, composite.height, mirroredRef.current);
+          ctx.drawImage(liveOverlay, 0, 0, composite.width, composite.height);
+        }
+        visualRecordingFrameRef.current = requestAnimationFrame(drawCompositeFrame);
+      };
+      drawCompositeFrame();
+      recordingStream = composite.captureStream(30);
+      visualRecordingStreamRef.current = recordingStream;
+    }
+
+    const recorder = new MediaRecorder(recordingStream, { mimeType });
     recorderRef.current = recorder;
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) recordedChunksRef.current.push(event.data);
     };
     recorder.onstop = () => {
+      clearRecordingStopTimer();
+      stopVisualRecordingCapture();
       const durationMs = Math.max(0, Date.now() - recordingStartedAtRef.current);
       const blob = new Blob(recordedChunksRef.current, { type: mimeType });
       recordedChunksRef.current = [];
@@ -1152,45 +1239,92 @@ export default function App() {
         return;
       }
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const file = new File([blob], `gripsense-recording-${stamp}.webm`, { type: mimeType, lastModified: Date.now() });
+      const clipIntent = recordingIntentRef.current;
+      const file = new File([blob], `gripsense-${clipIntent === 'liveVisual' ? 'visual-recording' : 'offline-recording'}-${stamp}.webm`, {
+        type: mimeType,
+        lastModified: Date.now()
+      });
       const url = URL.createObjectURL(blob);
       recordedClipUrlRef.current = url;
-      setRecordedClip({ file, url, durationMs });
+      setRecordedClip({ file, url, durationMs, intent: clipIntent });
       setRecordingElapsedMs(durationMs);
       setRecordingState('ready');
-      setAnalysis(createEmptyAnalysis('Recording captured. Choose Offline V1, Offline V2, or Offline Max to process it.'));
+      setAnalysis(
+        createEmptyAnalysis(
+          clipIntent === 'liveVisual'
+            ? 'Visual recording captured. Play it back or download the WebM.'
+            : '15-second recording captured. Choose an offline processor to add grip visuals.'
+        )
+      );
     };
     recorder.start(250);
     setRecordingState('recording');
-    setAnalysis(createEmptyAnalysis('Recording live camera. Stop recording to process this clip offline.'));
-  }, [recordingState, startCamera]);
+    setAnalysis(
+      createEmptyAnalysis(
+        intent === 'liveVisual'
+          ? 'Recording with live visuals. Stop recording when ready.'
+          : 'Recording a plain 15-second camera clip for offline processing. Visual overlays are hidden while recording.'
+      )
+    );
 
-  const openYoloMaxChooser = useCallback(() => {
-    setYoloMaxChooserOpen((value) => !value);
+    if (intent === 'offlineClip') {
+      recordingStopTimerRef.current = window.setTimeout(() => {
+        const activeRecorder = recorderRef.current;
+        if (activeRecorder?.state === 'recording') activeRecorder.stop();
+      }, OFFLINE_RECORDING_DURATION_MS);
+    }
+  }, [clearRecordingStopTimer, recordingState, startCamera, stopVisualRecordingCapture]);
+
+  const openOfflineSourceChooser = useCallback((choice: OfflineSourceChoice) => {
+    setOfflineSourceChooser(choice);
   }, []);
 
-  const chooseYoloMaxUpload = useCallback(() => {
-    setYoloMaxChooserOpen(false);
-    offlineYoloMaxInputRef.current?.click();
+  const closeOfflineSourceChooser = useCallback(() => {
+    setOfflineSourceChooser(null);
   }, []);
 
-  const chooseYoloMaxRecord = useCallback(() => {
-    setYoloMaxChooserOpen(false);
-    offlineReviewVersionRef.current = 'yoloMax';
-    setOfflineReviewVersion('yoloMax');
-    resetRfdetrRuntime('Offline YOLO Max selected. YOLO will provide mask evidence for RGB review.', YOLO_ENDPOINT);
-    resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
-    void startLiveRecording();
-  }, [resetRealSenseRuntime, resetRfdetrRuntime, startLiveRecording]);
+  const chooseOfflineSourceUpload = useCallback(() => {
+    const choice = offlineSourceChooser;
+    if (!choice) return;
+    setOfflineSourceChooser(null);
+    if (choice === 'offlineMax') {
+      offlineMaxInputRef.current?.click();
+      return;
+    }
+    if (choice === 'yoloMax') {
+      offlineYoloMaxInputRef.current?.click();
+      return;
+    }
+    offlineVideoInputRef.current?.click();
+  }, [offlineSourceChooser]);
+
+  const chooseOfflineSourceRecord = useCallback(() => {
+    const choice = offlineSourceChooser;
+    if (!choice) return;
+    setOfflineSourceChooser(null);
+    if (choice === 'offlineMax') {
+      offlineReviewVersionRef.current = 'max';
+      setOfflineReviewVersion('max');
+      resetRfdetrRuntime('Offline Max selected. Record a clip, then process it with Max.');
+      resetRealSenseRuntime('Offline Max selected. D455/RealSense depth will be sampled when available.');
+    } else if (choice === 'yoloMax') {
+      offlineReviewVersionRef.current = 'yoloMax';
+      setOfflineReviewVersion('yoloMax');
+      resetRfdetrRuntime('Offline YOLO Max selected. Record a clip, then process it with the local YOLO batch server.', YOLO_ENDPOINT);
+      resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
+    }
+    void startLiveRecording('offlineClip');
+  }, [offlineSourceChooser, resetRealSenseRuntime, resetRfdetrRuntime, startLiveRecording]);
 
   const stopLiveRecording = useCallback(() => {
+    clearRecordingStopTimer();
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== 'recording') return;
     recorder.stop();
-  }, []);
+  }, [clearRecordingStopTimer]);
 
   const processRecordedClip = useCallback((version: OfflineReviewVersion) => {
-    if (!recordedClip) return;
+    if (!recordedClip || recordedClip.intent !== 'offlineClip') return;
     offlineReviewVersionRef.current = version;
     setOfflineReviewVersion(version);
     const file = recordedClip.file;
@@ -1198,8 +1332,14 @@ export default function App() {
     recordedClipUrlRef.current = null;
     setRecordedClip(null);
     setRecordingState('idle');
+    if (version === 'yoloMax') {
+      resetRfdetrRuntime('Offline YOLO Max selected. Processing the recorded clip with the local YOLO batch server.', YOLO_ENDPOINT);
+      resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
+      void processOfflineYoloMaxBatch(file);
+      return;
+    }
     void startOfflineVideo(file);
-  }, [recordedClip, startOfflineVideo]);
+  }, [processOfflineYoloMaxBatch, recordedClip, resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
   const updateCalibrationCapture = useCallback((frameAnalysis: GripAnalysis, timestamp: number) => {
     const capture = calibrationCaptureRef.current;
@@ -2222,6 +2362,15 @@ export default function App() {
     [algorithmVersion, resetRealSenseRuntime, resetRfdetrRuntime, resetV3Runtime]
   );
 
+  const startVisualRecordingWithVersion = useCallback(
+    (version: AlgorithmVersion) => {
+      selectAlgorithmVersion(version);
+      setLiveRecordVersionChooserOpen(false);
+      void startLiveRecording('liveVisual');
+    },
+    [selectAlgorithmVersion, startLiveRecording]
+  );
+
   const selectTrainingTargetVersion = useCallback((version: AlgorithmVersion) => {
     const targetVersion = normalizeTrainingTargetVersion(version);
     trainingTargetVersionRef.current = targetVersion;
@@ -2592,6 +2741,21 @@ export default function App() {
       }
       offlineYoloMaxBatchRef.current = null;
       offlineYoloMaxServerPreviewRef.current = false;
+      const sourceFile = offlineSourceFileRef.current;
+      if (sourceFile) {
+        void startOfflineVideo(sourceFile);
+        return;
+      }
+    }
+
+    if (version === 'yoloMax') {
+      const sourceFile = offlineSourceFileRef.current;
+      if (sourceFile) {
+        resetRfdetrRuntime('Offline YOLO Max selected. Processing the original upload with the local YOLO batch server.', YOLO_ENDPOINT);
+        resetRealSenseRuntime('RealSense depth idle. Offline YOLO Max uses RGB YOLO evidence only.');
+        void processOfflineYoloMaxBatch(sourceFile);
+        return;
+      }
     }
 
     if (version === 'v1') {
@@ -2657,7 +2821,7 @@ export default function App() {
           : 'Offline video loaded. Press play once to let V2 process the full video.'
       ));
     });
-  }, [resetRealSenseRuntime, resetRfdetrRuntime, runLoop]);
+  }, [processOfflineYoloMaxBatch, resetRealSenseRuntime, resetRfdetrRuntime, runLoop, startOfflineVideo]);
 
   const deleteTrainingSample = useCallback((id: string) => {
     setTrainingSamples((current) => {
@@ -2755,6 +2919,7 @@ export default function App() {
       videoRef.current.pause();
       videoRef.current.playbackRate = 1;
       videoRef.current.currentTime = 0;
+      setOfflineVideoExportStatus(`${offlineVersionLabel(offlineReviewVersionRef.current)} review is ready. Play the processed review or download CSV, JSON, MP4, MP4 Compact, or WebM.`);
     }
   }, [offlineVideoName]);
 
@@ -2935,7 +3100,9 @@ export default function App() {
         'app-shell',
         mediaMode === 'offline' ? 'offline-shell' : '',
         offlineBatchProcessing ? 'offline-batch-processing' : '',
-        uploadOnlyMode ? 'upload-only-processing' : ''
+        uploadOnlyMode ? 'upload-only-processing' : '',
+        recordingState === 'recording' && recordingIntent === 'offlineClip' ? 'plain-offline-recording' : '',
+        recordingState === 'recording' && recordingIntent === 'liveVisual' ? 'visual-recording' : ''
       ]
         .filter(Boolean)
         .join(' ')}
@@ -3016,7 +3183,7 @@ export default function App() {
                       : 'Start'}
               </span>
             </button>
-            <button className="tool-button" onClick={() => offlineVideoInputRef.current?.click()} aria-label="Upload offline review video">
+            <button className="tool-button" onClick={() => openOfflineSourceChooser('offlineVideo')} aria-label="Choose offline review video source">
               <Upload size={17} />
               <span>Offline video</span>
             </button>
@@ -3027,7 +3194,7 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineVideoUpload}
             />
-            <button className="tool-button primary" onClick={() => offlineMaxInputRef.current?.click()} aria-label="Upload Offline Max review video">
+            <button className="tool-button primary" onClick={() => openOfflineSourceChooser('offlineMax')} aria-label="Choose Offline Max review video source">
               <Sparkles size={17} />
               <span>Offline Max</span>
             </button>
@@ -3038,24 +3205,10 @@ export default function App() {
               accept="video/mp4,video/webm,video/quicktime,video/*"
               onChange={handleOfflineMaxUpload}
             />
-            <div className="toolbar-menu-wrap">
-              <button className="tool-button primary" onClick={openYoloMaxChooser} aria-label="Choose Offline YOLO Max source" aria-expanded={yoloMaxChooserOpen}>
-                <Sparkles size={17} />
-                <span>YOLO Max</span>
-              </button>
-              {yoloMaxChooserOpen && (
-                <div className="toolbar-choice-menu" role="menu" aria-label="Offline YOLO Max source">
-                  <button type="button" onClick={chooseYoloMaxUpload} role="menuitem">
-                    <Upload size={16} />
-                    <span>Upload gallery</span>
-                  </button>
-                  <button type="button" onClick={chooseYoloMaxRecord} role="menuitem" disabled={recordingState === 'recording' || recordingState === 'unsupported'}>
-                    <Video size={16} />
-                    <span>Record live</span>
-                  </button>
-                </div>
-              )}
-            </div>
+            <button className="tool-button primary" onClick={() => openOfflineSourceChooser('yoloMax')} aria-label="Choose Offline YOLO Max source">
+              <Sparkles size={17} />
+              <span>YOLO Max</span>
+            </button>
             <input
               ref={offlineYoloMaxInputRef}
               className="hidden-file-input"
@@ -3081,16 +3234,24 @@ export default function App() {
               </button>
             )}
             {recordingState === 'recording' ? (
-              <button className="tool-button recording-active" onClick={stopLiveRecording} aria-label="Stop recording offline review clip">
+              <button
+                className="tool-button recording-active"
+                onClick={stopLiveRecording}
+                aria-label={recordingIntent === 'liveVisual' ? 'Stop visual recording' : 'Stop offline clip recording'}
+              >
                 <Square size={16} />
-                <span>Stop {formatRecordingDuration(recordingElapsedMs)}</span>
+                <span>
+                  {recordingIntent === 'offlineClip'
+                    ? `Rec ${Math.max(0, Math.ceil((OFFLINE_RECORDING_DURATION_MS - recordingElapsedMs) / 1000))}s`
+                    : `Stop ${formatRecordingDuration(recordingElapsedMs)}`}
+                </span>
               </button>
             ) : (
               <button
                 className={recordedClip ? 'tool-button recorded-ready' : 'tool-button'}
-                onClick={startLiveRecording}
+                onClick={() => setRecordSourceChooserOpen(true)}
                 disabled={mediaMode === 'offline' || recordingState === 'unsupported'}
-                aria-label="Record camera clip for offline review"
+                aria-label="Choose recording mode"
               >
                 <Video size={17} />
                 <span>{recordedClip ? 'Recorded' : 'Record'}</span>
@@ -3166,40 +3327,169 @@ export default function App() {
         )}
 
         {recordedClip && mediaMode === 'live' && !trainerOpen && (
-          <div className="recording-review-panel" role="dialog" aria-label="Process recorded clip">
-            <div className="recording-preview">
-              <video src={recordedClip.url} muted playsInline controls />
-            </div>
+          <div
+            className={recordedClip.intent === 'offlineClip' ? 'recording-review-panel offline-clip' : 'recording-review-panel visual-clip'}
+            role="dialog"
+            aria-label={recordedClip.intent === 'offlineClip' ? 'Process recorded clip' : 'Review visual recording'}
+          >
+            {recordedClip.intent === 'liveVisual' && (
+              <div className="recording-preview">
+                <video src={recordedClip.url} muted playsInline controls />
+              </div>
+            )}
             <div className="recording-review-copy">
-              <p className="eyebrow">Recorded offline clip</p>
-              <h2>Process recording</h2>
+              <p className="eyebrow">{recordedClip.intent === 'offlineClip' ? 'Plain offline clip' : 'Visual recording'}</p>
+              <h2>{recordedClip.intent === 'offlineClip' ? 'Choose offline processor' : 'Play or download recording'}</h2>
               <p>
-                Choose the offline engine for this camera recording. V1 starts quickly; V2 scans the clip; Max chooses D455/RealSense RGB-D when available or RF-DETR RGB otherwise; YOLO Max uses YOLO masks.
+                {recordedClip.intent === 'offlineClip'
+                  ? 'The 15-second camera clip was recorded without live overlays. Pick an offline mode and the app will process the whole clip, show the animation, then enable playback and visual downloads.'
+                  : 'This clip was recorded with the selected live overlay already burned in. Use the video controls to play it, or download the WebM directly.'}
               </p>
               <div className="recording-meta">
                 <span>Duration</span>
                 <strong>{formatRecordingDuration(recordedClip.durationMs)}</strong>
               </div>
               <div className="recording-actions">
-                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v1')}>
-                  <Upload size={17} />
-                  <span>Process V1</span>
-                </button>
-                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v2')}>
-                  <Sparkles size={17} />
-                  <span>Process V2</span>
-                </button>
-                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('max')}>
-                  <Sparkles size={17} />
-                  <span>Process Max</span>
-                </button>
-                <button type="button" className="tool-button primary" onClick={() => processRecordedClip('yoloMax')}>
-                  <Sparkles size={17} />
-                  <span>YOLO Max</span>
-                </button>
+                {recordedClip.intent === 'offlineClip' ? (
+                  <>
+                    <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v1')}>
+                      <Upload size={17} />
+                      <span>Process V1</span>
+                    </button>
+                    <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v2')}>
+                      <Sparkles size={17} />
+                      <span>Process V2</span>
+                    </button>
+                    <button type="button" className="tool-button primary" onClick={() => processRecordedClip('max')}>
+                      <Sparkles size={17} />
+                      <span>Process Max</span>
+                    </button>
+                    <button type="button" className="tool-button primary" onClick={() => processRecordedClip('yoloMax')}>
+                      <Sparkles size={17} />
+                      <span>YOLO Max</span>
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="tool-button primary" onClick={() => downloadUrlFile(recordedClip.url, recordedClip.file.name)}>
+                    <Upload size={17} />
+                    <span>Download WebM</span>
+                  </button>
+                )}
                 <button type="button" className="tool-button" onClick={clearRecordedClip}>
                   <X size={17} />
                   <span>Discard</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {recordSourceChooserOpen && !trainerOpen && (
+          <div className="offline-source-backdrop" role="dialog" aria-modal="true" aria-label="Choose recording mode">
+            <div className="offline-source-card">
+              <button type="button" className="offline-source-close" onClick={() => setRecordSourceChooserOpen(false)} aria-label="Close recording chooser">
+                <X size={18} />
+              </button>
+              <p className="eyebrow">Record</p>
+              <h2>Choose recording mode</h2>
+              <p>
+                Record a clean camera clip for offline processing, or burn the current live visual overlay into a downloadable recording.
+              </p>
+              <div className="offline-source-actions">
+                <button
+                  type="button"
+                  className="offline-source-option primary"
+                  onClick={() => {
+                    setRecordSourceChooserOpen(false);
+                    void startLiveRecording('offlineClip');
+                  }}
+                >
+                  <Video size={22} />
+                  <strong>15-second offline clip</strong>
+                  <span>Records plain camera only, hides live visuals, then asks which offline engine to use.</span>
+                </button>
+                <button
+                  type="button"
+                  className="offline-source-option"
+                  onClick={() => {
+                    setRecordSourceChooserOpen(false);
+                    setLiveRecordVersionChooserOpen(true);
+                  }}
+                >
+                  <Sparkles size={22} />
+                  <strong>Record with visuals</strong>
+                  <span>Choose a live model first, then record camera plus overlay.</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {liveRecordVersionChooserOpen && !trainerOpen && (
+          <div className="offline-source-backdrop" role="dialog" aria-modal="true" aria-label="Choose live recording model">
+            <div className="offline-source-card">
+              <button type="button" className="offline-source-close" onClick={() => setLiveRecordVersionChooserOpen(false)} aria-label="Close live model chooser">
+                <X size={18} />
+              </button>
+              <p className="eyebrow">Visual recording</p>
+              <h2>Choose live model</h2>
+              <p>
+                The selected live model will run normally and the visible overlay will be recorded into the video.
+              </p>
+              <div className="record-version-list">
+                {LIVE_VISUAL_RECORD_VERSIONS.map((option) => (
+                  <button
+                    key={option.version}
+                    type="button"
+                    className={option.version === algorithmVersion ? 'offline-source-option primary' : 'offline-source-option'}
+                    onClick={() => startVisualRecordingWithVersion(option.version)}
+                  >
+                    <Sparkles size={22} />
+                    <strong>{option.label}</strong>
+                    <span>{option.note}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {offlineSourceChooser && !trainerOpen && (
+          <div className="offline-source-backdrop" role="dialog" aria-modal="true" aria-label="Choose offline video source">
+            <div className="offline-source-card">
+              <button type="button" className="offline-source-close" onClick={closeOfflineSourceChooser} aria-label="Close source chooser">
+                <X size={18} />
+              </button>
+              <p className="eyebrow">
+                {offlineSourceChooser === 'yoloMax'
+                  ? 'Offline YOLO Max'
+                  : offlineSourceChooser === 'offlineMax'
+                    ? 'Offline Max'
+                    : 'Offline video'}
+              </p>
+              <h2>Choose video source</h2>
+              <p>
+                {offlineSourceChooser === 'yoloMax'
+                  ? 'Use the same local YOLO Max batch processor for preview and MP4 downloads.'
+                  : offlineSourceChooser === 'offlineMax'
+                    ? 'Scan the full clip first, using RealSense RGB-D when available or RF-DETR RGB otherwise.'
+                    : 'Run the selected offline review mode over a local video file or a short live recording.'}
+              </p>
+              <div className="offline-source-actions">
+                <button type="button" className="offline-source-option primary" onClick={chooseOfflineSourceUpload}>
+                  <Upload size={22} />
+                  <strong>Upload from gallery</strong>
+                  <span>Pick a saved MP4, MOV, or WebM, then process before review.</span>
+                </button>
+                <button
+                  type="button"
+                  className="offline-source-option"
+                  onClick={chooseOfflineSourceRecord}
+                  disabled={recordingState === 'recording' || recordingState === 'unsupported'}
+                >
+                  <Video size={22} />
+                  <strong>Record live</strong>
+                  <span>Capture a camera clip, then process it with this offline engine.</span>
                 </button>
               </div>
             </div>
@@ -3319,7 +3609,7 @@ export default function App() {
                   <strong>{offlineReport.summary}</strong>
                 </div>
               )}
-              {isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'complete' && offlineTimeline.length > 0 && (
+              {isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'complete' && (
                 <button type="button" className="offline-review-play-button" onClick={playOfflineReview}>
                   <Play size={16} />
                   <span>Play processed review</span>

@@ -285,7 +285,7 @@ The frontend calls `POST http://127.0.0.1:7867/api/rfdetr/analyze` by default fo
 
 ## Offline Video Review
 
-GripSense RGB also supports offline review. Click **Offline video**, choose an MP4/WebM/MOV file, and the same hand/object/grip pipeline runs over the uploaded video. The uploaded file stays local in the browser.
+GripSense RGB also supports offline review. Click **Offline video**, **Offline Max**, or **YOLO Max** and the app asks whether you want to **Record live** or **Upload from gallery**. Gallery upload accepts MP4/WebM/MOV files, processes the clip first, then shows the completed review with **Play review** plus CSV, JSON, MP4, MP4 Compact, and WebM download buttons. The toolbar **Record** button has two paths: **15-second offline clip** records plain camera video without live overlays, then asks which offline processor to use; **Record with visuals** asks which live model to run, then records the visible overlay into a WebM. The uploaded or recorded file stays local in the browser unless you are using the local inference server, where frames are sent only to `127.0.0.1`.
 
 Offline mode adds liquid-glass overlays directly on top of the video:
 
@@ -302,8 +302,10 @@ Offline Review has four existing algorithms plus a YOLO Max path:
 - **Offline V1**: the original offline review path. It is unchanged and starts quickly.
 - **Offline V2**: scans the full clip before review, uses RF-DETR object masks when the local server is available, and then applies future/past smoothing. Its timeline includes grip score, object score, contact evidence, weak segments, and slip events. If RF-DETR is unavailable, Offline V2 keeps using the existing local review path and reports the server status in the overlay.
 - **Offline V3 · RealSense**: adds aligned RealSense stereo depth contact on top of Offline V2's RF-DETR mask pipeline. It still scans the full clip before preview/export, then applies future/past smoothing with depth contact, depth separation, stereo confidence, object score, weak segments, and slip events. If RealSense depth is unavailable, Offline V3 reports that state and falls back to RF-DETR/RGB evidence rather than inventing depth confidence.
-- **Offline Max**: the best-available offline path for both RGB webcams and RealSense D455/D445. Click **Offline Max**, upload a video, and the app scans the full clip first. If enough reliable D455/D445 depth frames are present, Max uses the RGB-D path; otherwise it automatically falls back to the RF-DETR RGB path. The preview and exports use the finalized smoothed timeline, not a first-pass preview.
-- **Offline YOLO Max**: scans the full clip first like Offline Max, but uses YOLO segmentation masks instead of RF-DETR for RGB object evidence. It still rejects `person`, does not trust class labels for grip scoring, and uses future/past smoothing before preview/export.
+- **Offline Max**: the best-available offline path for both RGB webcams and RealSense D455/D445. Click **Offline Max**, choose **Upload from gallery** or **Record live**, and the app scans the full clip first. If enough reliable D455/D445 depth frames are present, Max uses the RGB-D path; otherwise it automatically falls back to the RF-DETR RGB path. The preview and exports use the finalized smoothed timeline, not a first-pass preview.
+- **Offline YOLO Max**: scans the full clip first like Offline Max, but uses YOLO segmentation masks instead of RF-DETR for RGB object evidence. Click **YOLO Max**, choose **Upload from gallery** or **Record live**, and keep the local inference server running. Browser preview, **Play review**, MP4, and MP4 Compact downloads all reuse the finalized server-generated annotated artifact from the YOLO Max batch processor, so the website result matches the processed-folder result. It still rejects `person`, does not trust class labels for grip scoring, and uses future/past smoothing before preview/export.
+
+On Windows, start `scripts\start_windows_inference.ps1 -Port 7867` first, then `scripts\start_windows_frontend.ps1 -Port 7676 -InferencePort 7867`. The frontend calls same-origin `/api/gripsense/...` endpoints and Vite proxies them to `127.0.0.1:7867`, which avoids most office SSL/proxy interception problems because the browser is not calling an external HTTPS model server.
 
 ## Object Profile V2 Training
 

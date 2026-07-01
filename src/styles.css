@@ -48,6 +48,11 @@ button {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.app-shell.plain-offline-recording .tracking-canvas {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .camera-workspace {
   position: relative;
   min-width: 0;
@@ -509,6 +514,11 @@ button {
   transform: translateX(-50%);
 }
 
+.recording-review-panel.offline-clip {
+  grid-template-columns: minmax(300px, 560px);
+  width: min(600px, calc(100% - 40px));
+}
+
 .recording-preview {
   overflow: hidden;
   min-height: 150px;
@@ -529,6 +539,116 @@ button {
   display: grid;
   align-content: center;
   gap: 10px;
+}
+
+.recording-review-panel.offline-clip .recording-review-copy {
+  align-content: start;
+}
+
+.record-version-list {
+  display: grid;
+  gap: 10px;
+}
+
+.offline-source-backdrop {
+  position: absolute;
+  z-index: 24;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 6, 12, 0.5);
+  backdrop-filter: blur(8px) saturate(1.08);
+}
+
+.offline-source-card {
+  position: relative;
+  display: grid;
+  gap: 14px;
+  width: min(540px, calc(100vw - 36px));
+  padding: 22px;
+  border: 1px solid rgba(103, 232, 249, 0.22);
+  border-radius: 10px;
+  color: #e5eef8;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(8, 13, 20, 0.78)),
+    rgba(14, 21, 30, 0.86);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.46);
+}
+
+.offline-source-card h2 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.7rem;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+
+.offline-source-card p:not(.eyebrow) {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.88);
+  line-height: 1.45;
+}
+
+.offline-source-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  color: #dbeafe;
+  background: rgba(15, 23, 42, 0.72);
+  cursor: pointer;
+}
+
+.offline-source-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.offline-source-option {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 126px;
+  padding: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  color: #e0f2fe;
+  background: rgba(15, 23, 42, 0.72);
+  text-align: left;
+  cursor: pointer;
+}
+
+.offline-source-option.primary {
+  color: #071018;
+  background: linear-gradient(135deg, #67e8f9, #a7f3d0);
+}
+
+.offline-source-option strong {
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+.offline-source-option span {
+  color: rgba(203, 213, 225, 0.82);
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.offline-source-option.primary span {
+  color: rgba(7, 16, 24, 0.72);
+}
+
+.offline-source-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .recording-review-copy h2,
@@ -2196,6 +2316,10 @@ h2 {
   .portal-camera,
   .portal-video {
     min-height: 320px;
+  }
+
+  .offline-source-actions {
+    grid-template-columns: 1fr;
   }
 
   .offline-review-overlay {

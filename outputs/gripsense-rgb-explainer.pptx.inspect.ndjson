@@ -1,0 +1,184 @@
+{"kind":"deck","id":"pr/edzkdl","name":"Deck"}
+{"kind":"layout","layoutId":"1d8be438-d0a9-46b8-8f8d-fb6d131655bb","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"243dd959-2cc6-4644-8716-84f71cd1c211","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/cbjsdo","slide":1,"title":"GripSense RGB","textShapes":14}
+{"kind":"textbox","id":"sh/z61032ls","slide":1,"text":"GripSense RGB","textPreview":"GripSense RGB","textChars":13,"textLines":1,"bbox":[58,54,620,72]}
+{"kind":"textbox","id":"sh/orytsvu9","slide":1,"text":"Vision-based grip analysis for live camera and offline review.","textPreview":"Vision-based grip analysis for live camera and offline review.","textChars":62,"textLines":1,"bbox":[60,136,650,70]}
+{"kind":"shape","id":"sh/hcrmhk3q","slide":1,"bbox":[720,88,446.5,342]}
+{"kind":"shape","id":"sh/a9w3m94f","slide":1,"bbox":[739,107,408.5,304]}
+{"kind":"shape","id":"sh/zupwb2hw","slide":1,"bbox":[762.75,146.9,125.4,114]}
+{"kind":"textbox","id":"sh/sfil0rqd","slide":1,"text":"rejected\nbackground","textPreview":"rejected | background","textChars":19,"textLines":2,"bbox":[769.4,179.2,112.1,43.7]}
+{"kind":"shape","id":"sh/h0fepkzu","slide":1,"bbox":[924.25,160.2,112.1,199.5]}
+{"kind":"shape","id":"sh/65wjudg7","slide":1,"bbox":[889.1,143.1,180.5,245.1]}
+{"kind":"shape","id":"sh/zqtcj6to","slide":1,"bbox":[976.5,333.1,-43.7,-66.5]}
+{"kind":"shape","id":"sh/zupwb2hw","slide":1,"bbox":[932.8,266.6,-13.3,-55.1]}
+{"kind":"shape","id":"sh/a9w3m94f","slide":1,"bbox":[919.5,211.5,42.75,62.7]}
+{"kind":"shape","id":"sh/h0fepkzu","slide":1,"bbox":[962.25,274.2,38,-56.05]}
+{"kind":"shape","id":"sh/sfil0rqd","slide":1,"bbox":[1000.25,218.15,-16.15,73.15]}
+{"kind":"shape","id":"sh/z61032ls","slide":1,"bbox":[984.1,291.3,57,-44.65]}
+{"kind":"shape","id":"sh/al87ed8b","slide":1,"bbox":[1041.1,246.65,-43.7,62.7]}
+{"kind":"shape","id":"sh/hcrmhk3q","slide":1,"bbox":[997.4,309.35,66.5,-6.65]}
+{"kind":"shape","id":"sh/orytsvu9","slide":1,"bbox":[1063.9,302.7,-53.2,32.3]}
+{"kind":"shape","id":"sh/zed8v6ps","slide":1,"bbox":[1010.7,335,45.6,30.4]}
+{"kind":"shape","id":"sh/6xkf6dcb","slide":1,"bbox":[1056.3,365.4,-79.8,-32.3]}
+{"kind":"shape","id":"sh/e1w7mp0b","slide":1,"bbox":[969.85,326.45,13.3,13.3]}
+{"kind":"shape","id":"sh/7mp0bi9s","slide":1,"bbox":[926.15,259.95,13.3,13.3]}
+{"kind":"shape","id":"sh/w7mp0bi9","slide":1,"bbox":[912.85,204.85,13.3,13.3]}
+{"kind":"shape","id":"sh/psfil0rq","slide":1,"bbox":[955.6,267.55,13.3,13.3]}
+{"kind":"shape","id":"sh/epkzupwb","slide":1,"bbox":[993.6,211.5,13.3,13.3]}
+{"kind":"shape","id":"sh/7adsji5s","slide":1,"bbox":[977.45,284.65,13.3,13.3]}
+{"kind":"shape","id":"sh/wval87ed","slide":1,"bbox":[1034.45,240,13.3,13.3]}
+{"kind":"shape","id":"sh/pg3ex0nu","slide":1,"bbox":[990.75,302.7,13.3,13.3]}
+{"kind":"shape","id":"sh/eloj2t83","slide":1,"bbox":[1057.25,296.05,13.3,13.3]}
+{"kind":"shape","id":"sh/36hcrmhk","slide":1,"bbox":[1004.05,328.35,13.3,13.3]}
+{"kind":"shape","id":"sh/t83itgfm","slide":1,"bbox":[1049.65,358.75,13.3,13.3]}
+{"kind":"shape","id":"sh/4nap4r65","slide":1,"bbox":[969.85,326.45,13.3,13.3]}
+{"kind":"shape","id":"sh/b2hwfyxo","slide":1,"bbox":[1008.8,291.3,32.3,32.3]}
+{"kind":"textbox","id":"sh/mhk3q5o7","slide":1,"text":"contact","textPreview":"contact","textChars":7,"textLines":1,"bbox":[1046.8,295.1,68.4,22.8]}
+{"kind":"shape","id":"sh/twra5gbq","slide":1,"bbox":[60,260,310,230]}
+{"kind":"textbox","id":"sh/4byhgn29","slide":1,"text":"What it does","textPreview":"What it does","textChars":12,"textLines":1,"bbox":[82,282,250,34]}
+{"kind":"shape","id":"sh/bq1oryts","slide":1,"bbox":[84,341,10,10]}
+{"kind":"textbox","id":"sh/m58z25kb","slide":1,"text":"Detects whether an object is actually in the hand.","textPreview":"Detects whether an object is actually in the hand.","textChars":50,"textLines":1,"bbox":[106,334,228,44]}
+{"kind":"shape","id":"sh/tsvu9kni","slide":1,"bbox":[84,403,10,10]}
+{"kind":"textbox","id":"sh/47y1kre1","slide":1,"text":"Scores grip using object evidence plus hand posture.","textPreview":"Scores grip using object evidence plus hand posture.","textChars":52,"textLines":1,"bbox":[106,396,228,44]}
+{"kind":"shape","id":"sh/8z25kb6x","slide":1,"bbox":[405,260,300,230]}
+{"kind":"textbox","id":"sh/1gvy90je","slide":1,"text":"Current focus","textPreview":"Current focus","textChars":13,"textLines":1,"bbox":[427,282,250,34]}
+{"kind":"shape","id":"sh/qtcj6tov","slide":1,"bbox":[429,341,10,10]}
+{"kind":"textbox","id":"sh/je9cvixc","slide":1,"text":"V13: reduce false locks on tables and cubicle panels.","textPreview":"V13: reduce false locks on tables and cubicle panels.","textChars":53,"textLines":1,"bbox":[451,334,228,44]}
+{"kind":"shape","id":"sh/87ed8bat","slide":1,"bbox":[429,415,10,10]}
+{"kind":"textbox","id":"sh/xs72x4na","slide":1,"text":"YOLO Max offline: stricter object-in-hand scoring.","textPreview":"YOLO Max offline: stricter object-in-hand scoring.","textChars":50,"textLines":1,"bbox":[451,408,228,44]}
+{"kind":"shape","id":"sh/q1orytsv","slide":1,"bbox":[60,540,120,34]}
+{"kind":"textbox","id":"sh/fmlkjm1c","slide":1,"text":"Live","textPreview":"Live","textChars":4,"textLines":1,"bbox":[74,547,92,20]}
+{"kind":"shape","id":"sh/8jqh0fep","slide":1,"bbox":[200,540,130,34]}
+{"kind":"textbox","id":"sh/x4nap4r6","slide":1,"text":"Offline","textPreview":"Offline","textChars":7,"textLines":1,"bbox":[214,547,102,20]}
+{"kind":"shape","id":"sh/n29gr2p8","slide":1,"bbox":[350,540,130,34]}
+{"kind":"textbox","id":"sh/yhgn29gr","slide":1,"text":"Labels","textPreview":"Labels","textChars":6,"textLines":1,"bbox":[364,547,102,20]}
+{"kind":"textbox","id":"sh/58z25kb6","slide":1,"text":"GripSense RGB / 1","textPreview":"GripSense RGB / 1","textChars":17,"textLines":1,"bbox":[56,672,220,22]}
+{"kind":"notes","id":"nt/cbjsdo","slide":1,"text":""}
+{"kind":"slide","id":"sl/mcqa1s","slide":2,"title":"HOW IT WORKS","textShapes":19}
+{"kind":"textbox","id":"sh/sneloj2t","slide":2,"text":"HOW IT WORKS","textPreview":"HOW IT WORKS","textChars":12,"textLines":1,"bbox":[56,44,360,24]}
+{"kind":"textbox","id":"sh/32lszqtc","slide":2,"text":"Grip is not hand closure alone","textPreview":"Grip is not hand closure alone","textChars":30,"textLines":1,"bbox":[56,78,850,74]}
+{"kind":"textbox","id":"sh/ahoza1gv","slide":2,"text":"The system combines hand geometry with detector-backed object evidence before it allows a grip label.","textPreview":"The system combines hand geometry with detector-backed object evidence before it allows a grip label.","textChars":101,"textLines":1,"bbox":[58,156,760,60]}
+{"kind":"shape","id":"sh/lkjm1cfa","slide":2,"bbox":[72,270,200,250]}
+{"kind":"textbox","id":"sh/szqtcj6t","slide":2,"text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[90,292,50,52]}
+{"kind":"textbox","id":"sh/3ex0nuxc","slide":2,"text":"Frame capture","textPreview":"Frame capture","textChars":13,"textLines":1,"bbox":[90,360,164,34]}
+{"kind":"textbox","id":"sh/at47y1kr","slide":2,"text":"Live webcam frames or uploaded video frames are sampled.","textPreview":"Live webcam frames or uploaded video frames are sampled.","textChars":56,"textLines":1,"bbox":[90,408,160,84]}
+{"kind":"shape","id":"sh/loj2t83i","slide":2,"bbox":[278,396,30,0]}
+{"kind":"shape","id":"sh/w3m94fu1","slide":2,"bbox":[302,270,200,250]}
+{"kind":"textbox","id":"sh/udg7adsj","slide":2,"text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[320,292,50,52]}
+{"kind":"textbox","id":"sh/nyd0z610","slide":2,"text":"Hand landmarks","textPreview":"Hand landmarks","textChars":14,"textLines":1,"bbox":[320,360,164,34]}
+{"kind":"textbox","id":"sh/cj6tovah","slide":2,"text":"The hand corridor, fingertips, thumb, palm, and closure are estimated.","textPreview":"The hand corridor, fingertips, thumb, palm, and closure are estimated.","textChars":70,"textLines":1,"bbox":[320,408,160,84]}
+{"kind":"shape","id":"sh/54zidony","slide":2,"bbox":[508,396,30,0]}
+{"kind":"shape","id":"sh/upwb2hwf","slide":2,"bbox":[532,270,200,250]}
+{"kind":"textbox","id":"sh/nap4r65w","slide":2,"text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[550,292,50,52]}
+{"kind":"textbox","id":"sh/cvixczed","slide":2,"text":"Object evidence","textPreview":"Object evidence","textChars":15,"textLines":1,"bbox":[550,360,164,34]}
+{"kind":"textbox","id":"sh/5gbq1ory","slide":2,"text":"YOLO / RF-DETR evidence proposes non-person object regions.","textPreview":"YOLO / RF-DETR evidence proposes non-person object regions.","textChars":59,"textLines":1,"bbox":[550,408,160,84]}
+{"kind":"shape","id":"sh/u18jqh0f","slide":2,"bbox":[738,396,30,0]}
+{"kind":"shape","id":"sh/jm1cfa9w","slide":2,"bbox":[762,270,200,250]}
+{"kind":"textbox","id":"sh/bm58z25k","slide":2,"text":"4","textPreview":"4","textChars":1,"textLines":1,"bbox":[780,292,50,52]}
+{"kind":"textbox","id":"sh/m1cfa9w3","slide":2,"text":"Contact gate","textPreview":"Contact gate","textChars":12,"textLines":1,"bbox":[780,360,164,34]}
+{"kind":"textbox","id":"sh/tsvu9kni","slide":2,"text":"Mask/box overlap, proximity, continuity, and object stability are checked.","textPreview":"Mask/box overlap, proximity, continuity, and object stability are checked.","textChars":74,"textLines":1,"bbox":[780,408,160,84]}
+{"kind":"shape","id":"sh/47y1kre1","slide":2,"bbox":[968,396,30,0]}
+{"kind":"shape","id":"sh/bat47y1k","slide":2,"bbox":[992,270,200,250]}
+{"kind":"textbox","id":"sh/mp0bi9s3","slide":2,"text":"5","textPreview":"5","textChars":1,"textLines":1,"bbox":[1010,292,50,52]}
+{"kind":"textbox","id":"sh/tgfmlkjm","slide":2,"text":"Grip label","textPreview":"Grip label","textChars":10,"textLines":1,"bbox":[1010,360,164,34]}
+{"kind":"textbox","id":"sh/4vmtwra5","slide":2,"text":"No grip, mild, moderate, or strong is shown only after object-in-hand checks.","textPreview":"No grip, mild, moderate, or strong is shown only after object-in-hand checks.","textChars":77,"textLines":1,"bbox":[1010,408,160,84]}
+{"kind":"textbox","id":"sh/b2hwfyxo","slide":2,"text":"GripSense RGB / 2","textPreview":"GripSense RGB / 2","textChars":17,"textLines":1,"bbox":[56,672,220,22]}
+{"kind":"notes","id":"nt/mcqa1s","slide":2,"text":""}
+{"kind":"slide","id":"sl/pqhncj","slide":3,"title":"OPERATING MODES","textShapes":13}
+{"kind":"textbox","id":"sh/6hcrmhk3","slide":3,"text":"OPERATING MODES","textPreview":"OPERATING MODES","textChars":15,"textLines":1,"bbox":[56,44,360,24]}
+{"kind":"textbox","id":"sh/d8v6psfi","slide":3,"text":"One product, three review paths","textPreview":"One product, three review paths","textChars":31,"textLines":1,"bbox":[56,78,850,74]}
+{"kind":"textbox","id":"sh/onyd0z61","slide":3,"text":"This extra slide connects the pieces: live demo, offline replay, and exportable batch analysis.","textPreview":"This extra slide connects the pieces: live demo, offline replay, and exportable batch analysis.","textChars":95,"textLines":1,"bbox":[58,156,760,60]}
+{"kind":"shape","id":"sh/vahoza1g","slide":3,"bbox":[78,250,350,280]}
+{"kind":"textbox","id":"sh/6tovahoz","slide":3,"text":"Live V13","textPreview":"Live V13","textChars":8,"textLines":1,"bbox":[104,278,290,38]}
+{"kind":"textbox","id":"sh/dg7adsji","slide":3,"text":"Real-time YOLO production mode","textPreview":"Real-time YOLO production mode","textChars":30,"textLines":1,"bbox":[104,332,290,54]}
+{"kind":"textbox","id":"sh/ovahoza1","slide":3,"text":"Best for demos and immediate feedback. Rejects hand-only and background candidates.","textPreview":"Best for demos and immediate feedback. Rejects hand-only and background candidates.","textChars":83,"textLines":1,"bbox":[104,404,288,88]}
+{"kind":"shape","id":"sh/vmtwra5g","slide":3,"bbox":[468,250,350,280]}
+{"kind":"textbox","id":"sh/61032lsz","slide":3,"text":"Offline YOLO Max","textPreview":"Offline YOLO Max","textChars":16,"textLines":1,"bbox":[494,278,290,38]}
+{"kind":"textbox","id":"sh/wval87ed","slide":3,"text":"Upload / process / play / download","textPreview":"Upload / process / play / download","textChars":34,"textLines":1,"bbox":[494,332,290,54]}
+{"kind":"textbox","id":"sh/pg3ex0nu","slide":3,"text":"Best for inspection. Uses stricter offline scoring and produces annotated MP4/WebM/CSV/JSON.","textPreview":"Best for inspection. Uses stricter offline scoring and produces annotated MP4/WebM/CSV/JSON.","textChars":92,"textLines":1,"bbox":[494,404,288,88]}
+{"kind":"shape","id":"sh/epkzupwb","slide":3,"bbox":[858,250,350,280]}
+{"kind":"textbox","id":"sh/7adsji5s","slide":3,"text":"Future depth mode","textPreview":"Future depth mode","textChars":17,"textLines":1,"bbox":[884,278,290,38]}
+{"kind":"textbox","id":"sh/w7mp0bi9","slide":3,"text":"RealSense D455 support path","textPreview":"RealSense D455 support path","textChars":27,"textLines":1,"bbox":[884,332,290,54]}
+{"kind":"textbox","id":"sh/psfil0rq","slide":3,"text":"Depth can separate hand, object, table, and background better than RGB alone.","textPreview":"Depth can separate hand, object, table, and background better than RGB alone.","textChars":77,"textLines":1,"bbox":[884,404,288,88]}
+{"kind":"textbox","id":"sh/e1w7mp0b","slide":3,"text":"GripSense RGB / 3","textPreview":"GripSense RGB / 3","textChars":17,"textLines":1,"bbox":[56,672,220,22]}
+{"kind":"notes","id":"nt/pqhncj","slide":3,"text":""}
+{"kind":"slide","id":"sl/tqjsdw","slide":4,"title":"WHERE IT FAILS","textShapes":16}
+{"kind":"textbox","id":"sh/54zidony","slide":4,"text":"WHERE IT FAILS","textPreview":"WHERE IT FAILS","textChars":14,"textLines":1,"bbox":[56,44,360,24]}
+{"kind":"textbox","id":"sh/udg7adsj","slide":4,"text":"Known failure modes","textPreview":"Known failure modes","textChars":19,"textLines":1,"bbox":[56,78,850,74]}
+{"kind":"textbox","id":"sh/nyd0z610","slide":4,"text":"The current algorithm is useful, but it still needs guardrails for hard demo conditions.","textPreview":"The current algorithm is useful, but it still needs guardrails for hard demo conditions.","textChars":88,"textLines":1,"bbox":[58,156,760,60]}
+{"kind":"shape","id":"sh/cvixczed","slide":4,"bbox":[68,252,340,118]}
+{"kind":"textbox","id":"sh/5gbq1ory","slide":4,"text":"Detector flicker","textPreview":"Detector flicker","textChars":16,"textLines":1,"bbox":[90,274,285,28]}
+{"kind":"textbox","id":"sh/upwb2hwf","slide":4,"text":"Object appears for one frame, disappears in the next.","textPreview":"Object appears for one frame, disappears in the next.","textChars":53,"textLines":1,"bbox":[90,314,285,42]}
+{"kind":"shape","id":"sh/nap4r65w","slide":4,"bbox":[458,252,340,118]}
+{"kind":"textbox","id":"sh/c7u54zid","slide":4,"text":"Occlusion","textPreview":"Occlusion","textChars":9,"textLines":1,"bbox":[480,274,285,28]}
+{"kind":"textbox","id":"sh/1orytsvu","slide":4,"text":"The hand hides the object, so the detector thinks it is gone.","textPreview":"The hand hides the object, so the detector thinks it is gone.","textChars":61,"textLines":1,"bbox":[480,314,285,42]}
+{"kind":"shape","id":"sh/l0rqd4vm","slide":4,"bbox":[848,252,340,118]}
+{"kind":"textbox","id":"sh/wfyxobm5","slide":4,"text":"Background lock","textPreview":"Background lock","textChars":15,"textLines":1,"bbox":[870,274,285,28]}
+{"kind":"textbox","id":"sh/7u54zido","slide":4,"text":"Tables, cubicle panels, and square wall sections can look object-like.","textPreview":"Tables, cubicle panels, and square wall sections can look object-like.","textChars":70,"textLines":1,"bbox":[870,314,285,42]}
+{"kind":"shape","id":"sh/ed8bat47","slide":4,"bbox":[68,412,340,118]}
+{"kind":"textbox","id":"sh/lc7u54zi","slide":4,"text":"Fast motion","textPreview":"Fast motion","textChars":11,"textLines":1,"bbox":[90,434,285,28]}
+{"kind":"textbox","id":"sh/wra5gbq1","slide":4,"text":"Motion blur breaks object and hand landmark alignment.","textPreview":"Motion blur breaks object and hand landmark alignment.","textChars":54,"textLines":1,"bbox":[90,474,285,42]}
+{"kind":"shape","id":"sh/36hcrmhk","slide":4,"bbox":[458,412,340,118]}
+{"kind":"textbox","id":"sh/eloj2t83","slide":4,"text":"Angle sensitivity","textPreview":"Angle sensitivity","textChars":17,"textLines":1,"bbox":[480,434,285,28]}
+{"kind":"textbox","id":"sh/pg3ex0nu","slide":4,"text":"Thin side views of phones/cans are harder to detect.","textPreview":"Thin side views of phones/cans are harder to detect.","textChars":52,"textLines":1,"bbox":[480,474,285,42]}
+{"kind":"shape","id":"sh/wval87ed","slide":4,"bbox":[848,412,340,118]}
+{"kind":"textbox","id":"sh/w3m94fu1","slide":4,"text":"RGB ambiguity","textPreview":"RGB ambiguity","textChars":13,"textLines":1,"bbox":[870,434,285,28]}
+{"kind":"textbox","id":"sh/loj2t83i","slide":4,"text":"Without depth, contact is inferred from 2D overlap.","textPreview":"Without depth, contact is inferred from 2D overlap.","textChars":51,"textLines":1,"bbox":[870,474,285,42]}
+{"kind":"textbox","id":"sh/ex0nuxc3","slide":4,"text":"GripSense RGB / 4","textPreview":"GripSense RGB / 4","textChars":17,"textLines":1,"bbox":[56,672,220,22]}
+{"kind":"notes","id":"nt/tqjsdw","slide":4,"text":""}
+{"kind":"slide","id":"sl/2inrkn","slide":5,"title":"FUTURE ROADMAP","textShapes":17}
+{"kind":"textbox","id":"sh/ixczed8v","slide":5,"text":"FUTURE ROADMAP","textPreview":"FUTURE ROADMAP","textChars":14,"textLines":1,"bbox":[56,44,360,24]}
+{"kind":"textbox","id":"sh/tovahoza","slide":5,"text":"How we make it production-ready","textPreview":"How we make it production-ready","textChars":31,"textLines":1,"bbox":[56,78,850,74]}
+{"kind":"textbox","id":"sh/032lszqt","slide":5,"text":"The next improvements should make the model less jumpy, more honest, and easier to verify.","textPreview":"The next improvements should make the model less jumpy, more honest, and easier to verify.","textChars":90,"textLines":1,"bbox":[58,156,760,60]}
+{"kind":"shape","id":"sh/bulwval8","slide":5,"bbox":[60,236,507.6,388.8]}
+{"kind":"shape","id":"sh/i9s36hcr","slide":5,"bbox":[81.6,257.6,464.4,345.6]}
+{"kind":"shape","id":"sh/p0bi9s36","slide":5,"bbox":[108.6,302.96,142.56,129.6]}
+{"kind":"textbox","id":"sh/0fepkzup","slide":5,"text":"rejected\nbackground","textPreview":"rejected | background","textChars":19,"textLines":2,"bbox":[116.16,339.68,127.44,49.68]}
+{"kind":"shape","id":"sh/byhgn29g","slide":5,"bbox":[292.2,318.08,127.44,226.8]}
+{"kind":"shape","id":"sh/idonyd0z","slide":5,"bbox":[252.24,298.64,205.2,278.64]}
+{"kind":"shape","id":"sh/c7u54zid","slide":5,"bbox":[351.6,514.64,-49.68,-75.6]}
+{"kind":"shape","id":"sh/1orytsvu","slide":5,"bbox":[301.92,439.04,-15.12,-62.64]}
+{"kind":"shape","id":"sh/u18jqh0f","slide":5,"bbox":[286.8,376.4,48.6,71.28]}
+{"kind":"shape","id":"sh/jm1cfa9w","slide":5,"bbox":[335.4,447.68,43.2,-63.72]}
+{"kind":"shape","id":"sh/cfa9w3m9","slide":5,"bbox":[378.6,383.96,-18.36,83.16]}
+{"kind":"shape","id":"sh/1032lszq","slide":5,"bbox":[360.24,467.12,64.8,-50.76]}
+{"kind":"shape","id":"sh/u9knih4b","slide":5,"bbox":[425.04,416.36,-49.68,71.28]}
+{"kind":"shape","id":"sh/judg7ads","slide":5,"bbox":[375.36,487.64,75.6,-7.56]}
+{"kind":"shape","id":"sh/cj6tovah","slide":5,"bbox":[450.96,480.08,-60.48,36.72]}
+{"kind":"shape","id":"sh/54zidony","slide":5,"bbox":[390.48,516.8,51.84,34.56]}
+{"kind":"shape","id":"sh/9s36hcrm","slide":5,"bbox":[442.32,551.36,-90.72,-36.72]}
+{"kind":"shape","id":"sh/g7adsji5","slide":5,"bbox":[344.04,507.08,15.12,15.12]}
+{"kind":"shape","id":"sh/rmhk3q5o","slide":5,"bbox":[294.36,431.48,15.12,15.12]}
+{"kind":"shape","id":"sh/y1kre1w7","slide":5,"bbox":[279.24,368.84,15.12,15.12]}
+{"kind":"shape","id":"sh/90je9cvi","slide":5,"bbox":[327.84,440.12,15.12,15.12]}
+{"kind":"shape","id":"sh/gfmlkjm1","slide":5,"bbox":[371.04,376.4,15.12,15.12]}
+{"kind":"shape","id":"sh/rytsvu9k","slide":5,"bbox":[352.68,459.56,15.12,15.12]}
+{"kind":"shape","id":"sh/yd0z6103","slide":5,"bbox":[417.48,408.8,15.12,15.12]}
+{"kind":"shape","id":"sh/9cvixcze","slide":5,"bbox":[367.8,480.08,15.12,15.12]}
+{"kind":"shape","id":"sh/gr2p8nqx","slide":5,"bbox":[443.4,472.52,15.12,15.12]}
+{"kind":"shape","id":"sh/a5gbq1or","slide":5,"bbox":[382.92,509.24,15.12,15.12]}
+{"kind":"shape","id":"sh/3m94fu18","slide":5,"bbox":[434.76,543.8,15.12,15.12]}
+{"kind":"shape","id":"sh/s72x4nap","slide":5,"bbox":[344.04,507.08,15.12,15.12]}
+{"kind":"shape","id":"sh/lszqtcj6","slide":5,"bbox":[388.32,467.12,36.72,36.72]}
+{"kind":"textbox","id":"sh/adsji5sn","slide":5,"text":"contact","textPreview":"contact","textChars":7,"textLines":1,"bbox":[431.52,471.44,77.76,25.92]}
+{"kind":"shape","id":"sh/3ylc7u54","slide":5,"bbox":[610,238,590,86]}
+{"kind":"textbox","id":"sh/sji5snel","slide":5,"text":"Short-term","textPreview":"Short-term","textChars":10,"textLines":1,"bbox":[634,256,148,28]}
+{"kind":"textbox","id":"sh/h4byhgn2","slide":5,"text":"V13 gating: reject background panels/tables, smooth visual lock, and decay quickly on real drops.","textPreview":"V13 gating: reject background panels/tables, smooth visual lock, and decay quickly on real drops.","textChars":97,"textLines":1,"bbox":[800,254,360,45]}
+{"kind":"shape","id":"sh/ap4r65wj","slide":5,"bbox":[610,342,590,86]}
+{"kind":"textbox","id":"sh/za1gvy90","slide":5,"text":"Offline parity","textPreview":"Offline parity","textChars":14,"textLines":1,"bbox":[634,360,148,28]}
+{"kind":"textbox","id":"sh/32lszqtc","slide":5,"text":"Make web YOLO Max call the same batch renderer used in the process folder.","textPreview":"Make web YOLO Max call the same batch renderer used in the process folder.","textChars":74,"textLines":1,"bbox":[800,358,360,45]}
+{"kind":"shape","id":"sh/ahoza1gv","slide":5,"bbox":[610,446,590,86]}
+{"kind":"textbox","id":"sh/l87ed8ba","slide":5,"text":"Model tuning","textPreview":"Model tuning","textChars":12,"textLines":1,"bbox":[634,464,148,28]}
+{"kind":"textbox","id":"sh/sneloj2t","slide":5,"text":"Collect object profiles and fine-tune detector classes for demo objects like cans and phones.","textPreview":"Collect object profiles and fine-tune detector classes for demo objects like cans and phones.","textChars":93,"textLines":1,"bbox":[800,462,360,45]}
+{"kind":"shape","id":"sh/3ex0nuxc","slide":5,"bbox":[610,550,590,86]}
+{"kind":"textbox","id":"sh/at47y1kr","slide":5,"text":"Depth upgrade","textPreview":"Depth upgrade","textChars":13,"textLines":1,"bbox":[634,568,148,28]}
+{"kind":"textbox","id":"sh/lkjm1cfa","slide":5,"text":"Use RealSense depth to verify object is between palm/fingers, not behind or on the table.","textPreview":"Use RealSense depth to verify object is between palm/fingers, not behind or on the table.","textChars":89,"textLines":1,"bbox":[800,566,360,45]}
+{"kind":"shape","id":"sh/szqtcj6t","slide":5,"bbox":[86,592,180,34]}
+{"kind":"textbox","id":"sh/3itgfmlk","slide":5,"text":"No object = no grip","textPreview":"No object = no grip","textChars":19,"textLines":1,"bbox":[100,599,152,20]}
+{"kind":"shape","id":"sh/ex0nuxc3","slide":5,"bbox":[286,592,130,34]}
+{"kind":"textbox","id":"sh/ovahoza1","slide":5,"text":"Stable lock","textPreview":"Stable lock","textChars":11,"textLines":1,"bbox":[300,599,102,20]}
+{"kind":"shape","id":"sh/dg7adsji","slide":5,"bbox":[436,592,160,34]}
+{"kind":"textbox","id":"sh/6tovahoz","slide":5,"text":"Offline review","textPreview":"Offline review","textChars":14,"textLines":1,"bbox":[450,599,132,20]}
+{"kind":"textbox","id":"sh/vahoza1g","slide":5,"text":"GripSense RGB / 5","textPreview":"GripSense RGB / 5","textChars":17,"textLines":1,"bbox":[56,672,220,22]}
+{"kind":"notes","id":"nt/2inrkn","slide":5,"text":""}
