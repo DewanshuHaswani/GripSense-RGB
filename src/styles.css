@@ -163,6 +163,30 @@ button {
   text-align: center;
 }
 
+.offline-processing-percent {
+  color: #f8fafc;
+  font-size: clamp(2rem, 6vw, 3.6rem);
+  font-weight: 950;
+  line-height: 0.95;
+}
+
+.offline-processing-progress {
+  overflow: hidden;
+  width: min(260px, 68vw);
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.16);
+}
+
+.offline-processing-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #67e8f9, #a7f3d0, #fef08a);
+  transition: width 420ms ease;
+}
+
 .offline-processing-copy strong {
   font-size: clamp(1.45rem, 4vw, 2rem);
   line-height: 1;
