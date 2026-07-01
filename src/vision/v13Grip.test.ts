@@ -6,7 +6,7 @@ import {
   stabilizeV13VisualObject,
   type V13DisplayState
 } from './v13Grip';
-import type { GripAnalysis, ObjectRegion } from './types';
+import type { GripAnalysis, Landmark, ObjectRegion } from './types';
 
 describe('V13 YOLO stable live mode', () => {
   it('bridges a longer hidden-object miss when the hand is still wrapped around the last stable object', () => {
@@ -143,6 +143,114 @@ describe('V13 YOLO stable live mode', () => {
     expect(expired.object).toBeNull();
     expect(expired.state.visualObject).toBeNull();
   });
+
+  it('rejects large cubicle or table-like detector candidates near the hand', () => {
+    const raw = analysisFixture({
+      gripPercentage: 74,
+      confidence: 0.7,
+      objectLockQuality: 0.68,
+      closureScore: 0.42,
+      mode: 'power grip',
+      state: 'Grip detected',
+      contact: 0.06,
+      thumb: 0.18,
+      index: 0.18,
+      phoneSide: 0.2
+    });
+    const result = stabilizeV13DisplayAnalysis(raw, createInitialV13DisplayState(), 1000, {
+      objectScore: 0.48,
+      contact: 0.06,
+      hasObject: true,
+      missedFrames: 0,
+      object: objectFixture({ x: 360, y: 240, radiusX: 190, radiusY: 165, confidence: 0.5 }),
+      hand: handFixture(510, 245),
+      frameWidth: 640,
+      frameHeight: 480
+    });
+
+    expect(result.state.candidateRejected).toBe(true);
+    expect(result.analysis.gripPercentage).toBe(0);
+    expect(result.analysis.guidance).toBe('Object not locked');
+    expect(result.analysis.evidence.negativeReasons.some((reason) => reason.includes('cubicle') || reason.includes('background'))).toBe(true);
+  });
+
+  it('keeps compact held objects eligible when contact evidence is visible', () => {
+    const raw = analysisFixture({
+      gripPercentage: 76,
+      confidence: 0.74,
+      objectLockQuality: 0.72,
+      closureScore: 0.58,
+      mode: 'phone-side grip',
+      state: 'Grip detected',
+      contact: 0.35,
+      thumb: 0.5,
+      index: 0.42,
+      middle: 0.3,
+      phoneSide: 0.64
+    });
+    const result = stabilizeV13DisplayAnalysis(raw, createInitialV13DisplayState(), 1000, {
+      objectScore: 0.72,
+      contact: 0.35,
+      hasObject: true,
+      missedFrames: 0,
+      object: objectFixture({ x: 260, y: 230, radiusX: 38, radiusY: 82, confidence: 0.74 }),
+      hand: handFixture(270, 240),
+      frameWidth: 640,
+      frameHeight: 480
+    });
+
+    expect(result.state.candidateRejected).toBe(false);
+    expect(result.analysis.gripPercentage).toBeGreaterThan(40);
+    expect(result.analysis.guidance).not.toBe('Object not locked');
+  });
+
+  it('does not draw a rejected table candidate over the previous visual object', () => {
+    const previousObject = objectFixture({ x: 180, y: 190, radiusX: 36, radiusY: 72, confidence: 0.8 });
+    const currentTable = objectFixture({ x: 380, y: 330, radiusX: 260, radiusY: 42, confidence: 0.42 });
+    const previous = analysisFixture({ gripPercentage: 78, confidence: 0.7, objectLockQuality: 0.68, contact: 0.4 });
+    const state: V13DisplayState = {
+      ...createInitialV13DisplayState(),
+      analysis: previous,
+      timestamp: 1000,
+      lastStableAt: 1000,
+      visualObject: previousObject,
+      visualTimestamp: 1000
+    };
+    const stabilized = stabilizeV13DisplayAnalysis(
+      analysisFixture({
+        gripPercentage: 70,
+        confidence: 0.64,
+        objectLockQuality: 0.54,
+        closureScore: 0.5,
+        contact: 0.08,
+        thumb: 0.24,
+        index: 0.2,
+        phoneSide: 0.42
+      }),
+      state,
+      1120,
+      {
+        objectScore: 0.4,
+        contact: 0.08,
+        hasObject: true,
+        missedFrames: 0,
+        object: currentTable,
+        hand: handFixture(520, 330),
+        frameWidth: 640,
+        frameHeight: 480
+      }
+    );
+    const visual = stabilizeV13VisualObject(
+      stabilized.state.candidateRejected ? null : currentTable,
+      stabilized.state,
+      1120,
+      stabilized.analysis
+    );
+
+    expect(stabilized.state.candidateRejected).toBe(true);
+    expect(visual.object).not.toBeNull();
+    expect(visual.object!.center.x).toBeLessThan(240);
+  });
 });
 
 function analysisFixture(options: {
@@ -247,4 +355,15 @@ function objectFixture(options: {
     detectorLabel: 'yolo:object',
     detectorScore: options.confidence ?? 0.8
   };
+}
+
+function handFixture(centerX: number, centerY: number): Landmark[] {
+  return Array.from({ length: 21 }, (_, index) => {
+    const column = index % 4;
+    const row = Math.floor(index / 4);
+    return {
+      x: centerX + (column - 1.5) * 12,
+      y: centerY + (row - 2.5) * 18
+    };
+  });
 }

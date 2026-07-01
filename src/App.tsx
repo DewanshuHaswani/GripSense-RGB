@@ -1848,9 +1848,18 @@ export default function App() {
               objectScore: rfdetrSelectionMetrics?.objectScore ?? 0,
               contact: rfdetrSelectionMetrics?.contact ?? 0,
               hasObject: rfdetrSelectionMetrics?.hasObject ?? false,
-              missedFrames: rfdetrSelectionMetrics?.missedFrames ?? 0
+              missedFrames: rfdetrSelectionMetrics?.missedFrames ?? 0,
+              object,
+              hand,
+              frameWidth: video.videoWidth,
+              frameHeight: video.videoHeight
             });
-            const visualV13 = stabilizeV13VisualObject(object, stabilizedV13.state, timestamp, stabilizedV13.analysis);
+            const visualV13 = stabilizeV13VisualObject(
+              stabilizedV13.state.candidateRejected ? null : object,
+              stabilizedV13.state,
+              timestamp,
+              stabilizedV13.analysis
+            );
             v13DisplayRef.current = visualV13.state;
             frameAnalysis = stabilizedV13.analysis;
             object = visualV13.object;
