@@ -4,7 +4,10 @@ import {
   Box,
   Camera,
   CheckCircle,
+  ChevronLeft,
+  ChevronRight,
   Crosshair,
+  Download,
   Eye,
   FlipHorizontal2,
   FolderOpen,
@@ -16,6 +19,7 @@ import {
   Power,
   Plus,
   RotateCcw,
+  Save,
   ShieldCheck,
   Sparkles,
   Square,
@@ -393,6 +397,18 @@ type RecordedClip = {
 type RecordingIntent = 'offlineClip' | 'liveVisual';
 
 const OFFLINE_RECORDING_DURATION_MS = 15_000;
+const ANNOTATION_FRAME_RATE = 30;
+const ANNOTATION_STORAGE_KEY = 'gripsense-annotation-assist-v1';
+
+type AnnotationAssistSource = 'offline' | 'record';
+type AnnotationDragMode = 'draw' | 'move' | 'nw' | 'ne' | 'sw' | 'se';
+type AnnotationBox = { x: number; y: number; width: number; height: number };
+
+type AnnotationDragState = {
+  mode: AnnotationDragMode;
+  start: Point;
+  initial: AnnotationBox | null;
+};
 
 const LIVE_VISUAL_RECORD_VERSIONS: Array<{ version: AlgorithmVersion; label: string; note: string }> = [
   { version: 'v13', label: 'V13 · YOLO stable live', note: 'Best current YOLO live lock with occlusion smoothing.' },
@@ -557,6 +573,8 @@ export default function App() {
   const visualRecordingFrameRef = useRef<number | null>(null);
   const visualRecordingStreamRef = useRef<MediaStream | null>(null);
   const recordedClipUrlRef = useRef<string | null>(null);
+  const annotationDragRef = useRef<AnnotationDragState | null>(null);
+  const annotationCorrectionsRef = useRef(false);
   const v3RuntimeRef = useRef<V3Runtime>({
     status: 'idle',
     message: 'V3 server idle. Select V3 and start tracking to begin fusion.',
@@ -629,6 +647,14 @@ export default function App() {
   const [recordSourceChooserOpen, setRecordSourceChooserOpen] = useState(false);
   const [liveRecordVersionChooserOpen, setLiveRecordVersionChooserOpen] = useState(false);
   const [offlineSourceChooser, setOfflineSourceChooser] = useState<OfflineSourceChoice | null>(null);
+  const [annotationWizardOpen, setAnnotationWizardOpen] = useState(false);
+  const [annotationAssistSource, setAnnotationAssistSource] = useState<AnnotationAssistSource>('offline');
+  const [annotationAssistVersion, setAnnotationAssistVersion] = useState<OfflineReviewVersion>('yoloMax');
+  const [annotationAssistRequested, setAnnotationAssistRequested] = useState(false);
+  const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
+  const [annotationTime, setAnnotationTime] = useState(0);
+  const [annotationDirty, setAnnotationDirty] = useState(false);
+  const [annotationSavedAt, setAnnotationSavedAt] = useState<number | null>(null);
   const [v3Runtime, setV3Runtime] = useState<V3Runtime>(() => v3RuntimeRef.current);
   const [rfdetrRuntime, setRfdetrRuntime] = useState<RfdetrRuntime>(() => rfdetrRuntimeRef.current);
   const [realsenseRuntime, setRealSenseRuntime] = useState<RealSenseRuntime>(() => realsenseRuntimeRef.current);
@@ -874,6 +900,10 @@ export default function App() {
       setOfflineVideoName('');
       setOfflineAnalysisPhase('idle');
       setOfflineBatchProgress(0);
+      annotationCorrectionsRef.current = false;
+      setAnnotationEditorOpen(false);
+      setAnnotationDirty(false);
+      setAnnotationSavedAt(null);
       offlineSourceFileRef.current = null;
       offlineTimelineRef.current = [];
       offlineReportRef.current = null;
@@ -901,6 +931,10 @@ export default function App() {
       setAnalysis(createEmptyAnalysis('Upload a video file to start offline review.'));
       return;
     }
+    annotationCorrectionsRef.current = false;
+    setAnnotationEditorOpen(false);
+    setAnnotationDirty(false);
+    setAnnotationSavedAt(null);
     offlineSourceFileRef.current = file;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -1054,6 +1088,10 @@ export default function App() {
   }, []);
 
   const processOfflineYoloMaxBatch = useCallback(async (file: File) => {
+    annotationCorrectionsRef.current = false;
+    setAnnotationEditorOpen(false);
+    setAnnotationDirty(false);
+    setAnnotationSavedAt(null);
     offlineSourceFileRef.current = file;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -1398,6 +1436,82 @@ export default function App() {
     void startOfflineVideo(file);
   }, [processOfflineYoloMaxBatch, recordedClip, resetRealSenseRuntime, resetRfdetrRuntime, startOfflineVideo]);
 
+  const startAnnotationAssist = useCallback(() => {
+    setAnnotationAssistRequested(true);
+    annotationCorrectionsRef.current = false;
+    setAnnotationDirty(false);
+    setAnnotationSavedAt(null);
+    offlineReviewVersionRef.current = annotationAssistVersion;
+    setOfflineReviewVersion(annotationAssistVersion);
+    setAnnotationWizardOpen(false);
+
+    if (annotationAssistSource === 'record') {
+      void startLiveRecording('offlineClip');
+      return;
+    }
+    window.setTimeout(() => {
+      if (annotationAssistVersion === 'yoloMax') offlineYoloMaxInputRef.current?.click();
+      else if (annotationAssistVersion === 'max') offlineMaxInputRef.current?.click();
+      else offlineVideoInputRef.current?.click();
+    }, 0);
+  }, [annotationAssistSource, annotationAssistVersion, startLiveRecording]);
+
+  const enterAnnotationEditor = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video || !offlineTimelineRef.current.length) return;
+
+    try {
+      const saved = window.localStorage.getItem(`${ANNOTATION_STORAGE_KEY}:${offlineVideoName}:${offlineReviewVersionRef.current}`);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { savedAt?: string; timeline?: OfflineTimelinePoint[] };
+        if (Array.isArray(parsed.timeline) && parsed.timeline.length) {
+          offlineTimelineRef.current = parsed.timeline;
+          setOfflineTimeline(parsed.timeline);
+          annotationCorrectionsRef.current = true;
+          setAnnotationSavedAt(parsed.savedAt ? new Date(parsed.savedAt).getTime() : Date.now());
+        }
+      }
+    } catch (error) {
+      console.warn('Could not restore saved annotation corrections', error);
+    }
+
+    // YOLO Max previews are server-rendered. Switch back to the clean source so
+    // corrected boxes are not drawn over already-burned annotations.
+    if (offlineReviewVersionRef.current === 'yoloMax' && offlineSourceFileRef.current) {
+      if (offlineVideoUrlRef.current) URL.revokeObjectURL(offlineVideoUrlRef.current);
+      const cleanUrl = URL.createObjectURL(offlineSourceFileRef.current);
+      offlineVideoUrlRef.current = cleanUrl;
+      video.pause();
+      video.src = cleanUrl;
+      video.load();
+      await waitForVideoReady(video).catch(() => undefined);
+    }
+
+    video.pause();
+    video.currentTime = 0;
+    setPaused(true);
+    setAnnotationTime(0);
+    setAnnotationEditorOpen(true);
+  }, [offlineVideoName]);
+
+  useEffect(() => {
+    if (!annotationAssistRequested || offlineAnalysisPhase !== 'complete' || !offlineTimeline.length) return;
+    setAnnotationAssistRequested(false);
+    void enterAnnotationEditor();
+  }, [annotationAssistRequested, enterAnnotationEditor, offlineAnalysisPhase, offlineTimeline.length]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!annotationEditorOpen || !video) return;
+    const syncTime = () => setAnnotationTime(video.currentTime);
+    video.addEventListener('timeupdate', syncTime);
+    video.addEventListener('seeked', syncTime);
+    return () => {
+      video.removeEventListener('timeupdate', syncTime);
+      video.removeEventListener('seeked', syncTime);
+    };
+  }, [annotationEditorOpen]);
+
   const updateCalibrationCapture = useCallback((frameAnalysis: GripAnalysis, timestamp: number) => {
     const capture = calibrationCaptureRef.current;
     if (!capture.active) return;
@@ -1521,7 +1635,9 @@ export default function App() {
     });
 
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), offline ? 2400 : 1800);
+    // Windows CPU inference can legitimately take several seconds. A short
+    // abort made a healthy YOLO server alternate between ready/unavailable.
+    const timeout = window.setTimeout(() => controller.abort(), offline ? 15_000 : 8_000);
     void requestRfdetrFrameAnalysis({
       video,
       hand,
@@ -1552,14 +1668,17 @@ export default function App() {
         });
         return;
       }
+      const canHoldLastResult = Boolean(latest.result && latest.receivedAt !== null && result.receivedAt - latest.receivedAt < 12_000);
       updateRfdetrRuntime({
         ...latest,
-        status: 'unavailable',
-        message: `${provider.displayName} unavailable: ${result.status}.`,
-        result: null,
-        resultPalm: null,
-        receivedAt: result.receivedAt,
-        latencyMs: null
+        status: canHoldLastResult ? 'ready' : 'unavailable',
+        message: canHoldLastResult
+          ? `${provider.displayName} response delayed; holding the last stable result.`
+          : `${provider.displayName} unavailable: ${result.status}.`,
+        result: canHoldLastResult ? latest.result : null,
+        resultPalm: canHoldLastResult ? latest.resultPalm : null,
+        receivedAt: canHoldLastResult ? latest.receivedAt : result.receivedAt,
+        latencyMs: canHoldLastResult ? latest.latencyMs : null
       });
     });
   }, [updateRfdetrRuntime]);
@@ -2894,10 +3013,190 @@ export default function App() {
     setTrainingStatus('Training views cleared. Capture new masked views.');
   }, []);
 
+  const seekAnnotationTime = useCallback((time: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const duration = Number.isFinite(video.duration)
+      ? video.duration
+      : offlineTimelineRef.current[offlineTimelineRef.current.length - 1]?.time ?? 0;
+    const nextTime = clampNumber(time, 0, Math.max(0, duration));
+    video.pause();
+    video.currentTime = nextTime;
+    setPaused(true);
+    setAnnotationTime(nextTime);
+    const point = nearestOfflineTimelinePoint(offlineTimelineRef.current, nextTime);
+    if (point) setAnalysis(analysisFromOfflineTimelinePoint(analysisRef.current, point));
+  }, []);
+
+  const updateAnnotationAtTime = useCallback((patch: Partial<OfflineTimelinePoint>) => {
+    const current = offlineTimelineRef.current;
+    if (!current.length) return;
+    const frameTolerance = 0.5 / ANNOTATION_FRAME_RATE;
+    const nearestIndex = nearestOfflineTimelineIndex(current, annotationTime);
+    const shouldReplace = nearestIndex >= 0 && Math.abs(current[nearestIndex].time - annotationTime) <= frameTolerance;
+    const base = nearestIndex >= 0 ? current[nearestIndex] : current[0];
+    const nextPoint: OfflineTimelinePoint = {
+      ...base,
+      ...patch,
+      time: annotationTime,
+      weak: patch.grip === undefined ? base.weak : patch.grip < 44
+    };
+    const next = shouldReplace
+      ? current.map((point, index) => (index === nearestIndex ? nextPoint : point))
+      : [...current, nextPoint].sort((a, b) => a.time - b.time);
+    offlineTimelineRef.current = next;
+    setOfflineTimeline(next);
+    setAnalysis(analysisFromOfflineTimelinePoint(analysisRef.current, nextPoint));
+    annotationCorrectionsRef.current = true;
+    setAnnotationDirty(true);
+  }, [annotationTime]);
+
+  const setAnnotationBox = useCallback((box: AnnotationBox | null) => {
+    if (!box) {
+      updateAnnotationAtTime({
+        objectX: null,
+        objectY: null,
+        objectRadiusX: null,
+        objectRadiusY: null,
+        lock: 0,
+        objectMatch: 0,
+        state: 'Object uncertain',
+        guidance: 'Object uncertain'
+      });
+      return;
+    }
+    const video = videoRef.current;
+    const width = video?.videoWidth ?? 0;
+    const height = video?.videoHeight ?? 0;
+    const safe = clampAnnotationBox(box, width, height);
+    updateAnnotationAtTime({
+      objectX: safe.x + safe.width / 2,
+      objectY: safe.y + safe.height / 2,
+      objectRadiusX: safe.width / 2,
+      objectRadiusY: safe.height / 2,
+      objectAngle: 0,
+      lock: Math.max(0.5, nearestOfflineTimelinePoint(offlineTimelineRef.current, annotationTime)?.lock ?? 0),
+      objectMatch: Math.max(0.5, nearestOfflineTimelinePoint(offlineTimelineRef.current, annotationTime)?.objectMatch ?? 0),
+      state: 'Grip detected'
+    });
+  }, [annotationTime, updateAnnotationAtTime]);
+
+  const handleAnnotationPointerDown = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
+    if (!annotationEditorOpen) return;
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) return;
+    const start = annotationPointerToVideo(event, video, mirroredRef.current);
+    const point = nearestOfflineTimelinePoint(offlineTimelineRef.current, annotationTime);
+    const initial = point ? annotationBoxFromTimelinePoint(point) : null;
+    const action = ((event.target as SVGElement).dataset.annotationAction ?? 'draw') as AnnotationDragMode;
+    annotationDragRef.current = { mode: action, start, initial };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }, [annotationEditorOpen, annotationTime]);
+
+  const handleAnnotationPointerMove = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
+    const drag = annotationDragRef.current;
+    const video = videoRef.current;
+    if (!drag || !video?.videoWidth || !video.videoHeight) return;
+    const point = annotationPointerToVideo(event, video, mirroredRef.current);
+    if (drag.mode === 'draw' || !drag.initial) {
+      setAnnotationBox(normalizeAnnotationBox(drag.start, point));
+      return;
+    }
+    const dx = point.x - drag.start.x;
+    const dy = point.y - drag.start.y;
+    const initial = drag.initial;
+    if (drag.mode === 'move') {
+      setAnnotationBox({ ...initial, x: initial.x + dx, y: initial.y + dy });
+      return;
+    }
+    const left = drag.mode === 'nw' || drag.mode === 'sw' ? initial.x + dx : initial.x;
+    const right = drag.mode === 'ne' || drag.mode === 'se' ? initial.x + initial.width + dx : initial.x + initial.width;
+    const top = drag.mode === 'nw' || drag.mode === 'ne' ? initial.y + dy : initial.y;
+    const bottom = drag.mode === 'sw' || drag.mode === 'se' ? initial.y + initial.height + dy : initial.y + initial.height;
+    setAnnotationBox(normalizeAnnotationBox({ x: left, y: top }, { x: right, y: bottom }));
+  }, [setAnnotationBox]);
+
+  const stopAnnotationPointer = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
+    annotationDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }, []);
+
+  const saveAnnotationCorrections = useCallback(() => {
+    const report = buildOfflineReport(offlineTimelineRef.current, offlineVideoName, videoRef.current?.duration ?? 0);
+    offlineReportRef.current = report;
+    setOfflineReport(report);
+    try {
+      window.localStorage.setItem(
+        `${ANNOTATION_STORAGE_KEY}:${offlineVideoName}:${offlineReviewVersionRef.current}`,
+        JSON.stringify({
+          savedAt: new Date().toISOString(),
+          videoName: offlineVideoName,
+          version: offlineReviewVersionRef.current,
+          frameRate: ANNOTATION_FRAME_RATE,
+          timeline: offlineTimelineRef.current
+        })
+      );
+      setAnnotationDirty(false);
+      setAnnotationSavedAt(Date.now());
+      setOfflineVideoExportStatus('Corrections saved in this browser. Export JSON/CSV or render a corrected video when ready.');
+    } catch (error) {
+      console.warn('Could not save annotation corrections', error);
+      setOfflineVideoExportStatus('Browser storage could not save the corrections. Export JSON to keep them.');
+    }
+  }, [offlineVideoName]);
+
+  const exportCorrectedAnnotations = useCallback(() => {
+    const video = videoRef.current;
+    const fileBase = (offlineVideoName || 'gripsense-annotations').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    const points = offlineTimelineRef.current;
+    const payload = {
+      info: {
+        description: 'GripSense RGB corrected frame annotations',
+        generatedAt: new Date().toISOString(),
+        source: offlineVideoName,
+        processingVersion: offlineVersionLabel(offlineReviewVersionRef.current),
+        frameRate: ANNOTATION_FRAME_RATE,
+        width: video?.videoWidth ?? 0,
+        height: video?.videoHeight ?? 0
+      },
+      categories: [{ id: 1, name: 'gripped object' }],
+      images: points.map((point, index) => ({
+        id: index + 1,
+        file_name: `${fileBase}-frame-${Math.round(point.time * ANNOTATION_FRAME_RATE).toString().padStart(6, '0')}.jpg`,
+        frame: Math.round(point.time * ANNOTATION_FRAME_RATE),
+        time: point.time,
+        width: video?.videoWidth ?? 0,
+        height: video?.videoHeight ?? 0
+      })),
+      annotations: points.flatMap((point, index) => {
+        const box = annotationBoxFromTimelinePoint(point);
+        if (!box) return [];
+        return [{
+          id: index + 1,
+          image_id: index + 1,
+          category_id: 1,
+          bbox: [box.x, box.y, box.width, box.height],
+          area: box.width * box.height,
+          iscrowd: 0,
+          label: point.object || 'gripped object',
+          grip: point.grip,
+          confidence: point.confidence,
+          contact: point.contact,
+          slip: point.slip,
+          weak: point.weak
+        }];
+      }),
+      timeline: points
+    };
+    downloadTextFile(`${fileBase}-corrected-annotations.json`, JSON.stringify(payload, null, 2), 'application/json');
+    setOfflineVideoExportStatus(`Downloaded ${fileBase}-corrected-annotations.json`);
+  }, [offlineVideoName]);
+
   const exportOfflineTimeline = useCallback((format: 'csv' | 'json') => {
     const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
     const yoloMaxBatch = offlineReviewVersionRef.current === 'yoloMax' ? offlineYoloMaxBatchRef.current : null;
-    if (yoloMaxBatch?.artifacts?.[format]) {
+    if (yoloMaxBatch?.artifacts?.[format] && !annotationCorrectionsRef.current) {
       downloadUrlFile(
         yoloMaxBatch.artifacts[format],
         yoloMaxBatch.filenames?.[format] ?? `${fileBase}-offline-yolo-max-timeline.${format}`
@@ -2946,7 +3245,8 @@ export default function App() {
               ].join(',')
             )
           ].join('\n');
-    downloadTextFile(`${fileBase}.${format}`, payload, format === 'json' ? 'application/json' : 'text/csv');
+    const correctedSuffix = annotationCorrectionsRef.current ? '-corrected' : '';
+    downloadTextFile(`${fileBase}${correctedSuffix}.${format}`, payload, format === 'json' ? 'application/json' : 'text/csv');
   }, [offlineVideoName]);
 
   const finalizeOfflineReview = useCallback(() => {
@@ -2986,7 +3286,7 @@ export default function App() {
     offlineBatchProcessingRef.current = false;
     video.playbackRate = 1;
     const yoloMaxBatch = offlineReviewVersionRef.current === 'yoloMax' ? offlineYoloMaxBatchRef.current : null;
-    if (yoloMaxBatch?.artifacts?.mp4) {
+    if (yoloMaxBatch?.artifacts?.mp4 && !annotationCorrectionsRef.current) {
       const artifactHref = new URL(yoloMaxBatch.artifacts.mp4, window.location.origin).href;
       if (video.src !== artifactHref) {
         video.src = artifactHref;
@@ -3010,7 +3310,7 @@ export default function App() {
     const overlay = canvasRef.current;
     const fileBase = (offlineVideoName || 'gripsense-offline-review').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
     const yoloMaxBatch = offlineReviewVersionRef.current === 'yoloMax' ? offlineYoloMaxBatchRef.current : null;
-    if (yoloMaxBatch?.artifacts?.mp4) {
+    if (yoloMaxBatch?.artifacts?.mp4 && !annotationCorrectionsRef.current) {
       if (format === 'webm') {
         setOfflineVideoExportStatus('YOLO Max batch output is finalized as MP4. Use MP4 or MP4 Compact for the same processed result.');
         return;
@@ -3154,6 +3454,14 @@ export default function App() {
   const offlineBatchProcessing = mediaMode === 'offline' && isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase === 'processing';
   const offlineV2ExportLocked = isOfflineEnhancedVersion(offlineReviewVersion) && offlineAnalysisPhase !== 'complete';
   const offlineMaxEvidenceMode = offlineMaxEvidenceLabel(chooseOfflineMaxEvidenceMode(offlineTimeline));
+  const currentAnnotationPoint = nearestOfflineTimelinePoint(offlineTimeline, annotationTime);
+  const currentAnnotationBox = currentAnnotationPoint ? annotationBoxFromTimelinePoint(currentAnnotationPoint) : null;
+  const annotationVideoWidth = videoRef.current?.videoWidth || 1280;
+  const annotationVideoHeight = videoRef.current?.videoHeight || 720;
+  const annotationDuration = Number.isFinite(videoRef.current?.duration)
+    ? videoRef.current?.duration ?? 0
+    : offlineTimeline[offlineTimeline.length - 1]?.time ?? 0;
+  const annotationFrameNumber = Math.max(0, Math.round(annotationTime * ANNOTATION_FRAME_RATE));
   const offlineProcessingActive = mediaMode === 'offline' && offlineAnalysisPhase === 'processing';
   const offlineProgressText = offlineProcessingActive ? `${offlineBatchProgress}%` : '';
   const trainingTargetInfo = trainingTargetInfoForVersion(trainingTargetVersion);
@@ -3177,7 +3485,8 @@ export default function App() {
         offlineBatchProcessing ? 'offline-batch-processing' : '',
         uploadOnlyMode ? 'upload-only-processing' : '',
         recordingState === 'recording' && recordingIntent === 'offlineClip' ? 'plain-offline-recording' : '',
-        recordingState === 'recording' && recordingIntent === 'liveVisual' ? 'visual-recording' : ''
+        recordingState === 'recording' && recordingIntent === 'liveVisual' ? 'visual-recording' : '',
+        annotationEditorOpen ? 'annotation-editing' : ''
       ]
         .filter(Boolean)
         .join(' ')}
@@ -3332,6 +3641,25 @@ export default function App() {
                 <span>{recordedClip ? 'Recorded' : 'Record'}</span>
               </button>
             )}
+            <button
+              className={annotationEditorOpen ? 'tool-button primary offline-active' : 'tool-button primary'}
+              onClick={() => {
+                if (annotationEditorOpen) {
+                  setAnnotationEditorOpen(false);
+                  return;
+                }
+                if (mediaMode === 'offline' && offlineAnalysisPhase === 'complete' && offlineTimeline.length) {
+                  void enterAnnotationEditor();
+                  return;
+                }
+                setAnnotationWizardOpen(true);
+              }}
+              disabled={offlineBatchProcessing || recordingState === 'recording'}
+              aria-label="Open assisted annotation workflow"
+            >
+              <Sparkles size={17} />
+              <span>{annotationEditorOpen ? 'Close annotate' : 'Annotate assist'}</span>
+            </button>
             <button className="icon-button" onClick={() => setPaused((value) => !value)} aria-label={paused ? 'Resume tracking' : 'Pause tracking'}>
               {paused ? <Play size={18} /> : <Pause size={18} />}
             </button>
@@ -3427,6 +3755,12 @@ export default function App() {
               <div className="recording-actions">
                 {recordedClip.intent === 'offlineClip' ? (
                   <>
+                    {annotationAssistRequested && (
+                      <button type="button" className="tool-button primary annotation-selected-processor" onClick={() => processRecordedClip(annotationAssistVersion)}>
+                        <Sparkles size={17} />
+                        <span>Annotate with {offlineVersionLabel(annotationAssistVersion)}</span>
+                      </button>
+                    )}
                     <button type="button" className="tool-button primary" onClick={() => processRecordedClip('v1')}>
                       <Upload size={17} />
                       <span>Process V1</span>
@@ -3571,6 +3905,53 @@ export default function App() {
           </div>
         )}
 
+        {annotationWizardOpen && !trainerOpen && (
+          <div className="offline-source-backdrop" role="dialog" aria-modal="true" aria-label="Annotate assist setup">
+            <div className="offline-source-card annotation-wizard-card">
+              <button type="button" className="offline-source-close" onClick={() => setAnnotationWizardOpen(false)} aria-label="Close annotate assist">
+                <X size={18} />
+              </button>
+              <p className="eyebrow">Annotate assist</p>
+              <h2>Process, review, correct</h2>
+              <p>Choose a saved video or record a fresh clip, then select the matching offline processor. The editor opens after the full video is processed.</p>
+              <div className="annotation-wizard-section">
+                <strong>1. Video source</strong>
+                <div className="annotation-source-toggle">
+                  <button type="button" className={annotationAssistSource === 'offline' ? 'active' : ''} onClick={() => setAnnotationAssistSource('offline')}>
+                    <Upload size={18} /> Saved video
+                  </button>
+                  <button type="button" className={annotationAssistSource === 'record' ? 'active' : ''} onClick={() => setAnnotationAssistSource('record')}>
+                    <Video size={18} /> Live recording
+                  </button>
+                </div>
+              </div>
+              <div className="annotation-wizard-section">
+                <strong>2. Processing version</strong>
+                <label className="annotation-version-field">
+                  <span>{annotationAssistSource === 'record' ? 'Offline engine used after recording' : 'Offline engine used after upload'}</span>
+                  <select value={annotationAssistVersion} onChange={(event) => setAnnotationAssistVersion(event.target.value as OfflineReviewVersion)}>
+                    <option value="yoloMax">Offline YOLO Max · recommended for RGB</option>
+                    <option value="max">Offline Max · RGB-D when available</option>
+                    <option value="v3">Offline V3 · RealSense</option>
+                    <option value="v2">Offline V2 · RF-DETR</option>
+                    <option value="v1">Offline V1 · browser heuristic</option>
+                  </select>
+                </label>
+              </div>
+              <div className="annotation-wizard-summary">
+                <CheckCircle size={18} />
+                <span>
+                  {annotationAssistSource === 'record' ? 'Record 15 seconds' : 'Upload video'} → {offlineVersionLabel(annotationAssistVersion)} → frame editor → corrected export
+                </span>
+              </div>
+              <button type="button" className="annotation-start-button" onClick={startAnnotationAssist}>
+                {annotationAssistSource === 'record' ? <Video size={18} /> : <Upload size={18} />}
+                <span>{annotationAssistSource === 'record' ? 'Start recording' : 'Choose video'}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {offlineProcessingActive && !trainerOpen && (
           <div className="offline-processing-stage" role="status" aria-live="polite" aria-label="Offline video processing">
             <div className="offline-processing-card">
@@ -3583,6 +3964,186 @@ export default function App() {
                 </div>
                 <strong>Processing video</strong>
                 <span>{offlineProcessingMessage}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {annotationEditorOpen && mediaMode === 'offline' && currentAnnotationPoint && !trainerOpen && (
+          <div className="annotation-studio" aria-label="Frame annotation editor">
+            <svg
+              className="annotation-box-layer"
+              viewBox={`0 0 ${annotationVideoWidth} ${annotationVideoHeight}`}
+              preserveAspectRatio="xMidYMid slice"
+              onPointerDown={handleAnnotationPointerDown}
+              onPointerMove={handleAnnotationPointerMove}
+              onPointerUp={stopAnnotationPointer}
+              onPointerCancel={stopAnnotationPointer}
+            >
+              <g transform={mirrored ? `translate(${annotationVideoWidth} 0) scale(-1 1)` : undefined}>
+                {currentAnnotationBox && (
+                  <>
+                    <rect
+                      className="annotation-box"
+                      data-annotation-action="move"
+                      x={currentAnnotationBox.x}
+                      y={currentAnnotationBox.y}
+                      width={currentAnnotationBox.width}
+                      height={currentAnnotationBox.height}
+                      rx={4}
+                    />
+                    {([
+                      ['nw', currentAnnotationBox.x, currentAnnotationBox.y],
+                      ['ne', currentAnnotationBox.x + currentAnnotationBox.width, currentAnnotationBox.y],
+                      ['sw', currentAnnotationBox.x, currentAnnotationBox.y + currentAnnotationBox.height],
+                      ['se', currentAnnotationBox.x + currentAnnotationBox.width, currentAnnotationBox.y + currentAnnotationBox.height]
+                    ] as const).map(([handle, x, y]) => (
+                      <circle
+                        key={handle}
+                        className="annotation-resize-handle"
+                        data-annotation-action={handle}
+                        cx={x}
+                        cy={y}
+                        r={Math.max(7, annotationVideoWidth / 150)}
+                      />
+                    ))}
+                    <g className="annotation-box-label" transform={`translate(${currentAnnotationBox.x} ${Math.max(22, currentAnnotationBox.y)})`}>
+                      <rect x="0" y="-22" width={Math.max(120, (currentAnnotationPoint.object || 'gripped object').length * 9 + 58)} height="22" />
+                      <text x="7" y="-7">{currentAnnotationPoint.object || 'gripped object'} · {currentAnnotationPoint.grip}%</text>
+                    </g>
+                  </>
+                )}
+              </g>
+            </svg>
+
+            <aside className="annotation-inspector">
+              <div className="annotation-inspector-head">
+                <div>
+                  <p className="eyebrow">Annotate assist</p>
+                  <h2>Frame {annotationFrameNumber}</h2>
+                </div>
+                <button type="button" className="icon-button" onClick={() => setAnnotationEditorOpen(false)} aria-label="Close annotation editor">
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="annotation-mode-pill">
+                <Sparkles size={15} /> {offlineVersionLabel(offlineReviewVersion)} · {annotationTime.toFixed(3)}s
+              </div>
+              <p className="annotation-help">
+                Drag the box to move it, drag a corner to resize, or drag anywhere outside it to draw a replacement.
+              </p>
+              <label className="annotation-label-field">
+                <span>Object label</span>
+                <input
+                  value={currentAnnotationPoint.object || ''}
+                  placeholder="gripped object"
+                  onChange={(event) => updateAnnotationAtTime({ object: event.target.value })}
+                />
+              </label>
+              <AnnotationRange
+                label="Grip value"
+                value={currentAnnotationPoint.grip}
+                max={100}
+                suffix="%"
+                onChange={(value) => updateAnnotationAtTime({ grip: value, weak: value < 44 })}
+              />
+              <AnnotationRange
+                label="Confidence"
+                value={Math.round(currentAnnotationPoint.confidence * 100)}
+                max={100}
+                suffix="%"
+                onChange={(value) => updateAnnotationAtTime({ confidence: value / 100 })}
+              />
+              <AnnotationRange
+                label="Contact"
+                value={Math.round(currentAnnotationPoint.contact * 100)}
+                max={100}
+                suffix="%"
+                onChange={(value) => updateAnnotationAtTime({ contact: value / 100 })}
+              />
+              <AnnotationRange
+                label="Slip risk"
+                value={Math.round(currentAnnotationPoint.slip * 100)}
+                max={100}
+                suffix="%"
+                danger
+                onChange={(value) => updateAnnotationAtTime({ slip: value / 100 })}
+              />
+              <div className="annotation-box-values">
+                <span>X <strong>{currentAnnotationBox ? Math.round(currentAnnotationBox.x) : '—'}</strong></span>
+                <span>Y <strong>{currentAnnotationBox ? Math.round(currentAnnotationBox.y) : '—'}</strong></span>
+                <span>W <strong>{currentAnnotationBox ? Math.round(currentAnnotationBox.width) : '—'}</strong></span>
+                <span>H <strong>{currentAnnotationBox ? Math.round(currentAnnotationBox.height) : '—'}</strong></span>
+              </div>
+              <div className="annotation-inspector-actions">
+                <button type="button" onClick={() => setAnnotationBox(null)} disabled={!currentAnnotationBox}>
+                  <X size={16} /> Remove box
+                </button>
+                <button type="button" className="primary" onClick={saveAnnotationCorrections}>
+                  <Save size={16} /> {annotationDirty ? 'Save changes' : 'Saved'}
+                </button>
+                <button type="button" onClick={exportCorrectedAnnotations}>
+                  <Download size={16} /> Export dataset
+                </button>
+              </div>
+              {annotationSavedAt && <span className="annotation-save-status">Saved {new Date(annotationSavedAt).toLocaleTimeString()}</span>}
+            </aside>
+
+            <div className="annotation-transport">
+              <div className="annotation-frame-controls">
+                <button type="button" onClick={() => seekAnnotationTime(annotationTime - 1 / ANNOTATION_FRAME_RATE)} aria-label="Previous frame">
+                  <ChevronLeft size={18} /> Previous frame
+                </button>
+                <button
+                  type="button"
+                  className="annotation-play-toggle"
+                  onClick={() => {
+                    const video = videoRef.current;
+                    if (!video) return;
+                    if (video.paused) {
+                      setPaused(false);
+                      void video.play();
+                    } else {
+                      video.pause();
+                      setPaused(true);
+                      setAnnotationTime(video.currentTime);
+                    }
+                  }}
+                >
+                  {paused ? <Play size={18} /> : <Pause size={18} />}
+                  {paused ? 'Play' : 'Pause'}
+                </button>
+                <button type="button" onClick={() => seekAnnotationTime(annotationTime + 1 / ANNOTATION_FRAME_RATE)} aria-label="Next frame">
+                  Next frame <ChevronRight size={18} />
+                </button>
+              </div>
+              <div
+                className="annotation-scrubber"
+                onPointerDown={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  seekAnnotationTime(((event.clientX - rect.left) / rect.width) * annotationDuration);
+                }}
+              >
+                <span className="annotation-scrubber-progress" style={{ width: `${annotationDuration ? (annotationTime / annotationDuration) * 100 : 0}%` }} />
+                {offlineTimeline.map((point, index) => (
+                  <button
+                    type="button"
+                    key={`${point.time}-${index}`}
+                    className={point.slip > 0.45 ? 'slip' : point.weak ? 'weak' : 'ok'}
+                    style={{ left: `${annotationDuration ? (point.time / annotationDuration) * 100 : 0}%` }}
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      seekAnnotationTime(point.time);
+                    }}
+                    aria-label={`Go to ${point.time.toFixed(2)} seconds`}
+                  />
+                ))}
+                <i style={{ left: `${annotationDuration ? (annotationTime / annotationDuration) * 100 : 0}%` }} />
+              </div>
+              <div className="annotation-transport-meta">
+                <span>Frame {annotationFrameNumber}</span>
+                <strong>{annotationTime.toFixed(3)} / {annotationDuration.toFixed(3)} sec</strong>
+                <span>{offlineTimeline.length} annotated frames · 30 fps stepping</span>
               </div>
             </div>
           </div>
@@ -4741,6 +5302,73 @@ function drawExportVideoFrame(
 function nearestOfflineTimelinePoint(points: OfflineTimelinePoint[], time: number) {
   if (!points.length) return null;
   return points.reduce((best, point) => (Math.abs(point.time - time) < Math.abs(best.time - time) ? point : best), points[0]);
+}
+
+function nearestOfflineTimelineIndex(points: OfflineTimelinePoint[], time: number) {
+  if (!points.length) return -1;
+  let bestIndex = 0;
+  let bestDistance = Math.abs(points[0].time - time);
+  for (let index = 1; index < points.length; index += 1) {
+    const nextDistance = Math.abs(points[index].time - time);
+    if (nextDistance < bestDistance) {
+      bestDistance = nextDistance;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+function annotationBoxFromTimelinePoint(point: OfflineTimelinePoint): AnnotationBox | null {
+  if (
+    point.objectX === null ||
+    point.objectY === null ||
+    point.objectRadiusX === null ||
+    point.objectRadiusY === null ||
+    point.objectRadiusX === undefined ||
+    point.objectRadiusY === undefined
+  ) return null;
+  return {
+    x: point.objectX - point.objectRadiusX,
+    y: point.objectY - point.objectRadiusY,
+    width: point.objectRadiusX * 2,
+    height: point.objectRadiusY * 2
+  };
+}
+
+function annotationPointerToVideo(
+  event: React.PointerEvent<SVGSVGElement>,
+  video: HTMLVideoElement,
+  mirrored: boolean
+): Point {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const scale = Math.max(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const renderedWidth = video.videoWidth * scale;
+  const renderedHeight = video.videoHeight * scale;
+  const offsetX = (rect.width - renderedWidth) / 2;
+  const offsetY = (rect.height - renderedHeight) / 2;
+  const rawX = clampNumber((event.clientX - rect.left - offsetX) / scale, 0, video.videoWidth);
+  const rawY = clampNumber((event.clientY - rect.top - offsetY) / scale, 0, video.videoHeight);
+  return { x: mirrored ? video.videoWidth - rawX : rawX, y: rawY };
+}
+
+function normalizeAnnotationBox(a: Point, b: Point): AnnotationBox {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.max(2, Math.abs(b.x - a.x)),
+    height: Math.max(2, Math.abs(b.y - a.y))
+  };
+}
+
+function clampAnnotationBox(box: AnnotationBox, frameWidth: number, frameHeight: number): AnnotationBox {
+  const width = clampNumber(box.width, 4, Math.max(4, frameWidth));
+  const height = clampNumber(box.height, 4, Math.max(4, frameHeight));
+  return {
+    x: clampNumber(box.x, 0, Math.max(0, frameWidth - width)),
+    y: clampNumber(box.y, 0, Math.max(0, frameHeight - height)),
+    width,
+    height
+  };
 }
 
 function analysisFromOfflineTimelinePoint(base: GripAnalysis, point: OfflineTimelinePoint): GripAnalysis {
@@ -6364,6 +6992,29 @@ function waitForVideoReady(video: HTMLVideoElement) {
     video.addEventListener('canplay', handleReady, { once: true });
     video.addEventListener('error', handleError, { once: true });
   });
+}
+
+function AnnotationRange({
+  label,
+  value,
+  max,
+  suffix,
+  danger = false,
+  onChange
+}: {
+  label: string;
+  value: number;
+  max: number;
+  suffix: string;
+  danger?: boolean;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className={danger ? 'annotation-range danger' : 'annotation-range'}>
+      <span>{label} <strong>{value}{suffix}</strong></span>
+      <input type="range" min="0" max={max} step="1" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  );
 }
 
 function GlassMetric({ label, value, danger = false }: { label: string; value: number; danger?: boolean }) {

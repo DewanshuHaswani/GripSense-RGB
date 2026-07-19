@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -219,6 +220,14 @@ _REALSENSE_RS: Any | None = None
 _ROOT_DIR = Path(__file__).resolve().parents[1]
 _PROCESS_DIR = _ROOT_DIR / "process"
 _YOLO_MAX_JOBS: dict[str, dict[str, Path]] = {}
+_RFDETR_INFERENCE_LOCK = threading.Lock()
+_YOLO_INFERENCE_LOCK = threading.Lock()
+_MODEL_LOAD_LOCK = threading.Lock()
+_SERVER_STARTED_AT = time.time()
+_INFERENCE_HEALTH: dict[str, dict[str, Any]] = {
+    "rfdetr": {"requests": 0, "successes": 0, "failures": 0, "lastLatencyMs": None, "lastError": None},
+    "yolo": {"requests": 0, "successes": 0, "failures": 0, "lastLatencyMs": None, "lastError": None},
+}
 
 if _RFDETR_DEVICE == "cpu":
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -232,6 +241,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
+    """Cheap health probe that remains responsive while CPU inference is running."""
+
+    return {
+        "status": "ok",
+        "uptimeSeconds": round(time.time() - _SERVER_STARTED_AT, 1),
+        "models": {
+            "rfdetr": {"loaded": _RFDETR_MODEL is not None, **_INFERENCE_HEALTH["rfdetr"]},
+            "yolo": {"loaded": _YOLO_MODEL is not None, **_INFERENCE_HEALTH["yolo"]},
+        },
+    }
 
 
 @app.post("/v3/analyze-frame", response_model=AnalyzeFrameResponse)
@@ -329,18 +352,13 @@ async def analyze_rfdetr_frame(
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="handLandmarks must be JSON when provided")
 
-    model, classes = get_rfdetr_model()
-    start = time.perf_counter()
     image_bytes = await frame.read()
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
     try:
-        raw_detections = model.predict(image, threshold=float(threshold))
+        detections, latency_ms = await run_in_threadpool(run_rfdetr_prediction, image, float(threshold))
     except Exception as exc:  # pragma: no cover - depends on local model install/runtime.
         raise HTTPException(status_code=500, detail=f"RF-DETR inference failed: {exc}") from exc
-
-    latency_ms = (time.perf_counter() - start) * 1000
-    detections = normalize_rfdetr_detections(raw_detections, classes, latency_ms)
     return RfdetrAnalyzeResponse(
         detections=detections,
         latencyMs=latency_ms,
@@ -372,19 +390,13 @@ async def analyze_yolo_frame(
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="handLandmarks must be JSON when provided")
 
-    model = get_yolo_model()
-    start = time.perf_counter()
     image_bytes = await frame.read()
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
     try:
-        results = model.predict(image, conf=float(threshold), device=_YOLO_DEVICE, verbose=False)
+        detections, latency_ms = await run_in_threadpool(run_yolo_prediction, image, float(threshold))
     except Exception as exc:  # pragma: no cover - depends on local model install/runtime.
         raise HTTPException(status_code=500, detail=f"YOLO inference failed: {exc}") from exc
-
-    latency_ms = (time.perf_counter() - start) * 1000
-    first_result = results[0] if results else None
-    detections = normalize_yolo_detections(first_result, latency_ms)
     return RfdetrAnalyzeResponse(
         detections=detections,
         latencyMs=latency_ms,
@@ -665,19 +677,22 @@ def get_rfdetr_model() -> tuple[Any, dict[int, str] | list[str] | None]:
     global _RFDETR_MODEL, _RFDETR_CLASSES
     if _RFDETR_MODEL is not None:
         return _RFDETR_MODEL, _RFDETR_CLASSES
-    try:
-        from rfdetr import RFDETRSegNano
-        from rfdetr.assets.coco_classes import COCO_CLASSES
-    except Exception as exc:  # pragma: no cover - depends on optional local dependency.
-        raise HTTPException(
-            status_code=503,
-            detail="RF-DETR is not installed. Run `pip install -r local-inference/requirements.txt`.",
-        ) from exc
-    try:
-        _RFDETR_MODEL = RFDETRSegNano()
-    except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
-        raise HTTPException(status_code=503, detail=f"RF-DETR model could not load: {exc}") from exc
-    _RFDETR_CLASSES = COCO_CLASSES
+    with _MODEL_LOAD_LOCK:
+        if _RFDETR_MODEL is not None:
+            return _RFDETR_MODEL, _RFDETR_CLASSES
+        try:
+            from rfdetr import RFDETRSegNano
+            from rfdetr.assets.coco_classes import COCO_CLASSES
+        except Exception as exc:  # pragma: no cover - depends on optional local dependency.
+            raise HTTPException(
+                status_code=503,
+                detail="RF-DETR is not installed. Run `pip install -r local-inference/requirements.txt`.",
+            ) from exc
+        try:
+            _RFDETR_MODEL = RFDETRSegNano()
+        except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
+            raise HTTPException(status_code=503, detail=f"RF-DETR model could not load: {exc}") from exc
+        _RFDETR_CLASSES = COCO_CLASSES
     return _RFDETR_MODEL, _RFDETR_CLASSES
 
 
@@ -685,18 +700,58 @@ def get_yolo_model() -> Any:
     global _YOLO_MODEL
     if _YOLO_MODEL is not None:
         return _YOLO_MODEL
-    try:
-        from ultralytics import YOLO
-    except Exception as exc:  # pragma: no cover - depends on optional local dependency.
-        raise HTTPException(
-            status_code=503,
-            detail="YOLO is not installed. Run `pip install -r local-inference/requirements.txt`.",
-        ) from exc
-    try:
-        _YOLO_MODEL = YOLO(_YOLO_MODEL_NAME)
-    except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
-        raise HTTPException(status_code=503, detail=f"YOLO model could not load: {exc}") from exc
+    with _MODEL_LOAD_LOCK:
+        if _YOLO_MODEL is not None:
+            return _YOLO_MODEL
+        try:
+            from ultralytics import YOLO
+        except Exception as exc:  # pragma: no cover - depends on optional local dependency.
+            raise HTTPException(
+                status_code=503,
+                detail="YOLO is not installed. Run `pip install -r local-inference/requirements.txt`.",
+            ) from exc
+        try:
+            _YOLO_MODEL = YOLO(_YOLO_MODEL_NAME)
+        except Exception as exc:  # pragma: no cover - model weight downloads are environment-dependent.
+            raise HTTPException(status_code=503, detail=f"YOLO model could not load: {exc}") from exc
     return _YOLO_MODEL
+
+
+def run_rfdetr_prediction(image: Image.Image, threshold: float) -> tuple[list[RfdetrDetectionResponse], float]:
+    """Serialize heavyweight CPU inference without blocking FastAPI's event loop."""
+
+    health = _INFERENCE_HEALTH["rfdetr"]
+    health["requests"] += 1
+    start = time.perf_counter()
+    try:
+        with _RFDETR_INFERENCE_LOCK:
+            model, classes = get_rfdetr_model()
+            raw_detections = model.predict(image, threshold=threshold)
+        latency_ms = (time.perf_counter() - start) * 1000
+        health.update(successes=health["successes"] + 1, lastLatencyMs=round(latency_ms, 1), lastError=None)
+        return normalize_rfdetr_detections(raw_detections, classes, latency_ms), latency_ms
+    except Exception as exc:
+        health.update(failures=health["failures"] + 1, lastError=str(exc))
+        raise
+
+
+def run_yolo_prediction(image: Image.Image, threshold: float) -> tuple[list[RfdetrDetectionResponse], float]:
+    """Keep one YOLO call in flight; Ultralytics models are not thread-safe on all Windows builds."""
+
+    health = _INFERENCE_HEALTH["yolo"]
+    health["requests"] += 1
+    start = time.perf_counter()
+    try:
+        with _YOLO_INFERENCE_LOCK:
+            model = get_yolo_model()
+            results = model.predict(image, conf=threshold, device=_YOLO_DEVICE, verbose=False)
+        latency_ms = (time.perf_counter() - start) * 1000
+        health.update(successes=health["successes"] + 1, lastLatencyMs=round(latency_ms, 1), lastError=None)
+        first_result = results[0] if results else None
+        return normalize_yolo_detections(first_result, latency_ms), latency_ms
+    except Exception as exc:
+        health.update(failures=health["failures"] + 1, lastError=str(exc))
+        raise
 
 
 def normalize_rfdetr_detections(raw_detections: Any, classes: dict[int, str] | list[str] | None, latency_ms: float) -> list[RfdetrDetectionResponse]:
