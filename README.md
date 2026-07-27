@@ -77,7 +77,21 @@ Quick health checks:
 ```bash
 curl -I http://127.0.0.1:5173/
 curl -I http://127.0.0.1:7867/docs
+curl http://127.0.0.1:7867/health
 ```
+
+### Annotate Assist
+
+Use **Annotate assist** in the top toolbar to create a correctable annotation set from either a saved video or a new 15-second camera recording.
+
+1. Choose **Saved video** or **Live recording**.
+2. Choose the offline processing version. Offline YOLO Max is the default for RGB video; Offline Max/V3 can use RealSense depth when available.
+3. Wait for full-video processing to finish. The frame editor opens automatically.
+4. Use **Previous frame** and **Next frame** for 30 fps stepping, or click the timeline to seek.
+5. Draw a replacement box with the mouse, drag the box to move it, and drag its corner handles to resize it. Grip, confidence, contact, slip risk, and the object label can be edited directly in the inspector.
+6. Use **Save changes** to persist corrections in this browser. **Export dataset** creates a COCO-style JSON file with the corrected timeline; the existing JSON, CSV, MP4, and WebM exports use the corrected values after an edit.
+
+On Windows, the inference server now runs one model worker and serializes YOLO/RF-DETR CPU calls. The `/health` route remains responsive while inference is busy. The browser also holds the last stable result during a slow response instead of toggling immediately to unavailable.
 
 If V8 shows **server unavailable**, it means the browser cannot get a usable RF-DETR response from `http://127.0.0.1:7867/api/rfdetr/analyze`. Check that the Python server is running, dependencies installed correctly, port `7867` is not blocked, and the server terminal did not show an RF-DETR model load error. The first RF-DETR request can be slow because model weights may load or download.
 

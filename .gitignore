@@ -1,5 +1,19 @@
 node_modules/
 dist/
+.pnpm-store/
+
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Generated inference artifacts and local model downloads.
+process/
+outputs/
+local-inference/*.pt
+local-inference/*.pth
+local-inference/*.onnx
 
 *.log
 .DS_Store
